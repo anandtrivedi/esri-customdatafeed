@@ -1,0 +1,40 @@
+{
+  "tables": [
+    {
+      "table_name": "geospatial_demo.locations.restaurants",
+      "geometry_column": "geometry",
+      "id_field": "id",
+      "display_name": "Restaurants",
+      "description": "Restaurant locations with point geometries",
+      "layer_id": 0,
+      "geometry_type": "esriGeometryPoint",
+      "spatial_reference_wkid": 4326,
+      "default_visible": true,
+      "max_record_count": 1000
+    },
+    {
+      "table_name": "geospatial_demo.locations.service_areas",
+      "geometry_column": "geometry",
+      "id_field": "id",
+      "display_name": "Service Areas",
+      "description": "Delivery service areas with polygon geometries",
+      "layer_id": 1,
+      "geometry_type": "esriGeometryPolygon",
+      "spatial_reference_wkid": 4326,
+      "default_visible": true,
+      "max_record_count": 1000
+    },
+    {
+      "table_name": "geospatial_demo.locations.delivery_routes",
+      "geometry_column": "geometry",
+      "id_field": "id",
+      "display_name": "Delivery Routes",
+      "description": "Delivery routes with linestring geometries",
+      "layer_id": 2,
+      "geometry_type": "esriGeometryPolyline",
+      "spatial_reference_wkid": 4326,
+      "default_visible": true,
+      "max_record_count": 1000
+    }
+  ]
+}

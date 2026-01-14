@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  datafeed:
+    build: .
+    container_name: arcgis-databricks-feed
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABRICKS_SERVER_HOSTNAME=${DATABRICKS_SERVER_HOSTNAME}
+      - DATABRICKS_HTTP_PATH=${DATABRICKS_HTTP_PATH}
+      - DATABRICKS_ACCESS_TOKEN=${DATABRICKS_ACCESS_TOKEN}
+      - FEED_NAME=${FEED_NAME:-Databricks Geospatial Feed}
+      - FEED_DESCRIPTION=${FEED_DESCRIPTION:-Custom data feed leveraging Databricks geospatial functions}
+      - FEED_VERSION=${FEED_VERSION:-1.0.0}
+      - FLASK_PORT=${FLASK_PORT:-5000}
+      - FLASK_DEBUG=${FLASK_DEBUG:-False}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - datafeed-network
+
+networks:
+  datafeed-network:
+    driver: bridge
