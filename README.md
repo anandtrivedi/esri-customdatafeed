@@ -1,405 +1,253 @@
-# ArcGIS Custom Data Feed for Databricks
+# ArcGIS Custom Data Feed Provider for Databricks
 
-Connect your Databricks tables directly to ArcGIS Pro, Portal, and JavaScript API using native Databricks ST_* geospatial functions.
+Official ArcGIS Enterprise SDK Custom Data Feed implementation for connecting Databricks tables with geospatial data to ArcGIS Server.
 
-## ⚠️ Two Implementation Approaches
+## What This Is
 
-This repository contains **TWO different implementations** for connecting Databricks to ArcGIS:
+A **Node.js Custom Data Provider** that integrates Databricks with ArcGIS Server:
 
-### 1. **Node.js Custom Data Provider** (Recommended - Official ArcGIS Way) 📁 `nodejs-provider/`
-
-A proper **ArcGIS Enterprise SDK Custom Data Feed Provider** that:
-- ✅ **Registers with ArcGIS Server** via `.cdpk` package
-- ✅ **Managed by ArcGIS Server** - creates Feature Services
-- ✅ **Clients access through ArcGIS Server** URL
-- ✅ Follows official ArcGIS Enterprise SDK pattern
-- ✅ Uses ArcGIS authentication and management
-
-**👉 See [nodejs-provider/README.md](nodejs-provider/README.md) for full documentation**
-
-### 2. **Flask REST API** (Standalone Approach) 📁 `src/`
-
-A Python Flask application that:
-- ⚡ Standalone REST service (not integrated with ArcGIS Server)
-- ⚡ Clients access directly via URL
-- ⚡ Simpler deployment (AWS, Docker, etc.)
-- ⚡ Good for testing/development
-- ⚠️ Not a "true" ArcGIS Custom Data Feed
-
-**This README documents the Flask approach. For the official ArcGIS way, see the Node.js provider.**
-
----
-
-## Quick Comparison
-
-| Feature | Node.js Provider | Flask API |
-|---------|------------------|-----------|
-| **Integration** | Registered with ArcGIS Server | Standalone service |
-| **Client Access** | Via ArcGIS Server URL | Direct URL access |
-| **Management** | ArcGIS Server Manager | Separate deployment |
-| **Authentication** | ArcGIS integrated | Custom |
-| **Best For** | Production ArcGIS Enterprise | Testing, standalone apps |
-
----
-
-## What This Does (Flask Approach)
-
-Exposes Databricks tables with geospatial data as ArcGIS-compatible REST endpoints. Use native Databricks ST_* functions, no data export needed.
-
-## Quick Start
-
-### 1. Deploy to AWS
-
-See **[AWS_DEPLOY.md](AWS_DEPLOY.md)** for deployment options:
-- AWS App Runner (easiest)
-- ECS Fargate (production)
-- EC2 (simple)
-
-### 2. Configure Your Tables
-
-Edit `config/tables.json`:
-
-```json
-{
-  "tables": [
-    {
-      "table_name": "retail.locations.stores",
-      "geometry_column": "store_location",
-      "geometry_type": "esriGeometryPoint"
-    }
-  ]
-}
-```
-
-### 3. Use in ArcGIS
-
-**Your endpoint:**
-```
-https://your-aws-url.com/query?table_name=retail.locations.stores
-```
-
-**In ArcGIS Pro:**
-- Add Data → Data from Path → Paste URL → Done!
-
-**See [ARCGIS_TESTING.md](ARCGIS_TESTING.md) for complete guide**
-
----
-
-## Features
-
-- ✅ All geometry types (Point, Polygon, LineString, Multi*)
-- ✅ Multiple tables with different geometry columns
-- ✅ Native Databricks ST_* functions
-- ✅ Esri JSON and GeoJSON output
-- ✅ Spatial queries (intersects, contains, within)
-- ✅ Docker deployment ready
-- ✅ 34 unit tests
-
----
-
-## Supported Databricks Functions
-
-- `ST_Point`, `ST_GeomFromText`, `ST_GeomFromWKT`
-- `ST_AsGeoJSON`, `ST_AsText`
-- `ST_Intersects`, `ST_Contains`, `ST_Within`
-- `ST_Distance`, `ST_Buffer`
-- All standard geospatial operations
-
----
-
-## Requirements
-
-**Databricks:**
-- SQL Warehouse with geospatial functions enabled
-- Tables with geometry columns
-- Personal access token
-
-**AWS** (for deployment):
-- AWS account
-- ECR for Docker images
-- App Runner / ECS / EC2
-
-**ArcGIS** (for testing):
-- ArcGIS Pro 2.x+, or
-- ArcGIS Portal / Online, or
-- ArcGIS JavaScript API 4.x+
-
----
-
-## Installation
-
-### Local Testing (Demo Mode)
-
-```bash
-# Clone
-git clone https://github.com/anandtrivedi/esri-customdatafeed.git
-cd esri-customdatafeed
-
-# Install
-python3 -m venv venv
-source venv/bin/activate
-pip install flask python-dotenv
-
-# Run demo server
-cd src
-python demo_server.py
-```
-
-Test at: http://localhost:5000
-
-### AWS Deployment
-
-See **[AWS_DEPLOY.md](AWS_DEPLOY.md)**
-
----
-
-## Configuration
-
-### Environment Variables
-
-```bash
-DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
-DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-DATABRICKS_ACCESS_TOKEN=your-token
-```
-
-### Table Configuration
-
-`config/tables.json`:
-
-```json
-{
-  "tables": [
-    {
-      "table_name": "catalog.schema.table",
-      "geometry_column": "geometry_column_name",
-      "id_field": "id",
-      "display_name": "Display Name",
-      "geometry_type": "esriGeometryPoint|Polygon|Polyline",
-      "layer_id": 0
-    }
-  ]
-}
-```
-
----
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Service information |
-| `GET /health` | Health check |
-| `GET /info` | Service metadata |
-| `GET /layers` | List available layers |
-| `GET /query` | Query features |
-| `POST /query` | Query with spatial filter |
-| `GET /count` | Count features |
-
-### Query Parameters
-
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `table_name` | Databricks table (required) | `catalog.schema.table` |
-| `geometry_column` | Geometry column name | `location` |
-| `f` | Output format | `json`, `geojson`, `pjson` |
-| `resultRecordCount` | Max records | `100` |
-| `where` | SQL WHERE clause | `city='SF'` |
-| `returnGeometry` | Include geometry | `true` |
-| `outFields` | Fields to return | `*` or `id,name` |
-
----
-
-## Example Usage
-
-### Query Points
-```bash
-curl "https://your-url.com/query?table_name=stores&f=json"
-```
-
-### Query Polygons
-```bash
-curl "https://your-url.com/query?table_name=zones&f=geojson"
-```
-
-### Spatial Filter
-```bash
-curl -X POST https://your-url.com/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "table_name": "stores",
-    "geometry": "POLYGON(...)",
-    "spatialRel": "esriSpatialRelIntersects"
-  }'
-```
-
-### In ArcGIS JavaScript API
-```javascript
-const layer = new FeatureLayer({
-  url: "https://your-url.com/query?table_name=stores"
-});
-map.add(layer);
-```
-
----
-
-## Databricks Table Setup
-
-Your tables need a geometry column:
-
-```sql
--- Option 1: Generated from lat/lon
-CREATE TABLE stores (
-  id BIGINT,
-  name STRING,
-  lat DOUBLE,
-  lon DOUBLE,
-  geometry GEOMETRY GENERATED ALWAYS AS (ST_Point(lon, lat))
-);
-
--- Option 2: From WKT
-CREATE TABLE zones (
-  id BIGINT,
-  name STRING,
-  wkt STRING,
-  geometry GEOMETRY GENERATED ALWAYS AS (ST_GeomFromText(wkt))
-);
-
--- Option 3: Direct insert
-INSERT INTO stores VALUES (1, 'Store A', ST_Point(-122.4, 37.7));
-```
-
----
-
-## Testing
-
-### Unit Tests (No Databricks needed)
-```bash
-python tests/run_all_tests.py
-```
-
-Expected: 34 tests pass
-
-### Demo Server (No Databricks needed)
-```bash
-python src/demo_server.py
-```
-
-Test at http://localhost:5000
-
-### With Databricks
-```bash
-# Configure .env with credentials
-python src/data_feed_provider.py
-```
-
----
-
-## Testing Status
-
-⚠️ **Important:** This software has been tested:
-
-- ✅ **Core functionality:** 34 unit tests passing
-- ✅ **Format validation:** GeoJSON verified at geojson.io
-- ✅ **API endpoints:** All working locally
-- ⚠️ **ArcGIS integration:** Not yet tested with actual ArcGIS software
-
-**Recommendation:** Test in your ArcGIS environment before production use.
-
----
-
-## Troubleshooting
-
-### "Cannot connect to server"
-→ Check AWS deployment is running
-→ Test: `curl https://your-url.com/health`
-
-### "Table not found"
-→ Use fully qualified name: `catalog.schema.table`
-→ Check table exists in Databricks
-
-### "No features"
-→ Verify geometry column name
-→ Check data exists: `SELECT COUNT(*) FROM table`
-
-### "Invalid geometry"
-→ Test in Databricks: `SELECT ST_AsText(geometry) FROM table LIMIT 1`
-→ Ensure geometry is valid
-
----
+- ✅ Implements ArcGIS Enterprise SDK Custom Data Feed framework
+- ✅ Registers with ArcGIS Server via `.cdpk` package
+- ✅ Creates Feature Services managed by ArcGIS Server
+- ✅ Uses native Databricks ST_* geospatial functions
+- ✅ Supports all geometry types (Point, Polygon, LineString, Multi*)
+- ✅ No data export needed - queries Databricks directly
 
 ## Architecture
 
 ```
-ArcGIS Client → HTTP REST API → Databricks SQL → Delta Lake Tables
-                     ↓
-              Format Converter
-                     ↓
-              Esri JSON / GeoJSON
+ArcGIS Pro/Portal/JavaScript API Client
+                ↓
+    ArcGIS Server Feature Service
+    (https://your-server/arcgis/rest/services/MyData/FeatureServer)
+                ↓
+    Custom Data Provider (Node.js - this application)
+                ↓
+    Databricks SQL Warehouse (with ST_* functions)
+                ↓
+           Delta Lake Tables
 ```
 
----
+## How It Works
 
-## Files
+1. **You register this provider with ArcGIS Server**
+2. **ArcGIS Server creates Feature Services** that use the provider
+3. **Clients access through ArcGIS Server** (not directly to the provider)
+4. **Provider queries Databricks** using ST_AsGeoJSON for geometry
+5. **Returns GeoJSON** with ArcGIS metadata to the server
+6. **ArcGIS Server serves** the data to clients
+
+## Quick Start
+
+See the **[nodejs-provider/README.md](nodejs-provider/README.md)** for complete documentation.
+
+### Prerequisites
+
+1. **ArcGIS Server 11.4+** installed
+2. **ArcGIS Enterprise SDK** installed
+3. **Node.js** (compatible version with your ArcGIS)
+4. **Databricks SQL Warehouse** with geospatial functions
+
+### Installation
+
+```bash
+cd nodejs-provider
+npm install
+```
+
+### Configuration
+
+Edit `nodejs-provider/src/databricks-config.json`:
+
+```json
+{
+  "databricks": {
+    "serverHostname": "your-workspace.cloud.databricks.com",
+    "httpPath": "/sql/1.0/warehouses/your-warehouse-id",
+    "accessToken": "dapi..."
+  }
+}
+```
+
+### Deploy to ArcGIS Server
+
+```bash
+# 1. Package the provider
+cdf export databricks-geospatial-provider
+
+# 2. Register with ArcGIS Server (via CLI or Admin UI)
+cdf register databricks-geospatial-provider \
+  https://your-server/arcgis/admin \
+  YOUR_TOKEN \
+  -s "MyDatabricksData" \
+  --service-parameters "tableName:catalog.schema.restaurants,geometryColumn:location,idField:id"
+```
+
+### Access in ArcGIS Pro
+
+1. **Add Data** → **Data from Path**
+2. Enter: `https://your-server/arcgis/rest/services/MyDatabricksData/FeatureServer`
+3. Layer appears on your map!
+
+## Features
+
+- ✅ All geometry types supported (Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon)
+- ✅ Native Databricks ST_* functions (ST_Point, ST_AsGeoJSON, ST_Intersects, etc.)
+- ✅ Service parameters for flexible configuration
+- ✅ Query filtering via WHERE clauses
+- ✅ Pagination support (resultOffset, resultRecordCount)
+- ✅ Automatic field type inference
+- ✅ GeoJSON with ArcGIS metadata
+
+## Databricks Table Requirements
+
+Tables must have:
+
+1. **Geometry column** (GEOMETRY type)
+2. **Unique ID field** (BIGINT recommended)
+
+### Example Table Setup
+
+```sql
+-- Point geometry from lat/lon
+CREATE TABLE catalog.schema.restaurants (
+  restaurant_id BIGINT,
+  name STRING,
+  category STRING,
+  latitude DOUBLE,
+  longitude DOUBLE,
+  location GEOMETRY GENERATED ALWAYS AS (ST_Point(longitude, latitude))
+);
+
+-- Polygon from WKT
+CREATE TABLE catalog.schema.zones (
+  zone_id BIGINT,
+  zone_name STRING,
+  boundary_wkt STRING,
+  boundary GEOMETRY GENERATED ALWAYS AS (ST_GeomFromText(boundary_wkt))
+);
+```
+
+## Service Parameters
+
+When creating a Feature Service in ArcGIS Server, configure:
+
+| Parameter | Required | Description | Example |
+|-----------|----------|-------------|---------|
+| `tableName` | Yes | Fully qualified table name | `catalog.schema.restaurants` |
+| `geometryColumn` | No | Geometry column name (default: `geometry`) | `location` |
+| `idField` | No | Unique ID field (default: `id`) | `restaurant_id` |
+
+## Supported Query Parameters
+
+The provider supports standard ArcGIS REST API query parameters:
+
+- `where` - SQL WHERE clause for filtering
+- `resultRecordCount` - Max records to return (default: 2000)
+- `resultOffset` - Offset for pagination
+- `outFields` - Fields to return
+- `returnGeometry` - Include geometry
+
+## Project Structure
 
 ```
 esri-customdatafeed/
-├── src/
-│   ├── data_feed_provider.py   # Main API server
-│   ├── databricks_connector.py # Databricks integration
-│   ├── format_converter.py     # Format conversions
-│   ├── table_config.py         # Table registry
-│   └── demo_server.py          # Demo mode (no Databricks)
-├── config/
-│   └── tables.json             # Table configuration
-├── tests/                       # Unit tests
-├── examples/                    # SQL examples
-├── AWS_DEPLOY.md               # AWS deployment guide
-├── ARCGIS_TESTING.md           # ArcGIS testing guide
-├── Dockerfile                   # Docker config
-└── docker-compose.yml          # Docker Compose
+├── nodejs-provider/
+│   ├── src/
+│   │   ├── index.js              # Provider registration
+│   │   ├── model.js              # Main getData() implementation
+│   │   └── databricks-config.json # Databricks connection config
+│   ├── package.json              # Node.js dependencies
+│   ├── cdconfig.json             # Provider configuration
+│   ├── test-local.js             # Local testing script
+│   └── README.md                 # Complete documentation
+├── docs/                         # Additional documentation
+├── IMPLEMENTATION_SUMMARY.md     # Technical overview
+└── README.md                     # This file
 ```
-
----
 
 ## Documentation
 
-- **[AWS_DEPLOY.md](AWS_DEPLOY.md)** - Deploy to AWS
-- **[ARCGIS_TESTING.md](ARCGIS_TESTING.md)** - Test in ArcGIS
-- **[docs/archive/](docs/archive/)** - Additional guides
+- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Complete deployment guide
+- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - Technical implementation details
+- **[ArcGIS Enterprise SDK Docs](https://developers.arcgis.com/enterprise-sdk/)** - Official SDK documentation
 
----
+## Testing
+
+### Local Testing (Without ArcGIS Server)
+
+```bash
+cd nodejs-provider
+node test-local.js
+```
+
+This tests the provider logic and Databricks connection without deploying to ArcGIS Server.
+
+### With ArcGIS Server
+
+1. Package and register the provider
+2. Create a Feature Service
+3. Test in ArcGIS Pro or via REST API
+
+## Troubleshooting
+
+### Provider Registration Fails
+- Check Node.js version matches ArcGIS requirements
+- Verify `.cdpk` file was created successfully
+
+### No Data Returned
+- Test Databricks connection manually
+- Verify table name is fully qualified
+- Check geometry column contains valid data:
+  ```sql
+  SELECT ST_AsText(location) FROM table LIMIT 1;
+  ```
+
+### Feature Service Fails to Start
+- Verify service parameters are correct
+- Check Databricks access token is valid
+- Review ArcGIS Server logs
+
+## Advanced Topics
+
+### Connection Pooling
+Implement connection pooling in the Model class for better performance with concurrent requests.
+
+### Custom Symbology
+Add `renderer` to the metadata in `buildMetadata()` method.
+
+### Label Configuration
+Add `labelingInfo` to the metadata for custom labels.
+
+### Environment Variables
+For production, use environment variables instead of config file:
+
+```javascript
+const connectOptions = {
+  host: process.env.DATABRICKS_HOSTNAME,
+  path: process.env.DATABRICKS_HTTP_PATH,
+  token: process.env.DATABRICKS_TOKEN
+};
+```
 
 ## Support
 
-- **GitHub Issues:** https://github.com/anandtrivedi/esri-customdatafeed/issues
-- **Databricks Docs:** https://docs.databricks.com/sql/language-manual/sql-ref-functions-builtin.html#geospatial-functions
-- **ArcGIS REST API:** https://developers.arcgis.com/rest/
-
----
+- **GitHub Issues**: https://github.com/anandtrivedi/esri-customdatafeed/issues
+- **ArcGIS Enterprise SDK**: https://developers.arcgis.com/enterprise-sdk/
+- **Databricks SQL Connector**: https://docs.databricks.com/dev-tools/node-sql.html
 
 ## License
 
-MIT License - see LICENSE file
-
----
+MIT License
 
 ## Contributing
 
 Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch
-3. Add tests
+3. Test your changes
 4. Submit a pull request
 
 ---
 
-## Quick Links
-
-- **GitHub:** https://github.com/anandtrivedi/esri-customdatafeed
-- **Deploy:** [AWS_DEPLOY.md](AWS_DEPLOY.md)
-- **Test:** [ARCGIS_TESTING.md](ARCGIS_TESTING.md)
-
----
-
-**Need help?** Open an issue on GitHub or check the docs in `docs/archive/`.
+**For PDF documentation:** If you need to share ArcGIS documentation, save pages as PDFs and place them in the `docs/` directory. PDFs can be read and analyzed.
