@@ -1,10 +1,50 @@
 # ArcGIS Custom Data Feed for Databricks
 
-Connect your Databricks tables directly to ArcGIS Pro, Portal, and JavaScript API.
+Connect your Databricks tables directly to ArcGIS Pro, Portal, and JavaScript API using native Databricks ST_* geospatial functions.
 
-## What This Does
+## ⚠️ Two Implementation Approaches
 
-Exposes Databricks tables with geospatial data as ArcGIS-compatible endpoints. Use native Databricks ST_* functions, no data export needed.
+This repository contains **TWO different implementations** for connecting Databricks to ArcGIS:
+
+### 1. **Node.js Custom Data Provider** (Recommended - Official ArcGIS Way) 📁 `nodejs-provider/`
+
+A proper **ArcGIS Enterprise SDK Custom Data Feed Provider** that:
+- ✅ **Registers with ArcGIS Server** via `.cdpk` package
+- ✅ **Managed by ArcGIS Server** - creates Feature Services
+- ✅ **Clients access through ArcGIS Server** URL
+- ✅ Follows official ArcGIS Enterprise SDK pattern
+- ✅ Uses ArcGIS authentication and management
+
+**👉 See [nodejs-provider/README.md](nodejs-provider/README.md) for full documentation**
+
+### 2. **Flask REST API** (Standalone Approach) 📁 `src/`
+
+A Python Flask application that:
+- ⚡ Standalone REST service (not integrated with ArcGIS Server)
+- ⚡ Clients access directly via URL
+- ⚡ Simpler deployment (AWS, Docker, etc.)
+- ⚡ Good for testing/development
+- ⚠️ Not a "true" ArcGIS Custom Data Feed
+
+**This README documents the Flask approach. For the official ArcGIS way, see the Node.js provider.**
+
+---
+
+## Quick Comparison
+
+| Feature | Node.js Provider | Flask API |
+|---------|------------------|-----------|
+| **Integration** | Registered with ArcGIS Server | Standalone service |
+| **Client Access** | Via ArcGIS Server URL | Direct URL access |
+| **Management** | ArcGIS Server Manager | Separate deployment |
+| **Authentication** | ArcGIS integrated | Custom |
+| **Best For** | Production ArcGIS Enterprise | Testing, standalone apps |
+
+---
+
+## What This Does (Flask Approach)
+
+Exposes Databricks tables with geospatial data as ArcGIS-compatible REST endpoints. Use native Databricks ST_* functions, no data export needed.
 
 ## Quick Start
 
