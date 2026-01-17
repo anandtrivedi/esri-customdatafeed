@@ -67,7 +67,7 @@ node test-server.js
 
 **1. Configure:**
 
-Copy the example config and edit with your credentials:
+Copy the example config and edit with your Databricks connection info:
 ```bash
 cd nodejs-provider/src
 cp databricks-config.json.example databricks-config.json
@@ -86,6 +86,8 @@ cp databricks-config.json.example databricks-config.json
 }
 ```
 
+**Important:** This config contains ONLY connection info. You do NOT need to list all your tables here. Table names, geometry columns, and ID fields are specified per Feature Service (see step 3).
+
 **2. Package and Deploy:**
 ```bash
 cd nodejs-provider
@@ -94,18 +96,41 @@ cdf export databricks-geospatial-provider
 cdf register databricks-geospatial-provider https://your-server/arcgis/admin YOUR_TOKEN
 ```
 
-**3. Create Feature Service:**
+**3. Create Feature Services (One Per Table):**
+
+Create a separate Feature Service for each Databricks table:
+
 ```bash
+# Service 1: Restaurants (geometry column: location)
 cdf create-service databricks-geospatial-provider \
   https://your-server/arcgis/admin YOUR_TOKEN \
-  -s "MyDataService" \
-  --service-parameters "tableName:catalog.schema.table_name,geometryColumn:location,idField:id"
+  -s "RestaurantsService" \
+  --service-parameters "tableName:catalog.schema.restaurants,geometryColumn:location,idField:restaurant_id"
+
+# Service 2: Vessels (geometry column: vessel_position)
+cdf create-service databricks-geospatial-provider \
+  https://your-server/arcgis/admin YOUR_TOKEN \
+  -s "VesselsService" \
+  --service-parameters "tableName:catalog.schema.vessels,geometryColumn:vessel_position,idField:mmsi"
+
+# Service 3: Zones (geometry column: boundary)
+cdf create-service databricks-geospatial-provider \
+  https://your-server/arcgis/admin YOUR_TOKEN \
+  -s "ZonesService" \
+  --service-parameters "tableName:catalog.schema.zones,geometryColumn:boundary,idField:zone_id"
 ```
 
+**Note:** Each table can have a different geometry column name. You specify the column name when creating the Feature Service.
+
 **4. Access:**
-- **ArcGIS Pro**: Add Data → Data from Path → `https://your-server/arcgis/rest/services/MyDataService/FeatureServer`
-- **REST API**: `https://your-server/arcgis/rest/services/MyDataService/FeatureServer/0/query?where=1=1&f=geojson`
-- **JavaScript API**: Use the Feature Service URL in your web map
+
+Each Feature Service has its own URL:
+
+- **Restaurants Service**: `https://your-server/arcgis/rest/services/RestaurantsService/FeatureServer`
+- **Vessels Service**: `https://your-server/arcgis/rest/services/VesselsService/FeatureServer`
+- **Zones Service**: `https://your-server/arcgis/rest/services/ZonesService/FeatureServer`
+
+Use in ArcGIS Pro, REST API, or JavaScript API like any other Feature Service.
 
 ---
 
@@ -205,9 +230,74 @@ OPTIMIZE catalog.schema.my_table_h3_hexagons ZORDER BY (cell_polygon);
 
 ---
 
+## Configuration Model
+
+### One Provider, Multiple Feature Services
+
+**Key Concept:** You register the provider ONCE, then create MULTIPLE Feature Services (one per table).
+
+```
+┌─────────────────────────────────────────┐
+│  databricks-config.json                 │
+│  (Connection info only)                 │
+│  - Workspace URL                        │
+│  - Warehouse HTTP path                  │
+│  - Access token                         │
+└─────────────────────────────────────────┘
+                    ↓
+        One provider registered
+                    ↓
+    ┌───────────────┴───────────────┬───────────────┐
+    ↓                               ↓               ↓
+Feature Service 1            Feature Service 2   Feature Service 3
+RestaurantsService           VesselsService      ZonesService
+- table: restaurants         - table: vessels    - table: zones
+- geom: location             - geom: vessel_pos  - geom: boundary
+- id: restaurant_id          - id: mmsi          - id: zone_id
+```
+
+### What Goes Where
+
+**In `databricks-config.json` (connection level):**
+- ✅ Databricks workspace URL
+- ✅ SQL warehouse HTTP path
+- ✅ Access token
+- ✅ Global settings (SRID, max record count)
+- ❌ **NOT** table names
+- ❌ **NOT** geometry column names
+- ❌ **NOT** ID field names
+
+**Per Feature Service (table level):**
+- ✅ Table name (e.g., `catalog.schema.restaurants`)
+- ✅ Geometry column name (e.g., `location`, `vessel_position`, `boundary`)
+- ✅ ID field name (e.g., `restaurant_id`, `mmsi`, `zone_id`)
+
+### Can Tables Have Different Geometry Column Names?
+
+**YES!** Each Feature Service specifies its own geometry column:
+
+| Feature Service | Table | Geometry Column | ID Field |
+|----------------|-------|-----------------|----------|
+| RestaurantsService | `catalog.schema.restaurants` | `location` | `restaurant_id` |
+| VesselsService | `catalog.schema.vessels` | `vessel_position` | `mmsi` |
+| ZonesService | `catalog.schema.zones` | `boundary` | `zone_id` |
+| SensorsService | `catalog.schema.sensors` | `location` | `sensor_id` |
+
+**Or they can all use the same name:**
+
+| Feature Service | Table | Geometry Column | ID Field |
+|----------------|-------|-----------------|----------|
+| RestaurantsService | `catalog.schema.restaurants` | `geometry` | `id` |
+| VesselsService | `catalog.schema.vessels` | `geometry` | `id` |
+| ZonesService | `catalog.schema.zones` | `geometry` | `id` |
+
+Both approaches work. You decide per table.
+
+---
+
 ## Service Parameters
 
-When creating a Feature Service in ArcGIS Server, configure:
+When creating each Feature Service, specify:
 
 | Parameter | Required | Description | Example |
 |-----------|----------|-------------|---------|

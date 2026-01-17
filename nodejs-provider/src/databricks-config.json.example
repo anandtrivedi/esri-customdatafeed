@@ -4,9 +4,19 @@
     "httpPath": "/sql/1.0/warehouses/your-warehouse-id",
     "accessToken": "dapi...",
     "srid": 4326,
-    "maxRecordCount": 2000,
-    "defaultTable": "catalog.schema.table_name",
-    "defaultGeometryColumn": "location",
-    "defaultIdField": "id"
+    "maxRecordCount": 2000
   }
 }
+
+// IMPORTANT: This config contains ONLY connection info.
+// You do NOT list your tables here.
+//
+// Table names, geometry columns, and ID fields are specified
+// per Feature Service when you deploy to ArcGIS Server:
+//
+// cdf create-service databricks-geospatial-provider \
+//   https://your-server/arcgis/admin YOUR_TOKEN \
+//   -s "MyServiceName" \
+//   --service-parameters "tableName:catalog.schema.my_table,geometryColumn:location,idField:id"
+//
+// Each Feature Service can use different table and column names.
