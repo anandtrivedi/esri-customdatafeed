@@ -264,6 +264,209 @@ Model.prototype.deleteFeatures = function(req, callback) { ... }
 
 ---
 
+## 5. Authentication & Security Enhancements
+
+**Status:** NOT IMPLEMENTED
+
+**Current Approach:**
+- Single Databricks service account token (hardcoded in config)
+- All ArcGIS users share the same Databricks token
+- ArcGIS Server handles user authentication
+- No row-level security based on user identity
+
+### Security Considerations
+
+#### Issue 1: Shared Databricks Token
+**Impact:**
+- All authenticated ArcGIS users can access all data visible to the service account
+- No user-level access control at Databricks layer
+- No audit trail of which ArcGIS user queried what in Databricks
+
+**Current Security Model:**
+```
+User → ArcGIS Auth → ArcGIS Server → Single Databricks Token → Databricks
+```
+
+#### Issue 2: Token Storage
+**Current:** Token stored in `databricks-config.json` (plain text in .cdpk package)
+**Risk:** Token exposed if package is extracted
+
+#### Issue 3: Token Expiration
+**Current:** No automatic token refresh mechanism
+**Risk:** Service fails when token expires
+
+### Potential Enhancements
+
+#### Option A: User-Level Authentication (COMPLEX - 20-30 hours)
+
+**Approach:** Pass ArcGIS user identity to Databricks
+```javascript
+Model.prototype.getData = function(req, callback) {
+  const arcgisUser = req.user; // Get ArcGIS username
+
+  // Option 1: Pass via session variables
+  await session.sql(`SET SESSION arcgis_user = '${arcgisUser}'`);
+
+  // Option 2: Filter in query
+  const query = `
+    SELECT * FROM table
+    WHERE is_authorized('${arcgisUser}', resource_id)
+  `;
+}
+```
+
+**Requires:**
+- Unity Catalog row-level security functions
+- Session variable support in Databricks
+- User mapping (ArcGIS user → Databricks permissions)
+
+**Complexity:** ⭐⭐⭐⭐ VERY HIGH
+**Usefulness:** HIGH (for multi-tenant scenarios)
+
+---
+
+#### Option B: Environment Variables for Token Storage (LOW - 1-2 hours)
+
+**Approach:** Read token from environment variable instead of hardcoded
+```javascript
+// databricks-config.json
+{
+  "accessToken": "${DATABRICKS_TOKEN}"  // Reference env var
+}
+
+// Or in model.js:
+const token = process.env.DATABRICKS_TOKEN;
+```
+
+**Complexity:** ⭐ LOW
+**Usefulness:** MEDIUM
+**Recommendation:** ✅ **ADD** - Simple security improvement
+
+---
+
+#### Option C: OAuth 2.0 / Service Principal (MEDIUM - 6-8 hours)
+
+**Approach:** Use OAuth client credentials flow for automatic token refresh
+```javascript
+const { OAuth2Client } = require('@databricks/oauth');
+
+const client = new OAuth2Client({
+  clientId: process.env.DATABRICKS_CLIENT_ID,
+  clientSecret: process.env.DATABRICKS_CLIENT_SECRET,
+  tokenUrl: 'https://accounts.cloud.databricks.com/oauth2/token'
+});
+
+// Token auto-refreshes
+const token = await client.getAccessToken();
+```
+
+**Benefits:**
+- Tokens auto-refresh
+- No manual token rotation
+- Service principal best practice
+
+**Complexity:** ⭐⭐ MEDIUM
+**Usefulness:** HIGH
+**Recommendation:** ⚠️ **CONSIDER** for production deployments
+
+---
+
+#### Option D: Unity Catalog Row-Level Security (MEDIUM - 4-6 hours)
+
+**Approach:** Define access policies in Databricks Unity Catalog
+```sql
+-- Create row filter in Unity Catalog
+CREATE FUNCTION is_authorized(user STRING, resource STRING)
+RETURNS BOOLEAN
+RETURN user IN (SELECT authorized_user FROM permissions WHERE resource = resource);
+
+-- Apply to table
+ALTER TABLE sensitive_data SET ROW FILTER is_authorized(SESSION.user, resource_id);
+```
+
+**Challenge:** How to pass ArcGIS user to Databricks session
+**Complexity:** ⭐⭐⭐ MEDIUM-HIGH
+**Usefulness:** HIGH (for sensitive data)
+**Recommendation:** ⚠️ **CONSIDER** if user-level access control is required
+
+---
+
+#### Option E: External Secrets Manager (MEDIUM - 4-6 hours)
+
+**Approach:** Store token in AWS Secrets Manager, Azure Key Vault, or HashiCorp Vault
+```javascript
+const AWS = require('aws-sdk');
+const secretsManager = new AWS.SecretsManager();
+
+async function getDatabricksToken() {
+  const secret = await secretsManager.getSecretValue({
+    SecretId: 'databricks/token'
+  }).promise();
+  return JSON.parse(secret.SecretString).token;
+}
+```
+
+**Benefits:**
+- Centralized secret management
+- Automatic rotation
+- Audit logging
+
+**Complexity:** ⭐⭐ MEDIUM
+**Usefulness:** MEDIUM
+**Recommendation:** ⚠️ **CONSIDER** for enterprise deployments
+
+---
+
+### Recommended Security Approach by Use Case
+
+**For Public Dashboards / Internal Visualization:**
+```
+✅ Current approach is fine
+- ArcGIS controls access to Feature Services
+- Single service account token
+- Consider: Environment variable for token storage
+```
+
+**For Production Deployments:**
+```
+✅ Implement these:
+1. Store token in environment variable (not hardcoded)
+2. Use Unity Catalog service principal with OAuth
+3. Enable auto-token refresh
+```
+
+**For Multi-Tenant / Sensitive Data:**
+```
+⚠️ Requires significant work:
+1. Everything above, PLUS
+2. Implement user-level authentication (pass ArcGIS user to Databricks)
+3. Unity Catalog row-level security
+4. Audit logging
+```
+
+**For High-Security Environments:**
+```
+⚠️ Maximum security:
+1. Everything above, PLUS
+2. External secrets manager (AWS Secrets Manager, etc.)
+3. Network isolation (private endpoints)
+4. Certificate-based authentication
+```
+
+---
+
+## Summary
+
+| Enhancement | Complexity | Effort | Usefulness | Recommendation |
+|-------------|-----------|--------|------------|----------------|
+| **Environment Variable Token** | ⭐ LOW | 1-2 hrs | MEDIUM | ✅ **ADD** for basic security |
+| **OAuth / Service Principal** | ⭐⭐ MEDIUM | 6-8 hrs | HIGH | ⚠️ Consider for production |
+| **External Secrets Manager** | ⭐⭐ MEDIUM | 4-6 hrs | MEDIUM | ⚠️ Consider for enterprise |
+| **Unity Catalog Row Filters** | ⭐⭐⭐ MED-HIGH | 4-6 hrs | HIGH | ⚠️ If user-level access needed |
+| **User-Level Authentication** | ⭐⭐⭐⭐ VERY HIGH | 20-30 hrs | HIGH | ⚠️ Only if truly required |
+
+---
+
 ## How to Request a Feature
 
 If you need one of these features:
@@ -271,5 +474,6 @@ If you need one of these features:
 1. **groupByFields** - Create a SQL view in Databricks instead (recommended)
 2. **Time metadata** - Open an issue describing your animation use case
 3. **Editing** - Consider if Databricks is the right data store for edits
+4. **Security enhancements** - Assess your security requirements (see above recommendations)
 
 For questions, see [IMPLEMENTATION_VERIFICATION.md](IMPLEMENTATION_VERIFICATION.md) for current implementation details.
