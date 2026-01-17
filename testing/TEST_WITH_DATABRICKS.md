@@ -12,7 +12,6 @@
 ## Step 2: Configure Provider
 
 The provider is already configured to use:
-- **Workspace**: e2-demo-west
 - **Table**: `atrivedi.geospatial.sample_restaurants`
 - **Geometry Column**: `location`
 - **ID Field**: `restaurant_id`
