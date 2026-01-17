@@ -2,6 +2,40 @@
 -- Run this in Databricks SQL Editor
 
 -- ============================================================================
+-- PART 0: CREATE SAMPLE DATA (IF YOU DON'T HAVE EXISTING DATA)
+-- ============================================================================
+
+-- Create sample vessel_tracking table with 10 records
+CREATE TABLE IF NOT EXISTS atrivedi.geospatial.vessel_tracking (
+  mmsi BIGINT,
+  vessel_name STRING,
+  lat DOUBLE,
+  lon DOUBLE,
+  ts TIMESTAMP,
+  sog DOUBLE,
+  cog DOUBLE,
+  heading INT,
+  vessel_type STRING,
+  status STRING
+);
+
+-- Insert 10 sample vessel positions (San Francisco Bay area)
+INSERT INTO atrivedi.geospatial.vessel_tracking VALUES
+  (367123456, 'CARGO SHIP A', 37.7749, -122.4194, '2024-01-17 10:00:00', 12.5, 45, 45, 'cargo', 'underway'),
+  (367123457, 'FISHING VESSEL B', 37.8044, -122.2711, '2024-01-17 10:05:00', 8.3, 90, 90, 'fishing', 'fishing'),
+  (367123458, 'TANKER C', 37.8716, -122.2727, '2024-01-17 10:10:00', 15.2, 180, 180, 'tanker', 'underway'),
+  (367123459, 'PASSENGER SHIP D', 37.8199, -122.4783, '2024-01-17 10:15:00', 20.1, 270, 270, 'passenger', 'underway'),
+  (367123460, 'TUG BOAT E', 37.7955, -122.3937, '2024-01-17 10:20:00', 5.5, 135, 135, 'tug', 'engaged'),
+  (367123461, 'CARGO SHIP F', 37.7599, -122.3869, '2024-01-17 10:25:00', 11.8, 225, 225, 'cargo', 'underway'),
+  (367123462, 'FISHING VESSEL G', 37.8088, -122.4098, '2024-01-17 10:30:00', 6.2, 315, 315, 'fishing', 'fishing'),
+  (367123463, 'CONTAINER SHIP H', 37.8272, -122.4225, '2024-01-17 10:35:00', 18.7, 0, 0, 'cargo', 'underway'),
+  (367123464, 'PLEASURE CRAFT I', 37.7694, -122.4862, '2024-01-17 10:40:00', 4.3, 60, 60, 'pleasure', 'sailing'),
+  (367123465, 'RESEARCH VESSEL J', 37.7898, -122.3942, '2024-01-17 10:45:00', 9.5, 120, 120, 'other', 'restricted');
+
+-- Verify sample data
+SELECT mmsi, vessel_name, lat, lon, vessel_type FROM atrivedi.geospatial.vessel_tracking;
+
+-- ============================================================================
 -- PART 1: INSPECT EXISTING TABLE
 -- ============================================================================
 
