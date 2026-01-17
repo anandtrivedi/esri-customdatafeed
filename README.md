@@ -10,9 +10,8 @@ A **Node.js Custom Data Provider** built with Esri's best practices:
 - ✅ **Full Query Support** - All ArcGIS REST API query parameters (where, objectIds, spatial queries, pagination, sorting, etc.)
 - ✅ **Native Databricks ST_* Functions** - ST_AsGeoJSON, ST_Intersects, ST_Contains, ST_Transform, ST_Union_Agg, etc.
 - ✅ **All Geometry Types** - Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
-- ✅ **Automatic Extent Calculation** - Using ST_Envelope and ST_Union_Agg
-- ✅ **CRS Transformation Support** - Handle different spatial reference systems
-- ✅ **Proper Pagination** - Exceeded transfer limit detection
+- ✅ **Works with Existing Tables** - Create views/materialized views without modifying source tables
+- ✅ **Performance Optimized** - Z-ordering, liquid clustering, H3 aggregation for large datasets
 - ✅ **Registers with ArcGIS Server** via `.cdpk` package
 - ✅ **No Data Export** - Queries Databricks directly
 
@@ -28,31 +27,21 @@ ArcGIS Pro/Portal/JavaScript API Client
                 ↓
     Databricks SQL Warehouse (with ST_* functions)
                 ↓
-           Delta Lake Tables
+           Delta Lake Tables/Views
 ```
-
-## How It Works
-
-1. **You register this provider with ArcGIS Server**
-2. **ArcGIS Server creates Feature Services** that use the provider
-3. **Clients access through ArcGIS Server** (not directly to the provider)
-4. **Provider queries Databricks** using ST_AsGeoJSON for geometry
-5. **Returns GeoJSON** with ArcGIS metadata to the server
-6. **ArcGIS Server serves** the data to clients
 
 ## 📖 Documentation
 
-**Getting Started:**
-- **[QUICK_SETUP_GUIDE.md](QUICK_SETUP_GUIDE.md)** - ⚡ **Start here!** 5-minute setup for common scenarios
-- **[GEOMETRY_PATTERNS.md](GEOMETRY_PATTERNS.md)** - Complete guide for all geometry types (Points, Lines, Polygons)
+**⚡ Start Here:**
+- **[WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)** - Comprehensive guide for using existing Databricks tables with efficiency considerations (views, materialized views, H3 aggregation)
 
-**Examples & Testing:**
-- **[testing/setup-vessel-tracking.sql](testing/setup-vessel-tracking.sql)** - Real-world examples for vessel tracking data
-- **[testing/TEST_WITH_DATABRICKS.md](testing/TEST_WITH_DATABRICKS.md)** - Testing guide with real Databricks data
+**Provider Details:**
+- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Provider implementation details and API reference
 
-**Advanced:**
-- **[PERFORMANCE.md](PERFORMANCE.md)** - Performance optimization strategies
-- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Provider implementation details
+**Testing:**
+- **[testing/](testing/)** - Complete test environment with mock data and interactive viewer
+
+---
 
 ## Quick Start
 
@@ -77,7 +66,14 @@ node test-server.js
 - Databricks SQL Warehouse with ST_* functions
 
 **1. Configure:**
-Edit `nodejs-provider/src/databricks-config.json`:
+
+Copy the example config and edit with your credentials:
+```bash
+cd nodejs-provider/src
+cp databricks-config.json.example databricks-config.json
+# Edit databricks-config.json with your Databricks credentials
+```
+
 ```json
 {
   "databricks": {
@@ -102,14 +98,87 @@ cdf register databricks-geospatial-provider https://your-server/arcgis/admin YOU
 ```bash
 cdf create-service databricks-geospatial-provider \
   https://your-server/arcgis/admin YOUR_TOKEN \
-  -s "RestaurantsService" \
-  --service-parameters "tableName:catalog.schema.restaurants,geometryColumn:location,idField:restaurant_id"
+  -s "MyDataService" \
+  --service-parameters "tableName:catalog.schema.table_name,geometryColumn:location,idField:id"
 ```
 
 **4. Access:**
-- **ArcGIS Pro**: Add Data → Data from Path → `https://your-server/arcgis/rest/services/RestaurantsService/FeatureServer`
-- **REST API**: `https://your-server/arcgis/rest/services/RestaurantsService/FeatureServer/0/query?where=1=1&f=geojson`
+- **ArcGIS Pro**: Add Data → Data from Path → `https://your-server/arcgis/rest/services/MyDataService/FeatureServer`
+- **REST API**: `https://your-server/arcgis/rest/services/MyDataService/FeatureServer/0/query?where=1=1&f=geojson`
 - **JavaScript API**: Use the Feature Service URL in your web map
+
+---
+
+## Working With Your Existing Tables
+
+Most use cases involve **existing Databricks tables**. You have several options depending on your table structure and performance needs:
+
+### ✅ Table Already Has GEOMETRY Column
+```bash
+# Use directly - just configure the service parameters
+table=catalog.schema.my_table
+geometryColumn=location
+idField=id
+```
+
+**Optimization:**
+```sql
+OPTIMIZE catalog.schema.my_table ZORDER BY (location);
+```
+
+### ✅ Table Has lat/lon Columns (No Geometry)
+
+**Option 1: Regular View (Real-time, < 1M rows)**
+```sql
+CREATE OR REPLACE VIEW catalog.schema.my_table_spatial AS
+SELECT *, ST_Point(longitude, latitude) as location
+FROM catalog.schema.my_table
+WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+```
+
+**Option 2: Materialized View (Best Performance, > 1M rows)**
+```sql
+CREATE MATERIALIZED VIEW catalog.schema.my_table_spatial_mv AS
+SELECT *, ST_Point(longitude, latitude) as location
+FROM catalog.schema.my_table
+WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+
+OPTIMIZE catalog.schema.my_table_spatial_mv ZORDER BY (location);
+```
+
+### ✅ Table Has WKT/WKB Geometry Strings
+
+```sql
+-- Create view with geometry conversion
+CREATE MATERIALIZED VIEW catalog.schema.my_table_spatial AS
+SELECT *, ST_GeomFromText(geometry_wkt) as geometry
+FROM catalog.schema.my_table
+WHERE geometry_wkt IS NOT NULL;
+
+OPTIMIZE catalog.schema.my_table_spatial ZORDER BY (geometry);
+```
+
+### ✅ Large Table (> 10M rows) - Use H3 Aggregation
+
+```sql
+-- Aggregate millions of points into thousands of hexagons
+CREATE TABLE catalog.schema.my_table_h3_hexagons AS
+SELECT
+  H3_LatLngToCell(latitude, longitude, 7) as h3_cell,
+  COUNT(*) as point_count,
+  H3_CellToPolygon(H3_LatLngToCell(latitude, longitude, 7)) as cell_polygon,
+  -- Add aggregated metrics
+  AVG(temperature) as avg_temperature
+FROM catalog.schema.my_table
+WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+GROUP BY H3_LatLngToCell(latitude, longitude, 7);
+
+OPTIMIZE catalog.schema.my_table_h3_hexagons ZORDER BY (cell_polygon);
+```
+
+**📖 For detailed guidance, see [WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)**
+
+---
 
 ## Features
 
@@ -121,48 +190,20 @@ cdf create-service databricks-geospatial-provider \
 - ✅ **Sorting** - ORDER BY via orderByFields
 - ✅ **Field selection** - outFields parameter
 - ✅ **Count queries** - returnCountOnly
-- ✅ **ID queries** - returnIdsOnly
-- ✅ **Distinct values** - returnDistinctValues
 
 ### Geospatial
 - ✅ **All geometry types** - Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
 - ✅ **Native ST_* functions** - ST_AsGeoJSON, ST_Intersects, ST_Contains, ST_Within, ST_Transform, etc.
 - ✅ **Extent calculation** - Automatic via ST_Envelope and ST_Union_Agg
 - ✅ **CRS transformation** - Support for different spatial reference systems
+- ✅ **H3 hexagonal binning** - For large datasets (millions → thousands)
 
 ### Configuration
 - ✅ **Service parameters** - Configurable table, geometry column, and ID field per Feature Service
 - ✅ **Multiple tables** - Create multiple Feature Services from different tables
-- ✅ **Automatic field inference** - Field types detected from data
+- ✅ **Different geometry column names** - Each table can have its own column name
 
-## Databricks Table Requirements
-
-Tables must have:
-
-1. **Geometry column** (GEOMETRY type)
-2. **Unique ID field** (BIGINT recommended)
-
-### Example Table Setup
-
-```sql
--- Point geometry from lat/lon
-CREATE TABLE catalog.schema.restaurants (
-  restaurant_id BIGINT,
-  name STRING,
-  category STRING,
-  latitude DOUBLE,
-  longitude DOUBLE,
-  location GEOMETRY GENERATED ALWAYS AS (ST_Point(longitude, latitude))
-);
-
--- Polygon from WKT
-CREATE TABLE catalog.schema.zones (
-  zone_id BIGINT,
-  zone_name STRING,
-  boundary_wkt STRING,
-  boundary GEOMETRY GENERATED ALWAYS AS (ST_GeomFromText(boundary_wkt))
-);
-```
+---
 
 ## Service Parameters
 
@@ -170,48 +211,61 @@ When creating a Feature Service in ArcGIS Server, configure:
 
 | Parameter | Required | Description | Example |
 |-----------|----------|-------------|---------|
-| `tableName` | Yes | Fully qualified table name | `catalog.schema.restaurants` |
+| `tableName` | Yes | Fully qualified table/view name | `catalog.schema.my_table_spatial` |
 | `geometryColumn` | No | Geometry column name (default: `geometry`) | `location` |
-| `idField` | No | Unique ID field (default: `id`) | `restaurant_id` |
+| `idField` | No | Unique ID field (default: `id`) | `sensor_id` |
+
+---
 
 ## Supported Query Parameters
 
-The provider supports standard ArcGIS REST API query parameters:
+Standard ArcGIS REST API query parameters:
 
 - `where` - SQL WHERE clause for filtering
+- `geometry` - Spatial filter (bbox, polygon)
+- `spatialRel` - Spatial relationship (intersects, contains, within)
 - `resultRecordCount` - Max records to return (default: 2000)
 - `resultOffset` - Offset for pagination
 - `outFields` - Fields to return
-- `returnGeometry` - Include geometry
+- `returnGeometry` - Include geometry (default: true)
+- `returnCountOnly` - Return count instead of features
+- `orderByFields` - Sort results
+
+---
 
 ## Project Structure
 
 ```
 esri-customdatafeed/
+├── README.md                               # This file
+├── WORKING_WITH_EXISTING_TABLES.md         # Comprehensive guide for existing tables
 ├── nodejs-provider/
 │   ├── src/
-│   │   ├── index.js              # Provider registration
-│   │   ├── model.js              # Main getData() implementation
-│   │   ├── databricks-config.json # Databricks connection config
-│   │   └── modules/              # Helper modules (Esri pattern)
-│   │       ├── index.js          # Module exports
-│   │       ├── translate.js      # GeoJSON conversion
-│   │       ├── sql.js            # SQL query builder
-│   │       ├── filters.js        # filtersApplied generator
-│   │       └── geometry.js       # Geometry queries and transformations
-│   ├── package.json              # Node.js dependencies
-│   ├── cdconfig.json             # Provider configuration
-│   ├── test-local.js             # Local testing script
-│   └── README.md                 # Complete documentation
-├── IMPLEMENTATION_SUMMARY.md     # Technical overview
-└── README.md                     # This file
+│   │   ├── index.js                        # Provider registration
+│   │   ├── model.js                        # Main getData() implementation
+│   │   ├── databricks-config.json.example  # Config template
+│   │   └── modules/                        # Helper modules
+│   │       ├── translate.js                # GeoJSON conversion
+│   │       ├── sql.js                      # SQL query builder
+│   │       ├── filters.js                  # filtersApplied generator
+│   │       └── geometry.js                 # Geometry operations
+│   ├── package.json
+│   ├── cdconfig.json                       # Provider configuration
+│   └── README.md                           # Provider documentation
+└── testing/
+    ├── test-server.js                      # Standalone test server
+    ├── viewer.html                         # Interactive map viewer
+    ├── test-requests.sh                    # Test suite
+    └── setup-vessel-tracking.sql           # Real-world examples
 ```
+
+---
 
 ## Deployment Options
 
 ### ArcGIS Server (Production)
 
-**Best for:** Enterprise ArcGIS environments with ArcGIS Server
+**Best for:** Enterprise ArcGIS environments
 
 1. Package provider as `.cdpk` file
 2. Register with ArcGIS Server
@@ -221,11 +275,7 @@ esri-customdatafeed/
 
 See Quick Start above for deployment commands.
 
-### Docker Container (Alternative)
-
-**Best for:** Containerized deployments, cloud platforms
-
-While the provider is designed for ArcGIS Server integration, you can run the test server in Docker for development/testing:
+### Docker Container (Testing/Development)
 
 ```dockerfile
 FROM node:18-alpine
@@ -243,59 +293,7 @@ docker build -t databricks-provider-test .
 docker run -p 3000:3000 databricks-provider-test
 ```
 
-**Note:** Docker deployment is for testing only. Production deployments should use ArcGIS Server integration.
-
-### Kubernetes (For ArcGIS Server Pods)
-
-If running ArcGIS Server in Kubernetes, the provider runs as part of the ArcGIS Server pod after registration. No separate deployment needed.
-
 ---
-
-## Documentation
-
-- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Detailed provider documentation
-- **[testing/README.md](testing/README.md)** - Testing and demo setup
-- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - Technical implementation details
-- **[PERFORMANCE.md](PERFORMANCE.md)** - Format requirements and performance optimization
-- **[ArcGIS Enterprise SDK Docs](https://developers.arcgis.com/enterprise-sdk/)** - Official SDK documentation
-
-## Testing
-
-The `testing/` directory provides a complete test environment separate from the production provider.
-
-### Quick Start (No Databricks Required)
-
-```bash
-cd testing
-npm install
-node test-server.js
-```
-
-Server starts at `http://localhost:3000` with mock data enabled.
-
-**Test via URL:**
-```bash
-curl "http://localhost:3000/query?f=geojson"
-```
-
-**View on Map:**
-Open `http://localhost:3000/viewer.html` in your browser
-
-**Run Test Suite:**
-```bash
-sh test-requests.sh
-```
-
-### With Real Databricks Data
-
-1. Create sample tables in Databricks (run `sample-data.sql`)
-2. Configure Databricks connection in `nodejs-provider/src/databricks-config.json`
-3. Set `USE_MOCK_DATA = false` in `test-server.js`
-4. Restart test server
-
-### Test with ArcGIS Server
-
-After testing locally, deploy to ArcGIS Server for production use (see Deployment section below)
 
 ## Databricks Geospatial Functions
 
@@ -312,21 +310,94 @@ This provider leverages Databricks' extensive ST_* geospatial functions:
 
 Full reference: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-st-geospatial-functions
 
-### H3 Integration Example
+---
 
+## Performance Optimization
+
+### For Small Tables (< 1M rows)
+- Regular views work fine
+- Add Z-ordering if needed: `OPTIMIZE table ZORDER BY (geometry_column)`
+
+### For Medium Tables (1M - 10M rows)
+- Use materialized views
+- Add Z-ordering
+- Update statistics: `ANALYZE TABLE table COMPUTE STATISTICS FOR ALL COLUMNS`
+
+### For Large Tables (> 10M rows)
+- Use H3 aggregation for visualization (reduces millions → thousands)
+- Consider partitioning by date/region
+- Use liquid clustering (Databricks Runtime 13.3+)
+
+### Example Optimization
 ```sql
--- Create H3 binned aggregation table
-CREATE TABLE catalog.schema.taxi_h3_bins AS
-SELECT
-  H3_LatLngToCell(latitude, longitude, 8) as h3_cell,
-  COUNT(*) as trip_count,
-  AVG(fare_amount) as avg_fare,
-  H3_CellToPolygon(H3_LatLngToCell(latitude, longitude, 8)) as cell_geometry
-FROM catalog.schema.taxi_trips
-GROUP BY H3_LatLngToCell(latitude, longitude, 8);
+-- Create optimized materialized view
+CREATE MATERIALIZED VIEW catalog.schema.optimized_view AS
+SELECT sensor_id, ST_Point(lon, lat) as location, temperature
+FROM catalog.schema.sensors
+WHERE lat IS NOT NULL AND lon IS NOT NULL;
 
--- Use as Feature Service with cell_geometry column
+-- Z-order by geometry
+OPTIMIZE catalog.schema.optimized_view ZORDER BY (location);
+
+-- Update statistics
+ANALYZE TABLE catalog.schema.optimized_view
+COMPUTE STATISTICS FOR ALL COLUMNS;
+
+-- Schedule refresh (hourly/daily)
+REFRESH MATERIALIZED VIEW catalog.schema.optimized_view;
 ```
+
+**📖 For complete optimization strategies, see [WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)**
+
+---
+
+## Testing
+
+### Quick Test (No Databricks Required)
+
+```bash
+cd testing
+npm install
+node test-server.js
+# Open http://localhost:3000/viewer.html
+```
+
+### Test with Real Databricks Data
+
+1. Configure Databricks connection in `nodejs-provider/src/databricks-config.json`
+2. Set `USE_MOCK_DATA = false` in `test-server.js`
+3. Restart test server
+
+### Test Queries
+
+```bash
+# Basic query
+curl "http://localhost:3000/query?\
+table=catalog.schema.table_name&\
+geometryColumn=location&\
+idField=id&\
+resultRecordCount=10&\
+f=geojson"
+
+# Count query
+curl "http://localhost:3000/query?\
+table=catalog.schema.table_name&\
+geometryColumn=location&\
+idField=id&\
+returnCountOnly=true&\
+f=json"
+
+# Spatial filter
+curl "http://localhost:3000/query?\
+table=catalog.schema.table_name&\
+geometryColumn=location&\
+idField=id&\
+geometry=-180,-90,180,90&\
+spatialRel=esriSpatialRelIntersects&\
+f=geojson"
+```
+
+---
 
 ## Troubleshooting
 
@@ -336,38 +407,24 @@ GROUP BY H3_LatLngToCell(latitude, longitude, 8);
 
 ### No Data Returned
 - Test Databricks connection manually
-- Verify table name is fully qualified
+- Verify table name is fully qualified (catalog.schema.table)
 - Check geometry column contains valid data:
   ```sql
   SELECT ST_AsText(location) FROM table LIMIT 1;
   ```
+
+### Query is Slow
+1. Add Z-ordering: `OPTIMIZE table ZORDER BY (geometry_column)`
+2. Use materialized view instead of regular view
+3. Consider H3 aggregation if > 10M rows
+4. Check if ST_Point() is computed on every query (use materialized view to pre-compute)
 
 ### Feature Service Fails to Start
 - Verify service parameters are correct
 - Check Databricks access token is valid
 - Review ArcGIS Server logs
 
-## Advanced Topics
-
-### Connection Pooling
-Implement connection pooling in the Model class for better performance with concurrent requests.
-
-### Custom Symbology
-Add `renderer` to the metadata in `buildMetadata()` method.
-
-### Label Configuration
-Add `labelingInfo` to the metadata for custom labels.
-
-### Environment Variables
-For production, use environment variables instead of config file:
-
-```javascript
-const connectOptions = {
-  host: process.env.DATABRICKS_HOSTNAME,
-  path: process.env.DATABRICKS_HTTP_PATH,
-  token: process.env.DATABRICKS_TOKEN
-};
-```
+---
 
 ## Support
 
@@ -376,9 +433,13 @@ const connectOptions = {
 - **Databricks SQL Connector**: https://docs.databricks.com/dev-tools/node-sql.html
 - **Databricks Geospatial Functions**: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-st-geospatial-functions
 
+---
+
 ## License
 
 MIT License
+
+---
 
 ## Contributing
 
