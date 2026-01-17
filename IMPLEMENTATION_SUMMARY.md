@@ -1,20 +1,15 @@
 # Implementation Summary
 
+## Latest Update (2026-01-17)
+
+**Major Rebuild**: Completely rebuilt the Node.js provider following official Esri reference implementations (DuckDB, MongoDB samples) with professional patterns and modular architecture.
+
 ## What Was Built
 
-This repository now contains **two different implementations** for connecting Databricks geospatial data to ArcGIS:
+A **professional Node.js Custom Data Provider** for ArcGIS Enterprise SDK that connects Databricks SQL Warehouse to ArcGIS Server.
 
-### 1. Node.js Custom Data Provider (Official ArcGIS Way) ✅
+### Architecture
 
-**Location:** `nodejs-provider/`
-
-**What it is:**
-- A proper ArcGIS Enterprise SDK Custom Data Feed Provider
-- Written in Node.js following the official CDF framework pattern
-- Gets packaged as `.cdpk` and registered with ArcGIS Server
-- ArcGIS Server creates Feature Services that proxy to this provider
-
-**Architecture:**
 ```
 ArcGIS Pro/Portal Client
          ↓
@@ -26,21 +21,35 @@ Node.js Custom Data Provider (registered with Server)
 Databricks SQL Warehouse
 ```
 
-**Key Files:**
-- `src/model.js` - Implements `getData()` method with Databricks connection
+### Key Files
+
+**Provider Core:**
+- `src/model.js` - Implements `getData()` method with sophisticated query handling
 - `src/index.js` - Provider registration object
 - `cdconfig.json` - Provider configuration with service parameters
 - `package.json` - Node.js dependencies (@databricks/sql)
-- `README.md` - Complete deployment documentation
-- `test-local.js` - Local testing script
 
-**How to Deploy:**
-1. Install dependencies: `npm install`
-2. Configure Databricks connection in `src/databricks-config.json`
-3. Package: `cdf export databricks-geospatial-provider`
-4. Upload `.cdpk` to ArcGIS Server Admin
-5. Register the provider
-6. Create Feature Service with service parameters
+**Helper Modules** (following Esri's DuckDB pattern):
+- `src/modules/translate.js` - GeoJSON conversion with validation
+- `src/modules/sql.js` - SQL query builder supporting all ArcGIS parameters
+- `src/modules/filters.js` - filtersApplied generator
+- `src/modules/geometry.js` - Spatial queries and CRS transformation
+- `src/modules/index.js` - Module exports
+
+### Features
+
+**Query Operations:**
+- ✅ WHERE clause filtering
+- ✅ ObjectIDs filtering
+- ✅ Spatial queries (Intersects, Contains, Within, Crosses, Overlaps, Touches)
+- ✅ Pagination with exceeded transfer limit detection
+- ✅ Sorting (ORDER BY)
+- ✅ Field selection (outFields)
+- ✅ Count queries (returnCountOnly)
+- ✅ ID queries (returnIdsOnly)
+- ✅ Distinct values (returnDistinctValues)
+- ✅ Automatic extent calculation using ST_Union_Agg
+- ✅ CRS transformation via ST_Transform
 
 **Service Parameters:**
 - `tableName` - Fully qualified Databricks table (catalog.schema.table)
@@ -49,134 +58,192 @@ Databricks SQL Warehouse
 
 ---
 
-### 2. Flask REST API (Standalone Approach) ⚡
+## Implementation Approach
 
-**Location:** `src/`
+Built by analyzing Esri's official reference implementations from:
+https://github.com/Esri/arcgis-enterprise-sdk-resources/tree/master/Samples/custom-data-feeds
 
-**What it is:**
-- Python Flask REST API that mimics ArcGIS REST API format
-- Standalone service (not integrated with ArcGIS Server)
-- Clients access directly via URL
-- Good for testing and development
+**Primary References:**
+- **DuckDB pass-through provider** - Most similar architecture (SQL-based database with ST_* functions)
+- **MongoDB editing providers** - Sophisticated query pattern handling, editing support patterns
+- **Overture Maps provider** - Large-scale geospatial data patterns
 
-**Architecture:**
-```
-ArcGIS Client → Flask REST API → Databricks
-```
+**Key Patterns Adopted from MongoDB Samples:**
+- Constructor with logger and config parameters
+- Private class fields for client and connection management
+- Metadata extraction from configuration
+- TTL (time-to-live) cache support in response
+- Templates for editing (if editing is added in future)
 
-**Key Files:**
-- `src/data_feed_provider.py` - Main Flask API server
-- `src/databricks_connector.py` - Databricks SQL integration
-- `src/format_converter.py` - GeoJSON ↔ Esri JSON conversion
-- `src/table_config.py` - Multi-table registry
-- `src/demo_server.py` - Demo mode with mock data
+### Key Design Decisions
 
-**How to Deploy:**
-- Deploy to AWS (App Runner, ECS, EC2) - see AWS_DEPLOY.md
-- Or run with Docker
-- Clients access at: `https://your-url.com/query?table_name=...`
+1. **Modular Architecture**
+   - Separate modules for translate, sql, filters, and geometry
+   - Follows DuckDB sample pattern exactly
+   - Clean separation of concerns
 
----
+2. **Comprehensive Query Support**
+   - All ArcGIS REST API query parameters implemented
+   - Proper filtersApplied object generation
+   - Metadata-only request detection
 
-## Key Differences
+3. **Databricks ST_* Functions**
+   - Leverage native geospatial functions for performance
+   - `ST_AsGeoJSON` for geometry conversion
+   - `ST_Intersects`, `ST_Contains`, `ST_Within` for spatial queries
+   - `ST_Transform` for CRS transformation
+   - `ST_Union_Agg` + `ST_Envelope` for extent calculation
 
-| Aspect | Node.js Provider | Flask API |
-|--------|------------------|-----------|
-| **Purpose** | Official ArcGIS integration | Standalone testing/development |
-| **Deployment** | Registered with ArcGIS Server | Separate infrastructure (AWS/Docker) |
-| **Client Access** | Via ArcGIS Server URL | Direct URL access |
-| **Management** | ArcGIS Server Manager | Manual deployment |
-| **Authentication** | ArcGIS integrated | Custom (or none) |
-| **Format** | Returns GeoJSON with metadata | Returns Esri JSON or GeoJSON |
-| **Technology** | Node.js + @databricks/sql | Python + Flask |
+4. **Pagination Best Practices**
+   - Fetch N+1 records to detect if more data exists
+   - Set `exceededTransferLimit` flag correctly
+   - Remove extra record before returning
 
----
-
-## Which One to Use?
-
-### Use Node.js Provider When:
-✅ You have ArcGIS Server/Enterprise deployed
-✅ You want proper ArcGIS integration
-✅ You need ArcGIS authentication and management
-✅ You're building for production ArcGIS environment
-✅ You want Feature Services managed by ArcGIS Server
-
-### Use Flask API When:
-✅ You don't have ArcGIS Server
-✅ You want a standalone REST service
-✅ You're testing/prototyping
-✅ You need to deploy to AWS/Cloud independently
-✅ You want simpler deployment without ArcGIS Server
+5. **Spatial Reference Handling**
+   - Parse SRID from multiple formats (wkid, JSON, string)
+   - Support CRS transformation when inSR ≠ dbSR
+   - Default to 4326 (WGS84)
 
 ---
 
-## What We Learned
+## Key Implementation Patterns
 
-### Initial Misunderstanding
-Initially, we thought Custom Data Feeds were standalone REST services that clients access directly. This led to building the Flask API.
+### 1. Modular Architecture (from DuckDB)
 
-### Correct Understanding
-After researching the ArcGIS Enterprise SDK documentation and CLI reference, we learned:
-
-1. **Custom Data Providers are Node.js applications** that implement a specific interface
-2. They get **packaged as `.cdpk` files** and **registered with ArcGIS Server**
-3. **ArcGIS Server creates Feature Services** that use the provider as a backend
-4. **Clients access through ArcGIS Server**, not directly to the provider
-5. The provider runs as a **separate Node.js service**, but is **managed by ArcGIS Server**
-
-### The Aha Moment
-Reading the CDF CLI reference and seeing commands like:
-- `cdf createprovider <name>` - Creates Node.js project structure
-- `cdf export <name>` - Packages as `.cdpk`
-- `cdf register <name> <server-url> <token>` - Registers with ArcGIS Server
-
-This made it clear that Custom Data Feeds are a specific framework, not just "any REST API that returns GeoJSON".
-
----
-
-## Implementation Details
-
-### Node.js Provider Implementation
-
-**getData() Method:**
+**Helper Modules:**
 ```javascript
-Model.prototype.getData = async function(req, callback) {
-  // 1. Extract service parameters from req.params
-  const tableName = req.params.tableName;
-  const geometryColumn = req.params.geometryColumn;
+const {
+  translateToGeoJSON,      // Converts DB results to GeoJSON
+  buildSqlQuery,           // Builds SQL from ArcGIS params
+  generateFiltersApplied,  // Creates filtersApplied object
+  getExtentFromGeoJson,    // Calculates extent
+} = require('./modules');
+```
 
-  // 2. Connect to Databricks
-  const session = await this.connect();
+### 2. SQL Query Builder (from DuckDB)
 
-  // 3. Query with ST_AsGeoJSON
-  const sql = `
-    SELECT *, ST_AsGeoJSON(${geometryColumn}) as geometry_geojson
-    FROM ${tableName}
-    WHERE ${req.query.where}
-    LIMIT ${req.query.resultRecordCount}
-  `;
+Handles all query parameter combinations:
+- SELECT clause with `ST_AsGeoJSON(geometry_column)`
+- WHERE clause from `where`, `objectIds`, and `geometry` parameters
+- Spatial filters using `ST_Intersects`, `ST_Contains`, etc.
+- ORDER BY from `orderByFields`
+- LIMIT + OFFSET for pagination
+- Special cases: `returnCountOnly`, `returnIdsOnly`, `returnDistinctValues`
 
-  // 4. Convert to GeoJSON
-  const geojson = this.convertToGeoJSON(result);
+### 3. Metadata Handling (from DuckDB)
 
-  // 5. Add ArcGIS metadata
-  geojson.metadata = {
-    geometryType: 'Point',
-    idField: 'id',
-    fields: [...],
-    maxRecordCount: 2000
-  };
+**Extent Calculation:**
+```sql
+SELECT ST_AsGeoJSON(ST_Envelope(ST_Union_Agg(geometry_column))) AS extent
+FROM table_name
+```
 
-  return geojson;
+**Response Structure:**
+```javascript
+geojson.metadata = {
+  name: 'LayerName',
+  geometryType: 'Point',
+  maxRecordCount: 2000,
+  exceededTransferLimit: false,
+  idField: 'id',
+  fields: [...],
+  extent: { xmin, ymin, xmax, ymax, spatialReference }
 };
 ```
 
-**Key Insights:**
-- Returns **GeoJSON** (not Esri JSON)
-- Must include **metadata** property with ArcGIS-specific info
-- ArcGIS Server handles format conversion to Esri JSON for clients
-- Service parameters come from `req.params` (configured when creating Feature Service)
-- Query parameters come from `req.query` (from client requests)
+### 4. Spatial Query Support (from DuckDB)
+
+Converts ArcGIS geometry formats to Databricks ST_* queries:
+- Envelope array `[xmin, ymin, xmax, ymax]` → Polygon
+- Point array `[x, y]` → Point
+- Esri JSON `{rings, spatialReference}` → Polygon
+- GeoJSON passthrough
+
+**Spatial Relationships:**
+- `esriSpatialRelIntersects` → `ST_Intersects()`
+- `esriSpatialRelContains` → `ST_Contains()`
+- `esriSpatialRelWithin` → `ST_Within()`
+- `esriSpatialRelCrosses` → `ST_Crosses()`
+- `esriSpatialRelOverlaps` → `ST_Overlaps()`
+- `esriSpatialRelTouches` → `ST_Touches()`
+
+---
+
+## Databricks Geospatial Integration
+
+This provider leverages Databricks' extensive ST_* geospatial function library:
+
+### Functions Used
+
+**Geometry Creation:**
+- `ST_Point(x, y)` - Create point from coordinates
+- `ST_GeomFromText(wkt)` - Create geometry from WKT
+- `ST_GeomFromGeoJSON(json)` - Create geometry from GeoJSON
+
+**Format Conversion:**
+- `ST_AsGeoJSON(geom)` - Convert to GeoJSON (primary output format)
+- `ST_AsText(geom)` - Convert to WKT (for debugging)
+
+**Spatial Relationships:**
+- `ST_Intersects(geom1, geom2)` - Check intersection
+- `ST_Contains(geom1, geom2)` - Check containment
+- `ST_Within(geom1, geom2)` - Check if within
+- `ST_Crosses(geom1, geom2)` - Check crossing
+- `ST_Overlaps(geom1, geom2)` - Check overlap
+- `ST_Touches(geom1, geom2)` - Check touching
+
+**Spatial Operations:**
+- `ST_Union_Agg(geom)` - Aggregate union for extent calculation
+- `ST_Envelope(geom)` - Bounding box
+- `ST_Transform(geom, from_srid, to_srid)` - CRS transformation
+
+**H3 Support (optional):**
+- `H3_LatLngToCell(lat, lng, resolution)` - Convert to H3 cell
+- `H3_CellToPolygon(cell)` - Get H3 cell geometry
+
+Full reference: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-st-geospatial-functions
+
+---
+
+## Deployment
+
+### Package and Register
+
+```bash
+# 1. Package provider
+cd nodejs-provider
+npm install
+cdf export databricks-geospatial-provider
+
+# 2. Register with ArcGIS Server
+cdf register databricks-geospatial-provider \
+  https://your-server/arcgis/admin \
+  YOUR_TOKEN
+
+# 3. Create Feature Service
+cdf create-service databricks-geospatial-provider \
+  https://your-server/arcgis/admin \
+  YOUR_TOKEN \
+  -s "MyDatabricksData" \
+  --service-parameters "tableName:catalog.schema.restaurants,geometryColumn:location,idField:id"
+```
+
+### Access Feature Service
+
+**URL:**
+```
+https://your-server/arcgis/rest/services/MyDatabricksData/FeatureServer/0
+```
+
+**In ArcGIS Pro:**
+Add Data → Data from Path → Enter URL above
+
+**Via REST API:**
+```
+GET /query?where=category='Italian'&f=geojson
+GET /query?geometry=-74,40,-73,41&spatialRel=esriSpatialRelIntersects&f=geojson
+GET /query?returnCountOnly=true&where=1=1
+```
 
 ---
 
@@ -184,71 +251,47 @@ Model.prototype.getData = async function(req, callback) {
 
 ### Local Testing (Without ArcGIS Server)
 
-**Node.js Provider:**
 ```bash
 cd nodejs-provider
-npm install
 node test-local.js
 ```
 
-**Flask API:**
-```bash
-python src/demo_server.py
-curl http://localhost:5000/query?table_name=demo.restaurants
-```
+Tests the provider logic and Databricks connection directly.
 
 ### With ArcGIS Server
 
-1. Package and register the Node.js provider
-2. Create Feature Service with service parameters
-3. Access via: `https://server/arcgis/rest/services/MyService/FeatureServer`
-4. Use in ArcGIS Pro: Add Data → Data from Path
-
----
-
-## Next Steps
-
-### For Production Deployment:
-
-**Node.js Provider:**
-1. Configure Databricks credentials (use environment variables)
-2. Package as `.cdpk`
-3. Register with your ArcGIS Server
-4. Create Feature Services for your tables
-5. Test in ArcGIS Pro/Portal
-
-**Flask API:**
-1. Deploy to AWS (see AWS_DEPLOY.md)
-2. Configure Databricks credentials via .env
-3. Test endpoints directly
-4. Use in ArcGIS clients via direct URL
-
-### Future Enhancements:
-
-- [ ] Add editing support (`editData()` method)
-- [ ] Implement connection pooling in Node.js provider
-- [ ] Add custom symbology and labeling
-- [ ] Support for additional query operations
-- [ ] Implement `authorize()` method for custom auth
-- [ ] Add comprehensive error handling
-- [ ] Create Docker image for Node.js provider
+1. Deploy provider following steps above
+2. Create Feature Service
+3. Test in ArcGIS Pro or via REST API
+4. Monitor queries via console logs
 
 ---
 
 ## Documentation
 
-- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Node.js provider documentation
-- **[README.md](README.md)** - Main README (Flask approach)
-- **[AWS_DEPLOY.md](AWS_DEPLOY.md)** - AWS deployment for Flask
-- **[ARCGIS_TESTING.md](ARCGIS_TESTING.md)** - ArcGIS endpoint testing
+- **README.md** - Main overview and quick start
+- **nodejs-provider/README.md** - Complete deployment guide with all configuration options
+- **IMPLEMENTATION_SUMMARY.md** - This file (technical implementation details)
 
 ---
 
-## Conclusion
+## Future Enhancements
 
-We now have **both approaches** implemented:
+Potential additions based on Esri reference patterns:
 
-1. **Official ArcGIS Way** (Node.js provider) - for production ArcGIS Enterprise environments
-2. **Standalone REST API** (Flask) - for testing, development, or non-ArcGIS Server deployments
+- [ ] Editing support (insert, update, delete via `editData()` method)
+- [ ] Connection pooling for concurrent requests
+- [ ] Custom authentication via `authorize()` method
+- [ ] Custom symbology and labeling in metadata
+- [ ] Time-aware queries for temporal data
+- [ ] Advanced H3 aggregation patterns
+- [ ] Performance optimization with spatial indexes
 
-The Node.js provider follows the proper ArcGIS Enterprise SDK pattern and is the recommended approach when you have ArcGIS Server deployed.
+---
+
+## References
+
+- **Esri Reference Implementations**: https://github.com/Esri/arcgis-enterprise-sdk-resources
+- **ArcGIS Enterprise SDK**: https://developers.arcgis.com/enterprise-sdk/
+- **Databricks Geospatial Functions**: https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-st-geospatial-functions
+- **Databricks SQL Connector**: https://docs.databricks.com/dev-tools/node-sql.html

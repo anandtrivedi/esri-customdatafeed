@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Databricks Provider Test Viewer</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            height: 100vh;
+        }
+
+        #sidebar {
+            width: 400px;
+            background: #f5f5f5;
+            padding: 20px;
+            overflow-y: auto;
+            border-right: 1px solid #ddd;
+        }
+
+        #map {
+            flex: 1;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #555;
+            font-size: 14px;
+        }
+
+        input, select, textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        textarea {
+            font-family: 'Courier New', monospace;
+            resize: vertical;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #0078d4;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            background: #005a9e;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        #status {
+            padding: 10px;
+            margin-top: 15px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        #status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        #status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        #status.loading {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .stats {
+            margin-top: 15px;
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+
+        .stats h3 {
+            font-size: 14px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            font-size: 13px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+
+        .stat-label {
+            color: #666;
+        }
+
+        .stat-value {
+            font-weight: 500;
+            color: #333;
+        }
+
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+
+        .hint {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .leaflet-popup-content {
+            font-size: 13px;
+        }
+
+        .leaflet-popup-content strong {
+            display: block;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h1>🗺️ Databricks Provider Viewer</h1>
+
+        <div class="form-group">
+            <label for="tableName">Table Name</label>
+            <input type="text" id="tableName" value="catalog.schema.restaurants" placeholder="catalog.schema.table">
+            <div class="hint">Fully qualified Databricks table name</div>
+        </div>
+
+        <div class="form-group">
+            <label for="geometryColumn">Geometry Column</label>
+            <input type="text" id="geometryColumn" value="location" placeholder="location">
+        </div>
+
+        <div class="form-group">
+            <label for="idField">ID Field</label>
+            <input type="text" id="idField" value="restaurant_id" placeholder="id">
+        </div>
+
+        <div class="form-group">
+            <label for="whereClause">WHERE Clause (optional)</label>
+            <input type="text" id="whereClause" placeholder="category='Italian'">
+            <div class="hint">SQL WHERE clause (omit the WHERE keyword)</div>
+        </div>
+
+        <div class="form-group">
+            <label for="queryType">Query Type</label>
+            <select id="queryType">
+                <option value="all">All Features</option>
+                <option value="count">Count Only</option>
+                <option value="bbox">Bounding Box (current map view)</option>
+            </select>
+        </div>
+
+        <button id="loadBtn">Load Data</button>
+        <button id="mockBtn">Load Mock Data</button>
+        <button id="clearBtn">Clear Map</button>
+
+        <div id="status" style="display: none;"></div>
+
+        <div class="stats" id="stats" style="display: none;">
+            <h3>Statistics</h3>
+            <div class="stat-item">
+                <span class="stat-label">Features Loaded:</span>
+                <span class="stat-value" id="statFeatures">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Geometry Type:</span>
+                <span class="stat-value" id="statGeomType">-</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">ID Field:</span>
+                <span class="stat-value" id="statIdField">-</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Exceeded Limit:</span>
+                <span class="stat-value" id="statExceeded">-</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        // Initialize map (centered on NYC)
+        const map = L.map('map').setView([40.7589, -73.9851], 13);
+
+        // Add OpenStreetMap tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        // GeoJSON layer
+        let dataLayer = null;
+
+        // UI elements
+        const loadBtn = document.getElementById('loadBtn');
+        const mockBtn = document.getElementById('mockBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const statusDiv = document.getElementById('status');
+        const statsDiv = document.getElementById('stats');
+
+        // Show status message
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = type;
+            statusDiv.style.display = 'block';
+        }
+
+        // Hide status message
+        function hideStatus() {
+            statusDiv.style.display = 'none';
+        }
+
+        // Update statistics
+        function updateStats(data) {
+            if (!data.metadata && !data.count) {
+                statsDiv.style.display = 'none';
+                return;
+            }
+
+            statsDiv.style.display = 'block';
+
+            if (data.count !== undefined) {
+                document.getElementById('statFeatures').textContent = data.count;
+                document.getElementById('statGeomType').textContent = '-';
+                document.getElementById('statIdField').textContent = '-';
+                document.getElementById('statExceeded').textContent = '-';
+            } else {
+                const featureCount = data.features ? data.features.length : 0;
+                document.getElementById('statFeatures').textContent = featureCount;
+                document.getElementById('statGeomType').textContent = data.metadata?.geometryType || '-';
+                document.getElementById('statIdField').textContent = data.metadata?.idField || '-';
+                document.getElementById('statExceeded').textContent = data.metadata?.exceededTransferLimit ? 'Yes' : 'No';
+            }
+        }
+
+        // Build query URL
+        function buildQueryURL() {
+            const baseURL = 'http://localhost:3000/query';
+            const params = new URLSearchParams();
+
+            const tableName = document.getElementById('tableName').value;
+            const geometryColumn = document.getElementById('geometryColumn').value;
+            const idField = document.getElementById('idField').value;
+            const whereClause = document.getElementById('whereClause').value;
+            const queryType = document.getElementById('queryType').value;
+
+            params.append('table', tableName);
+            params.append('geometryColumn', geometryColumn);
+            params.append('idField', idField);
+            params.append('f', 'geojson');
+
+            if (whereClause) {
+                params.append('where', whereClause);
+            }
+
+            if (queryType === 'count') {
+                params.append('returnCountOnly', 'true');
+            } else if (queryType === 'bbox') {
+                const bounds = map.getBounds();
+                const bbox = [
+                    bounds.getWest(),
+                    bounds.getSouth(),
+                    bounds.getEast(),
+                    bounds.getNorth()
+                ].join(',');
+                params.append('geometry', bbox);
+                params.append('spatialRel', 'esriSpatialRelIntersects');
+            }
+
+            return `${baseURL}?${params.toString()}`;
+        }
+
+        // Load data from server
+        async function loadData() {
+            const url = buildQueryURL();
+
+            console.log('Fetching:', url);
+            showStatus('Loading data...', 'loading');
+            loadBtn.disabled = true;
+
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load data');
+                }
+
+                // Clear existing layer
+                if (dataLayer) {
+                    map.removeLayer(dataLayer);
+                }
+
+                // Handle count-only query
+                if (data.count !== undefined) {
+                    showStatus(`Count: ${data.count} features`, 'success');
+                    updateStats(data);
+                    return;
+                }
+
+                // Add GeoJSON to map
+                dataLayer = L.geoJSON(data, {
+                    onEachFeature: function(feature, layer) {
+                        if (feature.properties) {
+                            let popupContent = '<strong>Properties:</strong><br>';
+                            for (const [key, value] of Object.entries(feature.properties)) {
+                                popupContent += `${key}: ${value}<br>`;
+                            }
+                            layer.bindPopup(popupContent);
+                        }
+                    },
+                    pointToLayer: function(feature, latlng) {
+                        return L.circleMarker(latlng, {
+                            radius: 8,
+                            fillColor: '#0078d4',
+                            color: '#fff',
+                            weight: 2,
+                            opacity: 1,
+                            fillOpacity: 0.7
+                        });
+                    }
+                }).addTo(map);
+
+                // Fit map to data bounds
+                if (data.features && data.features.length > 0) {
+                    map.fitBounds(dataLayer.getBounds(), { padding: [50, 50] });
+                }
+
+                const featureCount = data.features ? data.features.length : 0;
+                showStatus(`Loaded ${featureCount} features`, 'success');
+                updateStats(data);
+
+            } catch (error) {
+                console.error('Error:', error);
+                showStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                loadBtn.disabled = false;
+            }
+        }
+
+        // Load mock data
+        async function loadMockData() {
+            showStatus('Loading mock data...', 'loading');
+            mockBtn.disabled = true;
+
+            try {
+                const response = await fetch('http://localhost:3000/query?f=geojson');
+                const data = await response.json();
+
+                if (dataLayer) {
+                    map.removeLayer(dataLayer);
+                }
+
+                dataLayer = L.geoJSON(data, {
+                    onEachFeature: function(feature, layer) {
+                        if (feature.properties) {
+                            let popupContent = '<strong>Properties:</strong><br>';
+                            for (const [key, value] of Object.entries(feature.properties)) {
+                                popupContent += `${key}: ${value}<br>`;
+                            }
+                            layer.bindPopup(popupContent);
+                        }
+                    },
+                    pointToLayer: function(feature, latlng) {
+                        return L.circleMarker(latlng, {
+                            radius: 8,
+                            fillColor: '#ff6b6b',
+                            color: '#fff',
+                            weight: 2,
+                            opacity: 1,
+                            fillOpacity: 0.7
+                        });
+                    }
+                }).addTo(map);
+
+                if (data.features && data.features.length > 0) {
+                    map.fitBounds(dataLayer.getBounds(), { padding: [50, 50] });
+                }
+
+                showStatus(`Loaded ${data.features.length} mock features`, 'success');
+                updateStats(data);
+
+            } catch (error) {
+                console.error('Error:', error);
+                showStatus(`Error: ${error.message}. Is the server running?`, 'error');
+            } finally {
+                mockBtn.disabled = false;
+            }
+        }
+
+        // Clear map
+        function clearMap() {
+            if (dataLayer) {
+                map.removeLayer(dataLayer);
+                dataLayer = null;
+            }
+            hideStatus();
+            statsDiv.style.display = 'none';
+        }
+
+        // Event listeners
+        loadBtn.addEventListener('click', loadData);
+        mockBtn.addEventListener('click', loadMockData);
+        clearBtn.addEventListener('click', clearMap);
+
+        // Allow Enter key to submit
+        document.getElementById('tableName').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') loadData();
+        });
+
+        console.log('Viewer initialized. Map centered at [40.7589, -73.9851]');
+    </script>
+</body>
+</html>

@@ -53,6 +53,13 @@ Thumbs.db
 *.json
 !config/*.json
 !**/package*.json
+!**/*.json.example
+
+# Databricks credentials
+nodejs-provider/src/databricks-config.json
+
+# Node modules
+node_modules/
 
 # Temporary files
 *.tmp

@@ -1,0 +1,22 @@
+{
+  "name": "databricks-provider-testing",
+  "version": "1.0.0",
+  "description": "Testing tools for Databricks Custom Data Provider",
+  "main": "test-server.js",
+  "scripts": {
+    "start": "node test-server.js",
+    "test": "sh test-requests.sh"
+  },
+  "keywords": [
+    "databricks",
+    "arcgis",
+    "geospatial",
+    "testing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}

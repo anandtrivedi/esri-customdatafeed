@@ -1,0 +1,12 @@
+{
+  "databricks": {
+    "serverHostname": "your-workspace.cloud.databricks.com",
+    "httpPath": "/sql/1.0/warehouses/your-warehouse-id",
+    "accessToken": "dapi...",
+    "srid": 4326,
+    "maxRecordCount": 2000,
+    "defaultTable": "catalog.schema.table_name",
+    "defaultGeometryColumn": "location",
+    "defaultIdField": "id"
+  }
+}

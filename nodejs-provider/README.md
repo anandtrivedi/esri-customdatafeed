@@ -1,14 +1,21 @@
-# Databricks Geospatial Provider for ArcGIS Custom Data Feeds
+# Databricks Custom Data Provider for ArcGIS
 
-This is a **proper ArcGIS Enterprise SDK Custom Data Provider** implemented in Node.js that connects Databricks tables with geospatial data to ArcGIS Server.
+Professional Node.js Custom Data Provider for ArcGIS Enterprise SDK that connects Databricks SQL Warehouse with geospatial data to ArcGIS Server.
 
-## What This Is
+## Overview
 
-This is a **Custom Data Feed Provider** that:
-- Runs as a Node.js service
-- Gets **registered with ArcGIS Server** via `.cdpk` package file
-- ArcGIS Server creates **Feature Services** that proxy to this provider
-- Clients access data through **ArcGIS Server**, not directly
+This provider follows official ArcGIS Enterprise SDK patterns and implements sophisticated query handling inspired by Esri reference implementations.
+
+### Key Features
+
+- ✅ **Modular Architecture** - Organized helper modules for translate, sql, filters, and geometry operations
+- ✅ **Full Query Support** - Handles all ArcGIS REST API query parameters (where, objectIds, geometry, spatial relations, pagination, sorting, etc.)
+- ✅ **Native Databricks ST_* Functions** - Uses ST_AsGeoJSON, ST_Intersects, ST_Contains, ST_Within, ST_Transform, ST_Union_Agg, etc.
+- ✅ **All Geometry Types** - Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
+- ✅ **Extent Calculation** - Automatic extent calculation for metadata using ST_Envelope and ST_Union_Agg
+- ✅ **Spatial Reference Support** - Handles CRS transformation between different SRID values
+- ✅ **Exceeded Transfer Limit Detection** - Properly handles pagination limits
+- ✅ **Service Parameters** - Configurable table name, geometry column, and ID field per Feature Service
 
 ## Architecture
 
@@ -51,10 +58,26 @@ Edit `src/databricks-config.json`:
   "databricks": {
     "serverHostname": "your-workspace.cloud.databricks.com",
     "httpPath": "/sql/1.0/warehouses/your-warehouse-id",
-    "accessToken": "dapi..."
+    "accessToken": "dapi...",
+    "srid": 4326,
+    "maxRecordCount": 2000,
+    "defaultTable": "catalog.schema.table",
+    "defaultGeometryColumn": "geometry",
+    "defaultIdField": "id"
   }
 }
 ```
+
+**Configuration Parameters:**
+
+- `serverHostname` - Your Databricks workspace hostname
+- `httpPath` - SQL Warehouse HTTP path
+- `accessToken` - Databricks personal access token
+- `srid` - Spatial Reference ID (default: 4326 for WGS84)
+- `maxRecordCount` - Maximum records per page (default: 2000)
+- `defaultTable` - Default table if not specified via service parameters
+- `defaultGeometryColumn` - Default geometry column name
+- `defaultIdField` - Default unique ID field name
 
 **Security Note:** For production, use environment variables instead of storing tokens in the config file.
 
@@ -162,15 +185,21 @@ When creating a Feature Service, you configure these parameters:
 | `geometryColumn` | No | Name of geometry column | `location` (default: `geometry`) |
 | `idField` | No | Unique ID field | `restaurant_id` (default: `id`) |
 
-## Supported Query Parameters
+## Supported Query Operations
 
-The provider supports standard ArcGIS REST API query parameters:
-
-- `where` - SQL WHERE clause for filtering
-- `resultRecordCount` - Maximum records to return (default: 2000)
-- `resultOffset` - Offset for pagination
-- `outFields` - Fields to return (handled by framework)
-- `returnGeometry` - Include geometry (handled by framework)
+| Operation | Supported | Notes |
+|-----------|-----------|-------|
+| Query with WHERE | ✅ | Full SQL WHERE clause support |
+| Query by ObjectIDs | ✅ | Filter by specific IDs |
+| Spatial Query | ✅ | Intersects, Contains, Within, Crosses, Overlaps, Touches |
+| Pagination | ✅ | resultRecordCount + resultOffset |
+| Sorting | ✅ | ORDER BY support via orderByFields |
+| Field Selection | ✅ | outFields parameter |
+| Count Only | ✅ | returnCountOnly |
+| IDs Only | ✅ | returnIdsOnly |
+| Distinct Values | ✅ | returnDistinctValues |
+| Extent | ✅ | Automatic calculation via ST_Union_Agg |
+| CRS Transformation | ✅ | Via ST_Transform |
 
 ## Databricks Table Requirements
 
@@ -247,17 +276,24 @@ map.add(layer);
 - Verify Databricks access token is valid
 - Review ArcGIS Server logs at: `/arcgis/admin/logs`
 
-## File Structure
+## Project Structure
 
 ```
 nodejs-provider/
 ├── src/
-│   ├── index.js                    # Provider registration
-│   ├── model.js                    # Main getData() implementation
-│   └── databricks-config.json      # Databricks connection config
-├── package.json                    # Node.js dependencies
-├── cdconfig.json                   # Provider configuration
-└── README.md                       # This file
+│   ├── index.js              # Provider registration
+│   ├── model.js              # Main getData() implementation
+│   ├── databricks-config.json # Databricks connection config
+│   └── modules/              # Helper modules
+│       ├── index.js          # Module exports
+│       ├── translate.js      # GeoJSON conversion
+│       ├── sql.js            # SQL query builder
+│       ├── filters.js        # filtersApplied generator
+│       └── geometry.js       # Geometry queries and transformations
+├── package.json              # Node.js dependencies
+├── cdconfig.json             # Provider configuration
+├── test-local.js             # Local testing script
+└── README.md                 # This file
 ```
 
 ## Supported Geometry Types
@@ -273,19 +309,26 @@ All Databricks geometry types are supported:
 | Polygon | Polygon |
 | MultiPolygon | Polygon |
 
-## Differences from Flask Implementation
+## Multiple Tables Configuration
 
-This repository also contains a **Flask REST API** implementation (`src/data_feed_provider.py`) which was an initial approach. Key differences:
+You can create multiple Feature Services from different Databricks tables by specifying different service parameters:
 
-| Aspect | Flask App | Node.js Provider (This) |
-|--------|-----------|-------------------------|
-| **Integration** | Standalone service | Registered with ArcGIS Server |
-| **Access** | Clients access directly | Clients access via ArcGIS Server |
-| **Management** | Separate deployment | Managed by ArcGIS Server |
-| **Authentication** | Custom | ArcGIS authentication |
-| **Deployment** | AWS/Docker/etc | Via ArcGIS Server |
+**Restaurants Service:**
+- `tableName`: `catalog.schema.restaurants`
+- `geometryColumn`: `location`
+- `idField`: `restaurant_id`
 
-**The Node.js provider is the proper ArcGIS Enterprise SDK approach.**
+**Zones Service:**
+- `tableName`: `catalog.schema.zones`
+- `geometryColumn`: `boundary`
+- `idField`: `zone_id`
+
+**Routes Service:**
+- `tableName`: `catalog.schema.routes`
+- `geometryColumn`: `path`
+- `idField`: `route_id`
+
+Each service independently queries its configured table.
 
 ## Advanced Configuration
 
