@@ -29,6 +29,7 @@ function buildSqlQuery(
     returnCountOnly,
     returnDistinctValues,
     returnGeometry = true,
+    time,
   } = geoParams;
 
   // Build SELECT clause
@@ -63,10 +64,11 @@ function buildSqlQuery(
     inSR,
     spatialRel,
     dbWKID,
+    time,
   });
 
-  // Build ORDER BY clause
-  const orderByClause = orderByFields ? ` ORDER BY ${orderByFields}` : "";
+  // Build ORDER BY clause with sanitization
+  const orderByClause = buildOrderByClause(orderByFields);
 
   // Build DISTINCT clause
   const distinctClause = returnDistinctValues ? `DISTINCT ` : "";
@@ -94,10 +96,11 @@ function buildSqlWhere({
   inSR,
   spatialRel,
   dbWKID,
+  time,
 }) {
   const sqlWhereComponents = [];
 
-  if (!where && objectIds === undefined && !geometry) {
+  if (!where && objectIds === undefined && !geometry && !time) {
     return "";
   }
 
@@ -132,7 +135,79 @@ function buildSqlWhere({
     sqlWhereComponents.push(geomComponent);
   }
 
+  // Add time filter
+  if (time) {
+    const timeComponent = buildTimeFilter(time);
+    if (timeComponent) {
+      sqlWhereComponents.push(timeComponent);
+    }
+  }
+
   return " WHERE " + sqlWhereComponents.join(" AND ");
+}
+
+/**
+ * Build ORDER BY clause with sanitization
+ * Supports formats like: "field1 ASC", "field1 ASC, field2 DESC"
+ */
+function buildOrderByClause(orderByFields) {
+  if (!orderByFields) return "";
+
+  try {
+    // Split by comma for multiple fields
+    const fields = orderByFields.split(",").map((f) => f.trim());
+
+    // Process each field
+    const sanitizedFields = fields.map((field) => {
+      // Split field and direction
+      const parts = field.split(/\s+/);
+      const fieldName = parts[0];
+      const direction = parts[1]?.toUpperCase();
+
+      // Sanitize field name (allow alphanumeric and underscore)
+      const sanitizedField = fieldName.replace(/[^a-zA-Z0-9_]/g, "");
+
+      // Validate direction
+      const validDirection =
+        direction === "DESC" ? "DESC" : "ASC";
+
+      return `${sanitizedField} ${validDirection}`;
+    });
+
+    return ` ORDER BY ${sanitizedFields.join(", ")}`;
+  } catch (error) {
+    console.error("Error building ORDER BY clause:", error);
+    return "";
+  }
+}
+
+/**
+ * Build time filter from time parameter
+ * Format: "startTime,endTime" (Unix milliseconds)
+ * Note: Assumes timestamp field is named 'ts' or 'timestamp'
+ */
+function buildTimeFilter(timeParam) {
+  if (!timeParam) return null;
+
+  try {
+    const [startMs, endMs] = timeParam.split(",").map(Number);
+
+    if (isNaN(startMs) || isNaN(endMs)) {
+      console.error("Invalid time parameter:", timeParam);
+      return null;
+    }
+
+    // Convert milliseconds to ISO timestamp
+    const startTime = new Date(startMs).toISOString();
+    const endTime = new Date(endMs).toISOString();
+
+    // Try common timestamp field names
+    // Note: In production, this should be a configurable field name
+    return `(ts >= '${startTime}' AND ts <= '${endTime}') OR (timestamp >= '${startTime}' AND timestamp <= '${endTime}')`;
+  } catch (error) {
+    console.error("Error parsing time parameter:", error);
+    return null;
+  }
 }
 
 module.exports = {

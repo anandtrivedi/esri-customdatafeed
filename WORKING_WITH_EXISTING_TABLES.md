@@ -1,5 +1,8 @@
 # Working With Existing Databricks Tables
 
+> **📖 Part of:** [ArcGIS Custom Data Feed for Databricks](README.md)
+> **Related:** [Implementation Details](IMPLEMENTATION_VERIFICATION.md) | [Future Features](OPTIONAL_FEATURES.md)
+
 This guide focuses on **using your existing Databricks tables** with the Custom Data Feed Provider. Most scenarios involve tables that already exist - you just need to determine the best way to expose them.
 
 ## Quick Decision Tree

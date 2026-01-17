@@ -33,13 +33,20 @@ ArcGIS Pro/Portal/JavaScript API Client
 ## 📖 Documentation
 
 **⚡ Start Here:**
-- **[WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)** - Comprehensive guide for using existing Databricks tables with efficiency considerations (views, materialized views, H3 aggregation)
+- **[README.md](README.md)** (this file) - Quick start, features overview, deployment options
 
-**Provider Details:**
-- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Provider implementation details and API reference
+**Working with Data:**
+- **[WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)** - How to use existing Databricks tables (views, materialized views, H3 aggregation, performance optimization)
+
+**Implementation Details:**
+- **[IMPLEMENTATION_VERIFICATION.md](IMPLEMENTATION_VERIFICATION.md)** - Verification that implementation follows official Esri ArcGIS Enterprise SDK patterns (includes detailed feature verification)
+- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Provider code details and API reference
+
+**Future Enhancements:**
+- **[OPTIONAL_FEATURES.md](OPTIONAL_FEATURES.md)** - Features NOT yet implemented but could be added in the future (groupByFields, time animation, editing)
 
 **Testing:**
-- **[testing/](testing/)** - Complete test environment with mock data and interactive viewer
+- **[testing/](testing/)** - Complete test environment with mock data, test scripts, and interactive map viewer
 
 ---
 
@@ -212,7 +219,9 @@ OPTIMIZE catalog.schema.my_table_h3_hexagons ZORDER BY (cell_polygon);
 - ✅ **ObjectIDs filtering** - Query specific features by ID
 - ✅ **Spatial queries** - Intersects, Contains, Within, Crosses, Overlaps, Touches
 - ✅ **Pagination** - resultRecordCount + resultOffset with exceeded transfer limit detection
-- ✅ **Sorting** - ORDER BY via orderByFields
+- ✅ **Sorting** - ORDER BY via orderByFields (e.g., `orderByFields=name ASC, speed DESC`)
+- ✅ **Distinct values** - returnDistinctValues for unique field values (dropdown filters, legends)
+- ✅ **Time filtering** - Query by time range with `time` parameter (Unix milliseconds)
 - ✅ **Field selection** - outFields parameter
 - ✅ **Count queries** - returnCountOnly
 
@@ -311,15 +320,17 @@ When creating each Feature Service, specify:
 
 Standard ArcGIS REST API query parameters:
 
-- `where` - SQL WHERE clause for filtering
-- `geometry` - Spatial filter (bbox, polygon)
+- `where` - SQL WHERE clause for filtering (e.g., `where=vessel_type='cargo'`)
+- `geometry` - Spatial filter (bbox, polygon) (e.g., `geometry=-125,32,-117,42`)
 - `spatialRel` - Spatial relationship (intersects, contains, within)
 - `resultRecordCount` - Max records to return (default: 2000)
 - `resultOffset` - Offset for pagination
-- `outFields` - Fields to return
+- `outFields` - Fields to return (e.g., `outFields=mmsi,vessel_name,sog`)
 - `returnGeometry` - Include geometry (default: true)
 - `returnCountOnly` - Return count instead of features
-- `orderByFields` - Sort results
+- `orderByFields` - Sort results (e.g., `orderByFields=vessel_name ASC, sog DESC`)
+- `returnDistinctValues` - Return unique values (e.g., `returnDistinctValues=true&outFields=vessel_type`)
+- `time` - Time range filter in Unix milliseconds (e.g., `time=1705489200000,1705492800000`)
 
 ---
 
@@ -484,6 +495,32 @@ geometryColumn=location&\
 idField=id&\
 geometry=-180,-90,180,90&\
 spatialRel=esriSpatialRelIntersects&\
+f=geojson"
+
+# Sort by field (NEW)
+curl "http://localhost:3000/query?\
+table=catalog.schema.table_name&\
+geometryColumn=location&\
+idField=id&\
+orderByFields=vessel_name ASC, sog DESC&\
+f=geojson"
+
+# Get distinct values for dropdown filters (NEW)
+curl "http://localhost:3000/query?\
+table=catalog.schema.table_name&\
+geometryColumn=location&\
+idField=id&\
+returnDistinctValues=true&\
+returnGeometry=false&\
+outFields=vessel_type&\
+f=json"
+
+# Time range filter (NEW)
+curl "http://localhost:3000/query?\
+table=catalog.schema.table_name&\
+geometryColumn=location&\
+idField=id&\
+time=1705489200000,1705492800000&\
 f=geojson"
 ```
 
