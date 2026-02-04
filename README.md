@@ -12,6 +12,8 @@ A **Node.js Custom Data Provider** built with Esri's best practices:
 - ✅ **All Geometry Types** - Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
 - ✅ **Works with Existing Tables** - Create views/materialized views without modifying source tables
 - ✅ **Performance Optimized** - Z-ordering, liquid clustering, H3 aggregation for large datasets
+- ✅ **Connection Pooling** - Efficient connection management for serverless/classic warehouses
+- ✅ **Security Features** - User authentication, authorization, audit logging
 - ✅ **Registers with ArcGIS Server** via `.cdpk` package
 - ✅ **No Data Export** - Queries Databricks directly
 
@@ -41,6 +43,9 @@ ArcGIS Pro/Portal/JavaScript API Client
 **Implementation Details:**
 - **[IMPLEMENTATION_VERIFICATION.md](IMPLEMENTATION_VERIFICATION.md)** - Verification that implementation follows official Esri ArcGIS Enterprise SDK patterns (includes detailed feature verification)
 - **[nodejs-provider/README.md](nodejs-provider/README.md)** - Provider code details and API reference
+
+**Security:**
+- **[SECURITY_FEATURES.md](SECURITY_FEATURES.md)** - Authentication, authorization, and audit logging guide (NEW!)
 
 **Future Enhancements:**
 - **[OPTIONAL_FEATURES.md](OPTIONAL_FEATURES.md)** - Features NOT yet implemented but could be added in the future (groupByFields, time animation, editing)

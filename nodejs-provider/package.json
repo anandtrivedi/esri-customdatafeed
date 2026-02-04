@@ -15,6 +15,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@databricks/sql": "^1.5.3"
+    "@databricks/sql": "^1.5.3",
+    "dotenv": "^16.0.3"
   }
 }

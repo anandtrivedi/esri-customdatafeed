@@ -5,17 +5,47 @@
  * Implements ArcGIS Custom Data Feed interface for Databricks SQL Warehouse
  * with native geospatial function support (ST_*)
  *
- * Uses connection pooling for optimal performance with serverless and classic SQL warehouses
+ * Features:
+ * - Connection pooling for optimal performance
+ * - User authentication via authorize() method
+ * - Audit logging for security tracking
+ * - Environment variable configuration
  */
 
-const config = require('./databricks-config.json');
+// Load environment variables
+require('dotenv').config();
+
+const configTemplate = require('./databricks-config.json');
 const {
   translateToGeoJSON,
   buildSqlQuery,
   generateFiltersApplied,
   getExtentFromGeoJson,
+  getAuditLogger,
 } = require('./modules');
 const { initializePool, getPool } = require('./modules/connectionPool');
+
+// Load configuration from environment variables
+const config = {
+  databricks: {
+    serverHostname: process.env.DATABRICKS_SERVER_HOSTNAME || configTemplate.databricks.serverHostname,
+    httpPath: process.env.DATABRICKS_HTTP_PATH || configTemplate.databricks.httpPath,
+    accessToken: process.env.DATABRICKS_ACCESS_TOKEN || configTemplate.databricks.accessToken,
+    srid: parseInt(process.env.DATABRICKS_SRID) || configTemplate.databricks.srid,
+    maxRecordCount: parseInt(process.env.DATABRICKS_MAX_RECORD_COUNT) || configTemplate.databricks.maxRecordCount,
+    defaultTable: process.env.DATABRICKS_DEFAULT_TABLE || configTemplate.databricks.defaultTable,
+    defaultGeometryColumn: process.env.DATABRICKS_GEOMETRY_COLUMN || configTemplate.databricks.defaultGeometryColumn,
+    defaultIdField: process.env.DATABRICKS_ID_FIELD || configTemplate.databricks.defaultIdField
+  }
+};
+
+// Validate required configuration
+if (!config.databricks.serverHostname || !config.databricks.httpPath || !config.databricks.accessToken) {
+  throw new Error('Missing required Databricks configuration. Please check your .env file.');
+}
+
+// Initialize audit logger
+const auditLogger = getAuditLogger();
 
 let requestCounter = 0;
 
@@ -24,6 +54,11 @@ let requestCounter = 0;
  */
 function Model(koop) {
   console.log('✅ Databricks Custom Data Provider initialized ✅');
+  console.log(`   Server: ${config.databricks.serverHostname}`);
+  console.log(`   Default table: ${config.databricks.defaultTable || 'not configured'}`);
+  console.log(`   User auth: ${process.env.ENABLE_USER_AUTH === 'true' ? 'ENABLED' : 'disabled'}`);
+  console.log(`   Simple auth: ${process.env.ENABLE_SIMPLE_AUTH === 'true' ? 'ENABLED (testing only)' : 'disabled'}`);
+  console.log(`   Audit log: ${process.env.ENABLE_AUDIT_LOG === 'true' ? 'ENABLED' : 'disabled'}`);
 
   // Initialize connection pool on first instantiation
   if (!Model.poolInitialized) {
@@ -36,6 +71,86 @@ function Model(koop) {
     Model.poolInitialized = true;
   }
 }
+
+/**
+ * authorize() method - Called before getData() for user authentication
+ *
+ * This method is called automatically by ArcGIS when forwardUserIdentity is enabled.
+ * It receives the authenticated user's information from ArcGIS and can:
+ * - Allow or deny access
+ * - Perform custom authorization logic
+ * - Log authentication attempts
+ *
+ * @param {object} req - Request object with user information
+ *   req._user - User object from ArcGIS (if forwardUserIdentity enabled)
+ *   req._user.username - ArcGIS username
+ *   req._user.groups - Array of user's groups
+ *   req._user.role - User's role
+ * @param {function} callback - Callback function(error, authorized)
+ */
+Model.prototype.authorize = function(req, callback) {
+  const enableUserAuth = process.env.ENABLE_USER_AUTH === 'true';
+  const enableSimpleAuth = process.env.ENABLE_SIMPLE_AUTH === 'true';
+  const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+
+  // If no authentication is enabled, allow all requests
+  if (!enableUserAuth && !enableSimpleAuth) {
+    return callback(null, true);
+  }
+
+  // Simple token authentication (for development/testing)
+  if (enableSimpleAuth) {
+    const authHeader = req.headers.authorization;
+    const expectedToken = process.env.SIMPLE_AUTH_TOKEN;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Missing or invalid authorization header');
+      return callback(new Error('Authorization required. Use: Authorization: Bearer <token>'), false);
+    }
+
+    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+
+    if (token !== expectedToken) {
+      auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Invalid token');
+      return callback(new Error('Invalid authentication token'), false);
+    }
+
+    auditLogger.logAuthSuccess('simple_token_user', 'simple_token', ipAddress);
+    return callback(null, true);
+  }
+
+  // ArcGIS user authentication (production)
+  if (enableUserAuth) {
+    const user = req._user;
+
+    if (!user || !user.username) {
+      auditLogger.logAuthFailure('anonymous', 'arcgis', ipAddress, 'No user information from ArcGIS');
+      return callback(new Error('User authentication required'), false);
+    }
+
+    // Example authorization logic - customize based on your needs:
+    // - Check user's role
+    // - Check user's groups
+    // - Check against allowed users list
+    // - Query external authorization service
+
+    // For now, allow all authenticated ArcGIS users
+    // To restrict access, add your authorization logic here
+
+    auditLogger.logAuthSuccess(user.username, 'arcgis', ipAddress);
+    return callback(null, true);
+
+    // Example: Restrict to specific groups
+    // const allowedGroups = ['GIS_Analysts', 'Data_Viewers'];
+    // const hasAccess = user.groups && user.groups.some(group => allowedGroups.includes(group));
+    // if (!hasAccess) {
+    //   auditLogger.logAuthorizationFailure(user.username, 'N/A', ipAddress, 'User not in allowed groups');
+    //   return callback(new Error('Access denied: insufficient permissions'), false);
+    // }
+  }
+
+  callback(null, true);
+};
 
 /**
  * Main getData method required by ArcGIS Custom Data Feeds
@@ -188,7 +303,13 @@ Model.prototype.getData = function(req, callback) {
           properties: { name: `urn:ogc:def:crs:EPSG::${sourceConfig.dbWKID}` },
         };
 
-        console.log(`Query ${requestCounter}: Returning ${geojson.features ? geojson.features.length : 0} features`);
+        const recordCount = geojson.features ? geojson.features.length : (geojson.count || 0);
+        console.log(`Query ${requestCounter}: Returning ${recordCount} ${geojson.count ? 'count' : 'features'}`);
+
+        // Log query to audit log
+        const username = req._user?.username || 'anonymous';
+        const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+        auditLogger.logQuery(username, sourceConfig.tableName, geoserviceParams, recordCount, ipAddress);
 
         callback(null, geojson);
 

@@ -7,6 +7,7 @@ const { translateToGeoJSON } = require("./translate");
 const { buildSqlQuery } = require("./sql");
 const { generateFiltersApplied } = require("./filters");
 const { getGeometryQuery, getExtentFromGeoJson } = require("./geometry");
+const { getAuditLogger } = require("./auditLog");
 
 module.exports = {
   translateToGeoJSON,
@@ -14,4 +15,5 @@ module.exports = {
   generateFiltersApplied,
   getGeometryQuery,
   getExtentFromGeoJson,
+  getAuditLogger,
 };
