@@ -1,0 +1,27 @@
+{
+  "name": "databricks-custom-data-feed-server",
+  "version": "1.0.0",
+  "description": "ArcGIS Custom Data Feed Provider for Databricks - Standalone Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"No tests yet\""
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "arcgis",
+    "databricks",
+    "featureserver",
+    "geospatial"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "@databricks/sql": "^1.5.3"
+  }
+}

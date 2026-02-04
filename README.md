@@ -34,24 +34,18 @@ ArcGIS Pro/Portal/JavaScript API Client
 
 ## 📖 Documentation
 
-**⚡ Start Here:**
-- **[README.md](README.md)** (this file) - Quick start, features overview, deployment options
+### Getting Started
+- **[TESTING.md](TESTING.md)** - Local testing & Render.com deployment (START HERE)
+- **[PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)** - Production ArcGIS Server deployment guide
 
-**Working with Data:**
-- **[WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)** - How to use existing Databricks tables (views, materialized views, H3 aggregation, performance optimization)
+### Working with Data
+- **[GEOMETRY_FORMATS.md](GEOMETRY_FORMATS.md)** - Geometry formats (WKT, WKB, GeoJSON, GEOMETRY) with performance comparison
+- **[WORKING_WITH_EXISTING_TABLES.md](WORKING_WITH_EXISTING_TABLES.md)** - Using existing Databricks tables
 
-**Implementation Details:**
-- **[IMPLEMENTATION_VERIFICATION.md](IMPLEMENTATION_VERIFICATION.md)** - Verification that implementation follows official Esri ArcGIS Enterprise SDK patterns (includes detailed feature verification)
-- **[nodejs-provider/README.md](nodejs-provider/README.md)** - Provider code details and API reference
-
-**Security:**
-- **[SECURITY_FEATURES.md](SECURITY_FEATURES.md)** - Authentication, authorization, and audit logging guide (NEW!)
-
-**Future Enhancements:**
-- **[OPTIONAL_FEATURES.md](OPTIONAL_FEATURES.md)** - Features NOT yet implemented but could be added in the future (groupByFields, time animation, editing)
-
-**Testing:**
-- **[testing/](testing/)** - Complete test environment with mock data, test scripts, and interactive map viewer
+### Security & Reference
+- **[SECURITY_FEATURES.md](SECURITY_FEATURES.md)** - Authentication, authorization, audit logging
+- **[IMPLEMENTATION_VERIFICATION.md](IMPLEMENTATION_VERIFICATION.md)** - Verification of Esri SDK compliance
+- **[OPTIONAL_FEATURES.md](OPTIONAL_FEATURES.md)** - Future enhancements roadmap
 
 ---
 

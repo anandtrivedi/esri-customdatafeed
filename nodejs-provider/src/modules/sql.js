@@ -4,6 +4,7 @@
  */
 
 const { getGeometryQuery } = require("./geometry");
+const { getGeometryToGeoJSON } = require("./geometryFormat");
 
 /**
  * Build SQL query with support for ArcGIS query parameters
@@ -14,7 +15,8 @@ function buildSqlQuery(
   geometryField,
   tableName,
   dbWKID,
-  fetchSize
+  fetchSize,
+  geometryFormat = null
 ) {
   const {
     where,
@@ -41,15 +43,18 @@ function buildSqlQuery(
   } else if (returnDistinctValues && !returnGeometry) {
     selectClause = `${outFields}`;
   } else if (outFields === "*") {
-    // Use ST_AsGeoJSON to convert geometry to GeoJSON
-    selectClause = `* EXCEPT (${geometryField}), ST_AsGeoJSON(${geometryField}) AS ${geometryField}`;
+    // Convert geometry to GeoJSON (supports WKT, WKB, GeoJSON, native GEOMETRY)
+    const geomToGeoJSON = getGeometryToGeoJSON(geometryField, dbWKID, geometryFormat);
+    selectClause = `* EXCEPT (${geometryField}), ${geomToGeoJSON} AS ${geometryField}`;
   } else {
     let outputFields = outFields;
     if (!outFields.includes(idField)) {
       // Koop needs OBJECTID field in geojson
       outputFields = outFields.concat(`, ${idField}`);
     }
-    selectClause = `${outputFields}, ST_AsGeoJSON(${geometryField}) AS ${geometryField}`;
+    // Convert geometry to GeoJSON (supports WKT, WKB, GeoJSON, native GEOMETRY)
+    const geomToGeoJSON = getGeometryToGeoJSON(geometryField, dbWKID, geometryFormat);
+    selectClause = `${outputFields}, ${geomToGeoJSON} AS ${geometryField}`;
   }
 
   const from = ` FROM ${tableName}`;
@@ -65,6 +70,7 @@ function buildSqlQuery(
     spatialRel,
     dbWKID,
     time,
+    geometryFormat,
   });
 
   // Build ORDER BY clause with sanitization
@@ -97,6 +103,7 @@ function buildSqlWhere({
   spatialRel,
   dbWKID,
   time,
+  geometryFormat = null,
 }) {
   const sqlWhereComponents = [];
 
@@ -130,7 +137,8 @@ function buildSqlWhere({
       geometryField,
       inSR,
       spatialRel,
-      dbWKID
+      dbWKID,
+      geometryFormat
     );
     sqlWhereComponents.push(geomComponent);
   }

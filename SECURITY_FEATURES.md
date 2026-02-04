@@ -360,7 +360,7 @@ ENABLE_SIMPLE_AUTH=false npm start
 ### Prerequisites
 
 - Databricks Community Edition account (aat0995@yahoo.com)
-- Existing table: `main.default.koop_test_cities` (10 US cities)
+- Existing table: `workspace.default.koop_test_cities` (10 US cities)
 
 ### Configuration
 

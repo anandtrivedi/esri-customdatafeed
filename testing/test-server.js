@@ -4,7 +4,12 @@
  *
  * This simulates how ArcGIS Server calls the provider's getData() method.
  * Use this to test provider logic before deploying to ArcGIS Server.
+ *
+ * Now includes authentication testing!
  */
+
+// Load environment variables
+require('dotenv').config({ path: require('path').join(__dirname, '../nodejs-provider/.env') });
 
 const express = require('express');
 const cors = require('cors');
@@ -14,7 +19,7 @@ const path = require('path');
 const Model = require('../nodejs-provider/src/model');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // Enable CORS for browser testing
 app.use(cors());
@@ -68,11 +73,13 @@ const model = new Model();
 /**
  * Main query endpoint
  * Simulates ArcGIS REST API query endpoint
+ * Now includes authorization check!
  */
 app.get('/query', async (req, res) => {
   try {
     console.log('\n--- Incoming Request ---');
     console.log('Query params:', req.query);
+    console.log('Authorization header:', req.headers.authorization || 'none');
 
     // Use mock data if configured
     if (USE_MOCK_DATA) {
@@ -81,9 +88,10 @@ app.get('/query', async (req, res) => {
     }
 
     // Extract table parameter (not standard ArcGIS param, added for testing)
-    const tableName = req.query.table || req.query.tableName;
-    const geometryColumn = req.query.geometryColumn || 'location';
-    const idField = req.query.idField || 'id';
+    // Use defaults from environment variables
+    const tableName = req.query.table || req.query.tableName || process.env.DATABRICKS_DEFAULT_TABLE;
+    const geometryColumn = req.query.geometryColumn || process.env.DATABRICKS_GEOMETRY_COLUMN || 'geometry_wkt';
+    const idField = req.query.idField || process.env.DATABRICKS_ID_FIELD || 'objectid';
 
     if (!tableName) {
       return res.status(400).json({
@@ -106,11 +114,49 @@ app.get('/query', async (req, res) => {
         tableName: undefined,
         geometryColumn: undefined,
         idField: undefined
-      }
+      },
+      headers: req.headers,
+      ip: req.ip,
+      connection: req.connection,
+      _user: req._user  // For ArcGIS user auth testing
     };
 
-    // Call the provider's getData method
-    model.getData(mockReq, (error, geojson) => {
+    // Call authorize() first (if method exists)
+    if (typeof model.authorize === 'function') {
+      model.authorize(mockReq, (authError, authorized) => {
+        if (authError || !authorized) {
+          console.error('Authorization failed:', authError?.message || 'Access denied');
+          return res.status(401).json({
+            error: 'Unauthorized',
+            details: authError?.message || 'Access denied'
+          });
+        }
+
+        console.log('✓ Authorization successful');
+
+        // Call the provider's getData method
+        callGetData(mockReq, res);
+      });
+    } else {
+      // No authorize() method, proceed directly to getData()
+      callGetData(mockReq, res);
+    }
+
+  } catch (error) {
+    console.error('Server error:', error);
+    res.status(500).json({
+      error: 'Server error',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Helper function to call getData()
+ */
+function callGetData(mockReq, res) {
+  model.getData(mockReq, (error, geojson) => {
+    try {
       if (error) {
         console.error('Provider error:', error);
         return res.status(500).json({
@@ -126,16 +172,15 @@ app.get('/query', async (req, res) => {
 
       // Return GeoJSON
       res.json(geojson);
-    });
-
-  } catch (error) {
-    console.error('Server error:', error);
-    res.status(500).json({
-      error: 'Server error',
-      details: error.message
-    });
-  }
-});
+    } catch (error) {
+      console.error('Response error:', error);
+      res.status(500).json({
+        error: 'Response error',
+        details: error.message
+      });
+    }
+  });
+}
 
 /**
  * Health check endpoint
@@ -155,6 +200,11 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Databricks Custom Data Provider Test Server',
     mockData: USE_MOCK_DATA,
+    authentication: {
+      simpleAuth: process.env.ENABLE_SIMPLE_AUTH === 'true',
+      userAuth: process.env.ENABLE_USER_AUTH === 'true',
+      auditLog: process.env.ENABLE_AUDIT_LOG === 'true'
+    },
     endpoints: {
       health: 'GET /health',
       query: 'GET /query',

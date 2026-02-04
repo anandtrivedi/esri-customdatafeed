@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Databricks Provider Test Viewer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      color: white;
+      text-align: center;
+      margin-bottom: 30px;
+      font-size: 2.5rem;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+
+    .controls {
+      background: white;
+      border-radius: 10px;
+      padding: 25px;
+      margin-bottom: 20px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+    }
+
+    .control-group {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 5px;
+      color: #333;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e0e0e0;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.3s;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .button-group {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    button {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .results {
+      background: white;
+      border-radius: 10px;
+      padding: 25px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+    }
+
+    .results h2 {
+      color: #333;
+      margin-bottom: 15px;
+      font-size: 1.5rem;
+    }
+
+    .status {
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      font-weight: 500;
+    }
+
+    .status.success {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+
+    .status.error {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+
+    .status.loading {
+      background: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+
+    .query-url {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      border-left: 4px solid #667eea;
+      word-break: break-all;
+      font-family: monospace;
+      font-size: 13px;
+    }
+
+    .query-url strong {
+      display: block;
+      margin-bottom: 8px;
+      color: #667eea;
+      font-family: 'Segoe UI', sans-serif;
+    }
+
+    .query-url code {
+      background: white;
+      padding: 8px;
+      display: block;
+      border-radius: 4px;
+      border: 1px solid #e0e0e0;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .query-url code:hover {
+      background: #e7f3ff;
+    }
+
+    pre {
+      background: #f8f9fa;
+      padding: 20px;
+      border-radius: 6px;
+      overflow-x: auto;
+      border: 1px solid #e0e0e0;
+      font-size: 13px;
+      line-height: 1.6;
+      max-height: 600px;
+      overflow-y: auto;
+    }
+
+    .metadata {
+      background: #e7f3ff;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      border-left: 4px solid #667eea;
+    }
+
+    .metadata p {
+      margin: 5px 0;
+      color: #333;
+    }
+
+    .metadata strong {
+      color: #667eea;
+    }
+
+    @media (max-width: 768px) {
+      h1 {
+        font-size: 1.8rem;
+      }
+
+      .button-group {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🗺️ Databricks Provider Test Viewer</h1>
+
+    <div class="controls">
+      <div class="control-group">
+        <label>Server URL:</label>
+        <input type="text" id="serverUrl" value="http://localhost:3000">
+      </div>
+
+      <div class="control-group">
+        <label>Table Name:</label>
+        <input type="text" id="tableName" value="workspace.default.koop_test_cities">
+      </div>
+
+      <div class="control-group">
+        <label>Geometry Column:</label>
+        <input type="text" id="geometryColumn" value="geometry_wkt">
+      </div>
+
+      <div class="control-group">
+        <label>ID Field:</label>
+        <input type="text" id="idField" value="objectid">
+      </div>
+
+      <div class="control-group">
+        <label>Bearer Token:</label>
+        <input type="text" id="bearerToken" value="test-token-12345">
+      </div>
+
+      <div class="button-group">
+        <button onclick="testCount()">Get Count</button>
+        <button onclick="testFeatures()">Get Features</button>
+        <button onclick="testWithFilter()">Filter (California)</button>
+        <button onclick="testPagination()">Pagination (5 records)</button>
+        <button onclick="testMetadata()">Get Metadata</button>
+        <button onclick="clearResults()">Clear Results</button>
+      </div>
+    </div>
+
+    <div class="results">
+      <h2>Results</h2>
+      <div id="status"></div>
+      <div id="queryUrl"></div>
+      <div id="metadata"></div>
+      <pre id="output">Click a button above to test the API...</pre>
+    </div>
+  </div>
+
+  <script>
+    function getConfig() {
+      return {
+        serverUrl: document.getElementById('serverUrl').value,
+        tableName: document.getElementById('tableName').value,
+        geometryColumn: document.getElementById('geometryColumn').value,
+        idField: document.getElementById('idField').value,
+        bearerToken: document.getElementById('bearerToken').value
+      };
+    }
+
+    function buildUrl(params = {}) {
+      const config = getConfig();
+      const url = new URL(`${config.serverUrl}/query`);
+
+      url.searchParams.append('table', config.tableName);
+      url.searchParams.append('geometryColumn', config.geometryColumn);
+      url.searchParams.append('idField', config.idField);
+
+      Object.keys(params).forEach(key => {
+        url.searchParams.append(key, params[key]);
+      });
+
+      return url.toString();
+    }
+
+    function setStatus(message, type = 'loading') {
+      const statusDiv = document.getElementById('status');
+      statusDiv.className = `status ${type}`;
+      statusDiv.textContent = message;
+    }
+
+    function setMetadata(data) {
+      const metadataDiv = document.getElementById('metadata');
+      if (!data.metadata && !data.count) {
+        metadataDiv.innerHTML = '';
+        return;
+      }
+
+      let html = '<div class="metadata">';
+
+      if (data.count !== undefined) {
+        html += `<p><strong>Total Count:</strong> ${data.count}</p>`;
+      }
+
+      if (data.features) {
+        html += `<p><strong>Features Returned:</strong> ${data.features.length}</p>`;
+      }
+
+      if (data.metadata) {
+        const meta = data.metadata;
+        if (meta.name) html += `<p><strong>Layer:</strong> ${meta.name}</p>`;
+        if (meta.geometryType) html += `<p><strong>Geometry Type:</strong> ${meta.geometryType}</p>`;
+        if (meta.maxRecordCount) html += `<p><strong>Max Record Count:</strong> ${meta.maxRecordCount}</p>`;
+        if (meta.exceededTransferLimit !== undefined) {
+          html += `<p><strong>Exceeded Transfer Limit:</strong> ${meta.exceededTransferLimit}</p>`;
+        }
+      }
+
+      html += '</div>';
+      metadataDiv.innerHTML = html;
+    }
+
+    function setOutput(data) {
+      document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+    }
+
+    function setQueryUrl(url) {
+      const queryUrlDiv = document.getElementById('queryUrl');
+      queryUrlDiv.innerHTML = `
+        <div class="query-url">
+          <strong>🔗 Query URL:</strong>
+          <code onclick="copyToClipboard(this)" title="Click to copy">${url}</code>
+        </div>
+      `;
+    }
+
+    function copyToClipboard(element) {
+      const text = element.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const originalText = element.textContent;
+        element.textContent = '✓ Copied!';
+        setTimeout(() => {
+          element.textContent = originalText;
+        }, 2000);
+      }).catch(err => {
+        console.error('Failed to copy:', err);
+      });
+    }
+
+    async function makeRequest(params = {}) {
+      const config = getConfig();
+      const url = buildUrl(params);
+
+      setStatus('⏳ Sending request to Databricks...', 'loading');
+      setQueryUrl(url);
+      setMetadata({});
+
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${config.bearerToken}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          setStatus(`❌ Error ${response.status}: ${data.error || response.statusText}`, 'error');
+          setOutput(data);
+          return;
+        }
+
+        const recordCount = data.features ? data.features.length : (data.count || 0);
+        const recordType = data.count !== undefined ? 'count' : 'features';
+        setStatus(`✅ Success! Retrieved ${recordCount} ${recordType} from ${config.tableName.split('.').pop()}`, 'success');
+        setMetadata(data);
+        setOutput(data);
+
+      } catch (error) {
+        setStatus(`Network Error: ${error.message}`, 'error');
+        setOutput({ error: error.message, stack: error.stack });
+      }
+    }
+
+    async function testCount() {
+      await makeRequest({ returnCountOnly: true, f: 'json' });
+    }
+
+    async function testFeatures() {
+      await makeRequest({ f: 'geojson' });
+    }
+
+    async function testWithFilter() {
+      await makeRequest({
+        where: "state = 'California'",
+        f: 'geojson'
+      });
+    }
+
+    async function testPagination() {
+      await makeRequest({
+        resultRecordCount: 5,
+        f: 'geojson'
+      });
+    }
+
+    async function testMetadata() {
+      await makeRequest({ f: 'json' });
+    }
+
+    function clearResults() {
+      document.getElementById('status').innerHTML = '';
+      document.getElementById('queryUrl').innerHTML = '';
+      document.getElementById('metadata').innerHTML = '';
+      document.getElementById('output').textContent = 'Click a button above to test the API...';
+    }
+
+    // Show connection info on load
+    window.addEventListener('load', () => {
+      const config = getConfig();
+      console.log('Test Viewer Ready');
+      console.log('Server:', config.serverUrl);
+      console.log('Table:', config.tableName);
+      console.log('Token:', config.bearerToken);
+    });
+  </script>
+</body>
+</html>

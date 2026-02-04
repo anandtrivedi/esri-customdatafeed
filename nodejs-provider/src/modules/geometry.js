@@ -3,6 +3,8 @@
  * Handles geometry queries and transformations for Databricks ST_* functions
  */
 
+const { getGeometryFieldExpression } = require("./geometryFormat");
+
 /**
  * Build geometry filter query for Databricks
  */
@@ -11,7 +13,8 @@ function getGeometryQuery(
   geometryField,
   inSR,
   spatialRel = "esriSpatialRelIntersects",
-  dbSR = 4326
+  dbSR = 4326,
+  geometryFormat = null
 ) {
   // Parse geometry - can be comma delimited or JSON
   let rawGeomFilter = "";
@@ -33,25 +36,28 @@ function getGeometryQuery(
   }
 
   // Build spatial relationship query
+  // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
+  const geomFieldExpression = getGeometryFieldExpression(geometryField, dbSR, geometryFormat);
+
   let geomComponent = "";
   switch (spatialRel) {
     case "esriSpatialRelIntersects":
-      geomComponent = `ST_Intersects(${geometryField}, ${geometryFilter})`;
+      geomComponent = `ST_Intersects(${geomFieldExpression}, ${geometryFilter})`;
       break;
     case "esriSpatialRelContains":
-      geomComponent = `ST_Contains(${geometryField}, ${geometryFilter})`;
+      geomComponent = `ST_Contains(${geomFieldExpression}, ${geometryFilter})`;
       break;
     case "esriSpatialRelWithin":
-      geomComponent = `ST_Within(${geometryField}, ${geometryFilter})`;
+      geomComponent = `ST_Within(${geomFieldExpression}, ${geometryFilter})`;
       break;
     case "esriSpatialRelCrosses":
-      geomComponent = `ST_Crosses(${geometryField}, ${geometryFilter})`;
+      geomComponent = `ST_Crosses(${geomFieldExpression}, ${geometryFilter})`;
       break;
     case "esriSpatialRelOverlaps":
-      geomComponent = `ST_Overlaps(${geometryField}, ${geometryFilter})`;
+      geomComponent = `ST_Overlaps(${geomFieldExpression}, ${geometryFilter})`;
       break;
     case "esriSpatialRelTouches":
-      geomComponent = `ST_Touches(${geometryField}, ${geometryFilter})`;
+      geomComponent = `ST_Touches(${geomFieldExpression}, ${geometryFilter})`;
       break;
     default:
       throw new Error(`Unsupported spatial relation: ${spatialRel}`);

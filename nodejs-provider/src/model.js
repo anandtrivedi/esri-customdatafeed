@@ -22,6 +22,7 @@ const {
   generateFiltersApplied,
   getExtentFromGeoJson,
   getAuditLogger,
+  getGeometryFieldExpression,
 } = require('./modules');
 const { initializePool, getPool } = require('./modules/connectionPool');
 
@@ -178,6 +179,7 @@ Model.prototype.getData = function(req, callback) {
   const sourceConfig = {
     tableName: req.params.tableName || config.databricks.defaultTable,
     geometryColumn: req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry',
+    geometryFormat: req.params.geometryFormat || null, // Optional: 'WKT' | 'WKB' | 'GEOJSON' | 'GEOMETRY'
     idField: req.params.idField || config.databricks.defaultIdField || 'id',
     dbWKID: config.databricks.srid || 4326,
     maxRecordCountPerPage: config.databricks.maxRecordCount || 2000,
@@ -219,7 +221,8 @@ Model.prototype.getData = function(req, callback) {
           sourceConfig.geometryColumn,
           sourceConfig.tableName,
           sourceConfig.dbWKID,
-          fetchSize
+          fetchSize,
+          sourceConfig.geometryFormat
         );
 
         console.log(`Query ${requestCounter}: ${sqlQuery.substring(0, 150)}...`);
@@ -228,8 +231,11 @@ Model.prototype.getData = function(req, callback) {
         let dbExtent = null;
         if (isMetadataRequest) {
           try {
+            // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
+            const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, sourceConfig.geometryFormat);
+
             const extentQuery = `
-              SELECT ST_AsGeoJSON(ST_Envelope(ST_Union_Agg(${sourceConfig.geometryColumn}))) AS extent
+              SELECT ST_AsGeoJSON(ST_Envelope(ST_Union_Agg(${geomExpression}))) AS extent
               FROM ${sourceConfig.tableName}
             `;
 
