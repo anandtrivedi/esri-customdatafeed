@@ -4,9 +4,10 @@
  *
  * Implements ArcGIS Custom Data Feed interface for Databricks SQL Warehouse
  * with native geospatial function support (ST_*)
+ *
+ * Uses connection pooling for optimal performance with serverless and classic SQL warehouses
  */
 
-const { DBSQLClient } = require('@databricks/sql');
 const config = require('./databricks-config.json');
 const {
   translateToGeoJSON,
@@ -14,6 +15,7 @@ const {
   generateFiltersApplied,
   getExtentFromGeoJson,
 } = require('./modules');
+const { initializePool, getPool } = require('./modules/connectionPool');
 
 let requestCounter = 0;
 
@@ -22,6 +24,17 @@ let requestCounter = 0;
  */
 function Model(koop) {
   console.log('✅ Databricks Custom Data Provider initialized ✅');
+
+  // Initialize connection pool on first instantiation
+  if (!Model.poolInitialized) {
+    initializePool(config.databricks, {
+      min: 2,    // Minimum connections (always ready)
+      max: 10,   // Maximum connections (scale up under load)
+      idleTimeout: 60000,      // Close idle connections after 60 seconds
+      connectionTimeout: 30000 // Wait max 30 seconds for connection
+    });
+    Model.poolInitialized = true;
+  }
 }
 
 /**
@@ -68,26 +81,21 @@ Model.prototype.getData = function(req, callback) {
     ? 1
     : resultRecordCount || sourceConfig.maxRecordCountPerPage;
 
-  // Create Databricks client
-  const client = new DBSQLClient();
-  const connectOptions = {
-    token: config.databricks.accessToken,
-    host: config.databricks.serverHostname,
-    path: config.databricks.httpPath
-  };
+  // Use connection pool (works with serverless and classic SQL warehouses)
+  const pool = getPool();
+  let connection = null;
 
-  console.log(`Query ${requestCounter}: Connecting to Databricks...`);
+  console.log(`Query ${requestCounter}: Acquiring connection from pool...`);
 
-  // Connect and execute query (following Koop pattern)
-  client.connect(connectOptions)
-    .then(async client => {
-      let session;
+  // Acquire connection and execute query
+  pool.acquire()
+    .then(async (conn) => {
+      connection = conn;
       let queryOperation;
       let extentOperation;
 
       try {
-        session = await client.openSession();
-        console.log(`Query ${requestCounter}: Session opened`);
+        console.log(`Query ${requestCounter}: Using pooled connection ${connection.id}`);
 
         // Build SQL query using helper module
         const sqlQuery = buildSqlQuery(
@@ -110,7 +118,7 @@ Model.prototype.getData = function(req, callback) {
               FROM ${sourceConfig.tableName}
             `;
 
-            extentOperation = await session.executeStatement(extentQuery, { runAsync: true });
+            extentOperation = await connection.session.executeStatement(extentQuery, { runAsync: true });
             const extentRows = await extentOperation.fetchAll();
             await extentOperation.close();
             extentOperation = null;
@@ -127,7 +135,7 @@ Model.prototype.getData = function(req, callback) {
         }
 
         // Execute main query
-        queryOperation = await session.executeStatement(sqlQuery, { runAsync: true });
+        queryOperation = await connection.session.executeStatement(sqlQuery, { runAsync: true });
         const rows = await queryOperation.fetchAll();
         await queryOperation.close();
         queryOperation = null;
@@ -138,8 +146,6 @@ Model.prototype.getData = function(req, callback) {
         let geojson = { type: "FeatureCollection", features: [] };
 
         if (rows.length === 0) {
-          await session.close();
-          await client.close();
           return callback(null, geojson);
         }
 
@@ -190,20 +196,29 @@ Model.prototype.getData = function(req, callback) {
         console.error(`Query ${requestCounter}: Error executing query:`, error);
         callback(error);
       } finally {
-        // Ensure resources are cleaned up
+        // Clean up operations (not connection - it goes back to pool)
         try {
           if (extentOperation) await extentOperation.close();
           if (queryOperation) await queryOperation.close();
-          if (session) await session.close();
-          await client.close();
         } catch (cleanupError) {
           console.error(`Query ${requestCounter}: Error during cleanup:`, cleanupError);
+        }
+
+        // Release connection back to pool (reused for next request)
+        if (connection) {
+          pool.release(connection);
+          console.log(`Query ${requestCounter}: Connection ${connection.id} released back to pool`);
         }
       }
     })
     .catch((error) => {
-      console.error(`Query ${requestCounter}: Error connecting to Databricks:`, error);
+      console.error(`Query ${requestCounter}: Error acquiring connection:`, error);
       callback(error);
+
+      // Ensure connection is released even on acquisition error
+      if (connection) {
+        pool.release(connection);
+      }
     });
 };
 
