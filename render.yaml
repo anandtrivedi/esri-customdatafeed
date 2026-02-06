@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: databricks-custom-data-feed
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: cd nodejs-provider && npm install && cd ../testing && npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18.0.0
+      - key: PORT
+        value: 10000
+      - key: DATABRICKS_DEFAULT_TABLE
+        value: workspace.default.koop_test_cities
+      - key: DATABRICKS_GEOMETRY_COLUMN
+        value: geometry_wkt
+      - key: DATABRICKS_ID_FIELD
+        value: objectid
+      - key: DATABRICKS_SRID
+        value: 4326
+      - key: DATABRICKS_MAX_RECORD_COUNT
+        value: 2000
+      - key: ENABLE_USER_AUTH
+        value: false
+      - key: ENABLE_AUDIT_LOG
+        value: true
+      - key: ENABLE_SIMPLE_AUTH
+        value: false
+      # Sensitive environment variables should be set via Render Dashboard:
+      # - DATABRICKS_SERVER_HOSTNAME
+      # - DATABRICKS_HTTP_PATH
+      # - DATABRICKS_ACCESS_TOKEN
+      # - SIMPLE_AUTH_TOKEN (if ENABLE_SIMPLE_AUTH=true)
