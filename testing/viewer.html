@@ -175,13 +175,13 @@
 
         <div class="form-group">
             <label for="tableName">Table Name</label>
-            <input type="text" id="tableName" value="catalog.schema.restaurants" placeholder="catalog.schema.table">
+            <input type="text" id="tableName" value="catalog.schema.table" placeholder="catalog.schema.table">
             <div class="hint">Fully qualified Databricks table name</div>
         </div>
 
         <div class="form-group">
             <label for="geometryColumn">Geometry Column</label>
-            <input type="text" id="geometryColumn" value="location" placeholder="location">
+            <input type="text" id="geometryColumn" value="geometry_wkt" placeholder="geometry_wkt">
         </div>
 
         <div class="form-group">
@@ -229,6 +229,11 @@
                 <span class="stat-value" id="statExceeded">-</span>
             </div>
         </div>
+
+        <div class="stats" id="jsonResponse" style="display: none; margin-top: 20px; max-height: 300px; overflow-y: auto;">
+            <h3>JSON Response</h3>
+            <pre id="jsonContent" style="background: #f9f9f9; padding: 10px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-wrap: break-word;"></pre>
+        </div>
     </div>
 
     <div id="map"></div>
@@ -237,8 +242,8 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <script>
-        // Initialize map (centered on NYC)
-        const map = L.map('map').setView([40.7589, -73.9851], 13);
+        // Initialize map (centered on USA)
+        const map = L.map('map').setView([37.0902, -95.7129], 4);
 
         // Add OpenStreetMap tiles
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -338,6 +343,10 @@
             try {
                 const response = await fetch(url);
                 const data = await response.json();
+
+                // Display JSON response
+                document.getElementById('jsonResponse').style.display = 'block';
+                document.getElementById('jsonContent').textContent = JSON.stringify(data, null, 2);
 
                 if (!response.ok) {
                     throw new Error(data.error || 'Failed to load data');

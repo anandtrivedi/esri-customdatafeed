@@ -66,3 +66,7 @@ node_modules/
 *.temp
 temp/
 tmp/
+
+# Local deployment scripts (don't commit)
+start-local.sh
+LOCAL_DEPLOYMENT.md
