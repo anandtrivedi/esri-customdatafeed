@@ -5,6 +5,12 @@
 
 const { getGeometryQuery } = require("./geometry");
 const { getGeometryToGeoJSON } = require("./geometryFormat");
+const {
+  validateFieldName,
+  escapeSqlString,
+  checkWhereClauseSafety,
+  validateInteger,
+} = require("./sanitize");
 
 /**
  * Build SQL query with support for ArcGIS query parameters
@@ -16,7 +22,8 @@ function buildSqlQuery(
   tableName,
   dbWKID,
   fetchSize,
-  geometryFormat = null
+  geometryFormat = null,
+  timeColumn = null
 ) {
   const {
     where,
@@ -41,16 +48,18 @@ function buildSqlQuery(
   } else if (returnIdsOnly) {
     selectClause = `${idField}`;
   } else if (returnDistinctValues && !returnGeometry) {
-    selectClause = `${outFields}`;
+    const sanitizedFields = outFields.split(",").map((f) => validateFieldName(f)).join(", ");
+    selectClause = sanitizedFields;
   } else if (outFields === "*") {
     // Convert geometry to GeoJSON (supports WKT, WKB, GeoJSON, native GEOMETRY)
     const geomToGeoJSON = getGeometryToGeoJSON(geometryField, dbWKID, geometryFormat);
     selectClause = `* EXCEPT (${geometryField}), ${geomToGeoJSON} AS ${geometryField}`;
   } else {
-    let outputFields = outFields;
+    const sanitizedOutFields = outFields.split(",").map((f) => validateFieldName(f)).join(", ");
+    let outputFields = sanitizedOutFields;
     if (!outFields.includes(idField)) {
       // Koop needs OBJECTID field in geojson
-      outputFields = outFields.concat(`, ${idField}`);
+      outputFields = sanitizedOutFields + `, ${idField}`;
     }
     // Convert geometry to GeoJSON (supports WKT, WKB, GeoJSON, native GEOMETRY)
     const geomToGeoJSON = getGeometryToGeoJSON(geometryField, dbWKID, geometryFormat);
@@ -70,6 +79,7 @@ function buildSqlQuery(
     spatialRel,
     dbWKID,
     time,
+    timeColumn,
     geometryFormat,
   });
 
@@ -84,8 +94,9 @@ function buildSqlQuery(
     fetchSize && !returnIdsOnly && !returnDistinctValues
       ? ` LIMIT ${fetchSize + 1}`
       : "";
+  const sanitizedOffset = resultOffset ? validateInteger(resultOffset, 0) : 0;
   const offsetClause =
-    resultOffset && !returnIdsOnly ? ` OFFSET ${resultOffset}` : "";
+    sanitizedOffset && !returnIdsOnly ? ` OFFSET ${sanitizedOffset}` : "";
 
   return `SELECT ${distinctClause}${selectClause}${from}${whereClause}${orderByClause}${limitClause}${offsetClause}`;
 }
@@ -103,6 +114,7 @@ function buildSqlWhere({
   spatialRel,
   dbWKID,
   time,
+  timeColumn,
   geometryFormat = null,
 }) {
   const sqlWhereComponents = [];
@@ -111,8 +123,9 @@ function buildSqlWhere({
     return "";
   }
 
-  // Add WHERE clause
+  // Add WHERE clause (with DDL/DML keyword check)
   if (where) {
+    checkWhereClauseSafety(where);
     sqlWhereComponents.push(where);
   }
 
@@ -121,7 +134,8 @@ function buildSqlWhere({
     const objectIdsComponent = objectIds
       .split(",")
       .map((val) => {
-        return isNaN(val) ? `'${val}'` : val;
+        const trimmed = val.trim();
+        return isNaN(trimmed) ? `'${escapeSqlString(trimmed)}'` : trimmed;
       })
       .join(",")
       .replace(/^/, `${idField} IN (`)
@@ -145,10 +159,14 @@ function buildSqlWhere({
 
   // Add time filter
   if (time) {
-    const timeComponent = buildTimeFilter(time);
+    const timeComponent = buildTimeFilter(time, timeColumn);
     if (timeComponent) {
       sqlWhereComponents.push(timeComponent);
     }
+  }
+
+  if (sqlWhereComponents.length === 0) {
+    return "";
   }
 
   return " WHERE " + sqlWhereComponents.join(" AND ");
@@ -192,10 +210,12 @@ function buildOrderByClause(orderByFields) {
 /**
  * Build time filter from time parameter
  * Format: "startTime,endTime" (Unix milliseconds)
- * Note: Assumes timestamp field is named 'ts' or 'timestamp'
+ *
+ * @param {string} timeParam - Comma-separated start,end in Unix milliseconds
+ * @param {string|null} timeColumn - Name of the timestamp column (configured per service)
  */
-function buildTimeFilter(timeParam) {
-  if (!timeParam) return null;
+function buildTimeFilter(timeParam, timeColumn) {
+  if (!timeParam || !timeColumn) return null;
 
   try {
     const [startMs, endMs] = timeParam.split(",").map(Number);
@@ -205,13 +225,14 @@ function buildTimeFilter(timeParam) {
       return null;
     }
 
+    // Sanitize column name (allow alphanumeric and underscore only)
+    const sanitizedColumn = timeColumn.replace(/[^a-zA-Z0-9_]/g, "");
+
     // Convert milliseconds to ISO timestamp
     const startTime = new Date(startMs).toISOString();
     const endTime = new Date(endMs).toISOString();
 
-    // Try common timestamp field names
-    // Note: In production, this should be a configurable field name
-    return `(ts >= '${startTime}' AND ts <= '${endTime}') OR (timestamp >= '${startTime}' AND timestamp <= '${endTime}')`;
+    return `${sanitizedColumn} >= '${startTime}' AND ${sanitizedColumn} <= '${endTime}'`;
   } catch (error) {
     console.error("Error parsing time parameter:", error);
     return null;

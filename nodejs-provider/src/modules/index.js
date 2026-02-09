@@ -9,6 +9,13 @@ const { generateFiltersApplied } = require("./filters");
 const { getGeometryQuery, getExtentFromGeoJson } = require("./geometry");
 const { getAuditLogger } = require("./auditLog");
 const { getGeometryFieldExpression } = require("./geometryFormat");
+const {
+  validateFieldName,
+  validateIdentifier,
+  escapeSqlString,
+  checkWhereClauseSafety,
+  validateInteger,
+} = require("./sanitize");
 
 module.exports = {
   translateToGeoJSON,
@@ -18,4 +25,9 @@ module.exports = {
   getExtentFromGeoJson,
   getAuditLogger,
   getGeometryFieldExpression,
+  validateFieldName,
+  validateIdentifier,
+  escapeSqlString,
+  checkWhereClauseSafety,
+  validateInteger,
 };
