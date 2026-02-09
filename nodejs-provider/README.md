@@ -16,6 +16,9 @@ This provider follows official ArcGIS Enterprise SDK patterns and implements sop
 - ✅ **Spatial Reference Support** - Handles CRS transformation between different SRID values
 - ✅ **Exceeded Transfer Limit Detection** - Properly handles pagination limits
 - ✅ **Service Parameters** - Configurable table name, geometry column, and ID field per Feature Service
+- ✅ **Connection Pooling** - Reusable Databricks connections with configurable pool size
+- ✅ **Security** - SQL injection protection, optional user auth, and audit logging
+- ✅ **Multiple Geometry Formats** - WKT, WKB, GeoJSON, and native GEOMETRY columns
 
 ## Architecture
 
@@ -32,9 +35,9 @@ Databricks SQL Warehouse
 
 ## Prerequisites
 
-1. **ArcGIS Server 11.4+** installed and configured
+1. **ArcGIS Server 11.1+** (11.4+ for editing support)
 2. **ArcGIS Enterprise SDK** installed on your development machine
-3. **Node.js** (version compatible with your ArcGIS version - see [ArcGIS docs](https://developers.arcgis.com/enterprise-sdk/))
+3. **Node.js 20.17.0** (ships with ArcGIS Server 11.4)
 4. **Databricks SQL Warehouse** with:
    - Tables containing geometry columns
    - Personal access token with SELECT permissions
@@ -51,52 +54,20 @@ npm install
 
 ### 2. Configure Databricks Connection
 
-Edit `src/databricks-config.json`:
-
-```json
-{
-  "databricks": {
-    "serverHostname": "your-workspace.cloud.databricks.com",
-    "httpPath": "/sql/1.0/warehouses/your-warehouse-id",
-    "accessToken": "dapi...",
-    "srid": 4326,
-    "maxRecordCount": 2000,
-    "defaultTable": "catalog.schema.table",
-    "defaultGeometryColumn": "geometry",
-    "defaultIdField": "id"
-  }
-}
-```
-
-**Configuration Parameters:**
-
-- `serverHostname` - Your Databricks workspace hostname
-- `httpPath` - SQL Warehouse HTTP path
-- `accessToken` - Databricks personal access token
-- `srid` - Spatial Reference ID (default: 4326 for WGS84)
-- `maxRecordCount` - Maximum records per page (default: 2000)
-- `defaultTable` - Default table if not specified via service parameters
-- `defaultGeometryColumn` - Default geometry column name
-- `defaultIdField` - Default unique ID field name
-
-**Security Note:** For production, use environment variables instead of storing tokens in the config file.
-
-## Usage
-
-### Testing Locally (Without ArcGIS Server)
-
-You can test the provider logic locally before deploying to ArcGIS Server:
+Create a `.env` file (recommended) or edit `src/databricks-config.json`:
 
 ```bash
-# Create a test script
-node test-local.js
+# .env
+DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+DATABRICKS_ACCESS_TOKEN=dapi...
 ```
 
-See `test-local.js` for an example of how to test the Model class directly.
+See the [Environment Variables](#environment-variables) section for all options.
 
-### Deploy to ArcGIS Server
+## Deploy to ArcGIS Server
 
-#### Step 1: Package the Provider
+### Step 1: Package the Provider
 
 Using the CDF CLI tool:
 
@@ -107,7 +78,7 @@ cdf export databricks-geospatial-provider
 
 This creates `databricks-geospatial-provider.cdpk`.
 
-#### Step 2: Upload to ArcGIS Server
+### Step 2: Upload to ArcGIS Server
 
 **Option A: Via ArcGIS Server Administrator Directory**
 
@@ -124,14 +95,14 @@ cdf register databricks-geospatial-provider \
   YOUR_TOKEN
 ```
 
-#### Step 3: Register the Provider
+### Step 3: Register the Provider
 
 1. In ArcGIS Server Admin, go to: **services** → **types** → **customdataproviders**
 2. Click **register**
 3. Paste the item ID
 4. Click **Register**
 
-#### Step 4: Create a Feature Service
+### Step 4: Create a Feature Service
 
 **Via ArcGIS Server Admin Directory:**
 
@@ -289,11 +260,21 @@ nodejs-provider/
 │       ├── translate.js      # GeoJSON conversion
 │       ├── sql.js            # SQL query builder
 │       ├── filters.js        # filtersApplied generator
-│       └── geometry.js       # Geometry queries and transformations
-├── package.json              # Node.js dependencies
-├── cdconfig.json             # Provider configuration
-├── test-local.js             # Local testing script
-└── README.md                 # This file
+│       ├── geometry.js       # Geometry queries and transformations
+│       ├── geometryFormat.js # WKT/WKB/GeoJSON/GEOMETRY detection
+│       ├── sanitize.js       # SQL injection prevention
+│       ├── connectionPool.js # Databricks connection pool
+│       └── auditLog.js       # Security audit logging
+├── test/                     # Unit tests (mocha + chai)
+│   ├── sanitize.test.js
+│   ├── sql.test.js
+│   ├── geometry.test.js
+│   ├── geometryFormat.test.js
+│   ├── filters.test.js
+│   ├── translate.test.js
+│   └── model.test.js
+├── package.json
+└── README.md
 ```
 
 ## Supported Geometry Types
@@ -309,53 +290,32 @@ All Databricks geometry types are supported:
 | Polygon | Polygon |
 | MultiPolygon | Polygon |
 
-## Multiple Tables Configuration
+## Environment Variables
 
-You can create multiple Feature Services from different Databricks tables by specifying different service parameters:
+For production, use environment variables instead of the config file (`.env` or system env):
 
-**Restaurants Service:**
-- `tableName`: `catalog.schema.restaurants`
-- `geometryColumn`: `location`
-- `idField`: `restaurant_id`
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABRICKS_SERVER_HOSTNAME` | Yes | Workspace hostname |
+| `DATABRICKS_HTTP_PATH` | Yes | SQL Warehouse HTTP path |
+| `DATABRICKS_ACCESS_TOKEN` | Yes | Personal access token |
+| `DATABRICKS_SRID` | No | Spatial reference (default: 4326) |
+| `DATABRICKS_MAX_RECORD_COUNT` | No | Max records per page (default: 2000) |
+| `DATABRICKS_DEFAULT_TABLE` | No | Default table name |
+| `ENABLE_USER_AUTH` | No | ArcGIS user auth (`true`/`false`) |
+| `ENABLE_SIMPLE_AUTH` | No | Bearer token auth (`true`/`false`) |
+| `ENABLE_AUDIT_LOG` | No | Audit logging (`true`/`false`) |
 
-**Zones Service:**
-- `tableName`: `catalog.schema.zones`
-- `geometryColumn`: `boundary`
-- `idField`: `zone_id`
+## Testing
 
-**Routes Service:**
-- `tableName`: `catalog.schema.routes`
-- `geometryColumn`: `path`
-- `idField`: `route_id`
+```bash
+# Unit tests (175 tests)
+npm test
 
-Each service independently queries its configured table.
-
-## Advanced Configuration
-
-### Environment Variables
-
-For production, use environment variables instead of config file:
-
-```javascript
-// In src/model.js
-const connectOptions = {
-  host: process.env.DATABRICKS_HOSTNAME || config.databricks.serverHostname,
-  path: process.env.DATABRICKS_HTTP_PATH || config.databricks.httpPath,
-  token: process.env.DATABRICKS_TOKEN || config.databricks.accessToken
-};
+# Local integration test (requires Databricks credentials)
+cd ../testing && node test-server.js
+# Then open http://localhost:3000/viewer.html
 ```
-
-### Connection Pooling
-
-For better performance with multiple requests, implement connection pooling in the Model class.
-
-### Custom Metadata
-
-Enhance the `buildMetadata()` method to include:
-- Custom symbology (`renderer`)
-- Label definitions (`labelingInfo`)
-- Field domains
-- Templates for editing
 
 ## Support
 
