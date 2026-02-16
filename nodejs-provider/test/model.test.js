@@ -19,6 +19,19 @@ const connectionPoolStub = {
   shutdownPool: async () => {},
 };
 
+// Configurable lakebase pool stub for edit/read tests
+let lakebaseQueryResult = { rows: [] };
+let lakebaseQueryLog = [];
+const lakebasePoolStub = {
+  getLakebasePool: () => ({
+    query: async (sql, params) => {
+      lakebaseQueryLog.push({ sql, params });
+      return lakebaseQueryResult;
+    },
+  }),
+  shutdownLakebasePools: async () => {},
+};
+
 // Stub dotenv to avoid loading .env files
 const dotenvStub = { config: () => {} };
 
@@ -30,20 +43,28 @@ describe("model", () => {
     process.env.DATABRICKS_SERVER_HOSTNAME = "test-host.databricks.com";
     process.env.DATABRICKS_HTTP_PATH = "/sql/1.0/endpoints/test";
     process.env.DATABRICKS_ACCESS_TOKEN = "test-token";
+    process.env.LAKEBASE_PASSWORD = "test-lakebase-password";
     process.env.ENABLE_AUDIT_LOG = "false";
     process.env.ENABLE_USER_AUTH = "false";
     process.env.ENABLE_SIMPLE_AUTH = "false";
 
     Model = proxyquire("../src/model", {
       "./modules/connectionPool": connectionPoolStub,
+      "./modules/lakebasePool": lakebasePoolStub,
       dotenv: dotenvStub,
     });
+  });
+
+  beforeEach(() => {
+    lakebaseQueryResult = { rows: [] };
+    lakebaseQueryLog = [];
   });
 
   after(() => {
     delete process.env.DATABRICKS_SERVER_HOSTNAME;
     delete process.env.DATABRICKS_HTTP_PATH;
     delete process.env.DATABRICKS_ACCESS_TOKEN;
+    delete process.env.LAKEBASE_PASSWORD;
     delete process.env.ENABLE_AUDIT_LOG;
     delete process.env.ENABLE_USER_AUTH;
     delete process.env.ENABLE_SIMPLE_AUTH;
@@ -391,6 +412,346 @@ describe("model", () => {
       model.getData(req, (err) => {
         expect(err).to.be.an("error");
         expect(err.message).to.include("Invalid table name format");
+        done();
+      });
+    });
+  });
+
+  describe("getDataFromLakebase", () => {
+    it("should route to Lakebase when lakebaseHost is set", (done) => {
+      lakebaseQueryResult = {
+        rows: [
+          { id: 1, name: "Tower A", geometry: '{"type":"Point","coordinates":[-77,38]}' },
+        ],
+      };
+
+      const model = new Model();
+      const req = {
+        query: { f: "json" },
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebasePort: "5432",
+          lakebaseDatabase: "testdb",
+          lakebaseSchema: "public",
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.getData(req, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.type).to.equal("FeatureCollection");
+        expect(result.features).to.have.lengthOf(1);
+        expect(result.features[0].properties.id).to.equal(1);
+        expect(result.metadata).to.exist;
+        expect(result.metadata.idField).to.equal("id");
+        expect(result.crs.type).to.equal("EPSG:4326");
+        done();
+      });
+    });
+
+    it("should return empty FeatureCollection for no results", (done) => {
+      lakebaseQueryResult = { rows: [] };
+
+      const model = new Model();
+      const req = {
+        query: {},
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.getData(req, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.type).to.equal("FeatureCollection");
+        expect(result.features).to.have.lengthOf(0);
+        done();
+      });
+    });
+
+    it("should handle returnCountOnly from Lakebase", (done) => {
+      lakebaseQueryResult = { rows: [{ count: 42 }] };
+
+      const model = new Model();
+      const req = {
+        query: { returnCountOnly: "true" },
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.getData(req, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.count).to.equal(42);
+        done();
+      });
+    });
+
+    it("should fail when lakebaseTable is missing", (done) => {
+      const model = new Model();
+      const req = {
+        query: {},
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          // lakebaseTable missing
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.getData(req, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("lakebaseTable");
+        done();
+      });
+    });
+
+    it("should reject invalid geometryColumn for Lakebase path", (done) => {
+      const model = new Model();
+      const req = {
+        query: {},
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geom; DROP TABLE--",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.getData(req, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("Invalid identifier");
+        done();
+      });
+    });
+  });
+
+  describe("editData", () => {
+    it("should process adds and return objectIds", (done) => {
+      lakebaseQueryResult = { rows: [{ id: 100 }] };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        adds: [
+          {
+            attributes: { name: "New Tower", height: 50 },
+            geometry: { x: -77.0, y: 38.9 },
+          },
+        ],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.addResults).to.have.lengthOf(1);
+        expect(result.addResults[0].success).to.be.true;
+        expect(result.addResults[0].objectId).to.equal(100);
+        expect(lakebaseQueryLog).to.have.lengthOf(1);
+        expect(lakebaseQueryLog[0].sql).to.include("INSERT INTO");
+        expect(lakebaseQueryLog[0].sql).to.include("RETURNING id");
+        done();
+      });
+    });
+
+    it("should process updates", (done) => {
+      lakebaseQueryResult = { rows: [] };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        updates: [
+          {
+            attributes: { id: 42, name: "Updated Tower" },
+            geometry: { x: -78.0, y: 39.0 },
+          },
+        ],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.updateResults).to.have.lengthOf(1);
+        expect(result.updateResults[0].success).to.be.true;
+        expect(result.updateResults[0].objectId).to.equal(42);
+        expect(lakebaseQueryLog[0].sql).to.include("UPDATE");
+        done();
+      });
+    });
+
+    it("should process deletes", (done) => {
+      lakebaseQueryResult = { rows: [] };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        deletes: [1, 2, 3],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.deleteResults).to.have.lengthOf(3);
+        result.deleteResults.forEach((r) => expect(r.success).to.be.true);
+        expect(lakebaseQueryLog[0].sql).to.include("DELETE FROM");
+        expect(lakebaseQueryLog[0].sql).to.include("IN ($1, $2, $3)");
+        done();
+      });
+    });
+
+    it("should process mixed adds, updates, and deletes", (done) => {
+      // First call (INSERT) returns new ID, second (UPDATE) returns nothing, third (DELETE) returns nothing
+      let callCount = 0;
+      const originalQuery = lakebasePoolStub.getLakebasePool().query;
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      // Set up to return an ID for the INSERT
+      lakebaseQueryResult = { rows: [{ id: 200 }] };
+
+      const data = {
+        adds: [{ attributes: { name: "New" }, geometry: { x: -77, y: 38 } }],
+        updates: [{ attributes: { id: 10, name: "Up" } }],
+        deletes: [5],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.addResults).to.have.lengthOf(1);
+        expect(result.updateResults).to.have.lengthOf(1);
+        expect(result.deleteResults).to.have.lengthOf(1);
+        // 3 queries total: INSERT, UPDATE, DELETE
+        expect(lakebaseQueryLog).to.have.lengthOf(3);
+        done();
+      });
+    });
+
+    it("should fail when lakebaseHost is missing", (done) => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, { adds: [] }, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("lakebaseHost");
+        done();
+      });
+    });
+
+    it("should fail when lakebaseTable is missing", (done) => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, { adds: [] }, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("lakebaseTable");
+        done();
+      });
+    });
+
+    it("should reject invalid identifiers in edit params", (done) => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geom; DROP TABLE--",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, { adds: [] }, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("Invalid identifier");
+        done();
+      });
+    });
+
+    it("should return empty results when no edits are provided", (done) => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, {}, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.addResults).to.have.lengthOf(0);
+        expect(result.updateResults).to.have.lengthOf(0);
+        expect(result.deleteResults).to.have.lengthOf(0);
         done();
       });
     });

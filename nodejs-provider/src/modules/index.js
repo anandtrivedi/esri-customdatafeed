@@ -16,6 +16,9 @@ const {
   checkWhereClauseSafety,
   validateInteger,
 } = require("./sanitize");
+const { buildInsertSql, buildUpdateSql, buildDeleteSql, toGeoJSON } = require("./editSql");
+const { buildLakebaseSelectSql, parseGeometryFilter } = require("./lakebaseQuery");
+const { getLakebasePool, shutdownLakebasePools } = require("./lakebasePool");
 
 module.exports = {
   translateToGeoJSON,
@@ -30,4 +33,12 @@ module.exports = {
   escapeSqlString,
   checkWhereClauseSafety,
   validateInteger,
+  buildInsertSql,
+  buildUpdateSql,
+  buildDeleteSql,
+  toGeoJSON,
+  buildLakebaseSelectSql,
+  parseGeometryFilter,
+  getLakebasePool,
+  shutdownLakebasePools,
 };

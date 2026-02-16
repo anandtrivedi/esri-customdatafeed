@@ -26,6 +26,9 @@ const {
   validateIdentifier,
 } = require('./modules');
 const { initializePool, getPool, shutdownPool } = require('./modules/connectionPool');
+const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
+const { buildInsertSql, buildUpdateSql, buildDeleteSql } = require('./modules/editSql');
+const { buildLakebaseSelectSql } = require('./modules/lakebaseQuery');
 
 // Table name validation: must be catalog.schema.table or just a table name
 const TABLE_NAME_PATTERN = /^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+){0,2}$/;
@@ -59,12 +62,14 @@ let requestCounter = 0;
 // Guard with try/catch — CDF runtime manages process lifecycle
 try {
   process.on('SIGTERM', async () => {
-    console.log('Received SIGTERM, shutting down connection pool...');
+    console.log('Received SIGTERM, shutting down connection pools...');
     await shutdownPool();
+    await shutdownLakebasePools();
   });
   process.on('SIGINT', async () => {
-    console.log('Received SIGINT, shutting down connection pool...');
+    console.log('Received SIGINT, shutting down connection pools...');
     await shutdownPool();
+    await shutdownLakebasePools();
   });
 } catch (e) { /* signal handlers may not be available in CDF runtime */ }
 
@@ -168,6 +173,11 @@ class Model {
    */
   getData(req, callback) {
     requestCounter++;
+
+    // Route to Lakebase if this is an editable service
+    if (req.params.lakebaseHost) {
+      return this.getDataFromLakebase(req, callback);
+    }
 
     // Convert boolean strings to actual booleans
     Object.keys(req.query).forEach((key) => {
@@ -427,6 +437,252 @@ class Model {
     }
 
     return fields;
+  }
+
+  /**
+   * Read data from Lakebase (PostgreSQL + PostGIS) for editable services.
+   * Called by getData() when req.params.lakebaseHost is set.
+   * Returns identical GeoJSON structure as the Databricks path.
+   */
+  getDataFromLakebase(req, callback) {
+    // Convert boolean strings to actual booleans
+    Object.keys(req.query).forEach((key) => {
+      const val = (req.query[key] + "").toLowerCase();
+      if (val === "true") {
+        req.query[key] = true;
+      } else if (val === "false") {
+        req.query[key] = false;
+      }
+    });
+
+    const { query: geoserviceParams } = req;
+    const { returnCountOnly } = geoserviceParams;
+
+    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
+    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
+
+    try {
+      validateIdentifier(rawGeometryColumn);
+      validateIdentifier(rawIdField);
+    } catch (validationError) {
+      this.logger.error(`Input validation failed: ${validationError.message}`);
+      return callback(validationError);
+    }
+
+    const sourceConfig = {
+      lakebaseSchema: req.params.lakebaseSchema || 'public',
+      lakebaseTable: req.params.lakebaseTable,
+      geometryColumn: rawGeometryColumn,
+      idField: rawIdField,
+      dbWKID: config.databricks.srid || 4326,
+      maxRecordCountPerPage: config.databricks.maxRecordCount || 2000,
+      name: req.params.lakebaseTable || 'LakebaseLayer',
+      description: `Lakebase table: ${req.params.lakebaseSchema || 'public'}.${req.params.lakebaseTable}`,
+    };
+
+    if (!sourceConfig.lakebaseTable) {
+      return callback(new Error('lakebaseTable service parameter is required for editable services'));
+    }
+
+    const lakebaseConfig = {
+      host: req.params.lakebaseHost,
+      port: parseInt(req.params.lakebasePort) || 5432,
+      database: req.params.lakebaseDatabase,
+    };
+
+    let pool;
+    try {
+      pool = getLakebasePool(lakebaseConfig);
+    } catch (poolError) {
+      this.logger.error(`Lakebase pool error: ${poolError.message}`);
+      return callback(poolError);
+    }
+
+    this.logger.info(`Query ${requestCounter}: Executing Lakebase query...`);
+
+    const { sql, params } = buildLakebaseSelectSql(geoserviceParams, sourceConfig);
+    this.logger.info(`Query ${requestCounter}: ${sql.substring(0, 150)}...`);
+
+    pool.query(sql, params)
+      .then((result) => {
+        const rows = result.rows;
+        this.logger.info(`Query ${requestCounter}: Lakebase returned ${rows.length} rows`);
+
+        let geojson = { type: 'FeatureCollection', features: [] };
+
+        if (rows.length === 0) {
+          return callback(null, geojson);
+        }
+
+        if (returnCountOnly) {
+          geojson.count = Number(rows[0].count);
+        } else {
+          // Check exceeded transfer limit
+          let exceededTransferLimit = false;
+          if (rows.length > sourceConfig.maxRecordCountPerPage) {
+            exceededTransferLimit = true;
+            rows.pop();
+          }
+
+          geojson = translateToGeoJSON(rows, sourceConfig);
+
+          geojson.metadata = {
+            name: sourceConfig.name,
+            description: sourceConfig.description,
+            geometryType: this.inferGeometryType(rows, sourceConfig.geometryColumn),
+            maxRecordCount: sourceConfig.maxRecordCountPerPage,
+            exceededTransferLimit,
+            idField: sourceConfig.idField,
+            inputCrs: sourceConfig.dbWKID,
+            fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
+          };
+        }
+
+        geojson.filtersApplied = generateFiltersApplied(
+          geoserviceParams,
+          sourceConfig.idField,
+          sourceConfig.geometryColumn
+        );
+
+        geojson.crs = {
+          type: `EPSG:${sourceConfig.dbWKID}`,
+          properties: { name: `urn:ogc:def:crs:EPSG::${sourceConfig.dbWKID}` },
+        };
+
+        callback(null, geojson);
+      })
+      .catch((error) => {
+        this.logger.error(`Query ${requestCounter}: Lakebase error: ${error.message}`);
+        callback(error);
+      });
+  }
+
+  /**
+   * Apply edits (add/update/delete) via Lakebase.
+   * Called by CDF runtime when editingEnabled is true.
+   *
+   * @param {object} req  - Request with params (lakebaseHost, lakebaseSchema, etc.)
+   * @param {object} data - { adds: [...], updates: [...], deletes: [...] }
+   * @param {function} callback - callback(error, result)
+   */
+  editData(req, data, callback) {
+    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
+    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
+    const schema = req.params.lakebaseSchema || 'public';
+    const table = req.params.lakebaseTable;
+    const srid = config.databricks.srid || 4326;
+
+    try {
+      validateIdentifier(rawGeometryColumn);
+      validateIdentifier(rawIdField);
+    } catch (validationError) {
+      this.logger.error(`Edit validation failed: ${validationError.message}`);
+      return callback(validationError);
+    }
+
+    if (!req.params.lakebaseHost) {
+      return callback(new Error('Editing requires lakebaseHost service parameter'));
+    }
+    if (!table) {
+      return callback(new Error('Editing requires lakebaseTable service parameter'));
+    }
+
+    const lakebaseConfig = {
+      host: req.params.lakebaseHost,
+      port: parseInt(req.params.lakebasePort) || 5432,
+      database: req.params.lakebaseDatabase,
+    };
+
+    let pool;
+    try {
+      pool = getLakebasePool(lakebaseConfig);
+    } catch (poolError) {
+      this.logger.error(`Lakebase pool error: ${poolError.message}`);
+      return callback(poolError);
+    }
+
+    const adds = data.adds || [];
+    const updates = data.updates || [];
+    const deletes = data.deletes || [];
+
+    this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes`);
+
+    const processEdits = async () => {
+      const addResults = [];
+      const updateResults = [];
+      const deleteResults = [];
+
+      // Process adds
+      for (const feature of adds) {
+        try {
+          const attributes = feature.attributes || feature.properties || {};
+          const geometry = feature.geometry || null;
+          const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+          const result = await pool.query(sql, params);
+          const newId = result.rows[0][rawIdField];
+          addResults.push({ objectId: Number(newId), success: true });
+        } catch (error) {
+          this.logger.error(`Edit add failed: ${error.message}`);
+          addResults.push({ success: false, error: { description: error.message } });
+        }
+      }
+
+      // Process updates
+      for (const feature of updates) {
+        try {
+          const attributes = feature.attributes || feature.properties || {};
+          const geometry = feature.geometry || null;
+          const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+          await pool.query(sql, params);
+          updateResults.push({ objectId: Number(attributes[rawIdField]), success: true });
+        } catch (error) {
+          this.logger.error(`Edit update failed: ${error.message}`);
+          updateResults.push({ success: false, error: { description: error.message } });
+        }
+      }
+
+      // Process deletes
+      if (deletes.length > 0) {
+        try {
+          const objectIds = deletes.map(Number);
+          const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
+          await pool.query(sql, params);
+          for (const id of objectIds) {
+            deleteResults.push({ objectId: id, success: true });
+          }
+        } catch (error) {
+          this.logger.error(`Edit delete failed: ${error.message}`);
+          for (const id of deletes) {
+            deleteResults.push({ objectId: Number(id), success: false, error: { description: error.message } });
+          }
+        }
+      }
+
+      return { addResults, updateResults, deleteResults };
+    };
+
+    processEdits()
+      .then((result) => {
+        this.logger.info(`Edit complete: ${result.addResults.length} added, ${result.updateResults.length} updated, ${result.deleteResults.length} deleted`);
+
+        // Log edit to audit
+        const username = req._user?.username || 'anonymous';
+        const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+        auditLogger.log('EDIT', {
+          username,
+          table: `${schema}.${table}`,
+          adds: result.addResults.length,
+          updates: result.updateResults.length,
+          deletes: result.deleteResults.length,
+          ipAddress,
+        });
+
+        callback(null, result);
+      })
+      .catch((error) => {
+        this.logger.error(`Edit error: ${error.message}`);
+        callback(error);
+      });
   }
 
   /**
