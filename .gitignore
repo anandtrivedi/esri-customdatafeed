@@ -67,6 +67,11 @@ node_modules/
 temp/
 tmp/
 
-# Local deployment scripts (don't commit)
+# Local files (don't commit)
 start-local.sh
 LOCAL_DEPLOYMENT.md
+arcgis-install-creds.md
+CUJ_*.md
+
+# Provider packages
+*.cdpk
