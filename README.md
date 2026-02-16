@@ -99,6 +99,58 @@ cdf create-service databricks-geospatial-provider \
 | `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native) |
 | `timeColumn` | No | - | Timestamp column for time-aware queries |
 
+#### Alternative: Admin REST API Registration
+
+If the `cdf` CLI isn't available, you can register services directly via the ArcGIS Server Admin REST API:
+
+```bash
+# 1. Get an admin token
+curl -k "https://your-server:6443/arcgis/admin/generateToken" \
+  -d "username=siteadmin&password=YOUR_PASSWORD&client=referer&referer=https://your-server:6443&f=json"
+
+# 2. Create a Feature Service
+curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
+  -H "Referer: https://your-server:6443" \
+  --data-urlencode 'service={
+    "serviceName": "MyService",
+    "type": "FeatureServer",
+    "description": "My Databricks table",
+    "capabilities": "Query",
+    "provider": "CUSTOMDATA",
+    "clusterName": "default",
+    "minInstancesPerNode": 0,
+    "maxInstancesPerNode": 0,
+    "instancesPerContainer": 1,
+    "maxWaitTime": 60,
+    "maxStartupTime": 300,
+    "maxIdleTime": 1800,
+    "maxUsageTime": 600,
+    "loadBalancing": "ROUND_ROBIN",
+    "isolationLevel": "HIGH",
+    "configuredState": "STARTED",
+    "recycleInterval": 24,
+    "recycleStartTime": "00:00",
+    "keepAliveInterval": 1800,
+    "private": false,
+    "isDefault": false,
+    "properties": {"disableCaching": "true"},
+    "jsonProperties": {
+      "customDataProviderInfo": {
+        "forwardUserIdentity": false,
+        "dataProviderName": "databricks-geospatial-provider",
+        "serviceParameters": {
+          "idField": "id",
+          "geometryColumn": "geometry",
+          "geometryFormat": "WKT",
+          "tableName": "catalog.schema.my_table"
+        }
+      }
+    },
+    "extensions": [],
+    "datasets": []
+  }'
+```
+
 ## Supported Query Operations
 
 Standard ArcGIS REST API query parameters:
@@ -188,6 +240,49 @@ geometry={\"xmin\":-78,\"ymin\":38,\"xmax\":-76,\"ymax\":40}\
 &geometryType=esriGeometryEnvelope&spatialRel=esriSpatialRelIntersects\
 &outFields=*&resultRecordCount=10&f=json"
 ```
+
+## Table Requirements
+
+Your Databricks table must meet these requirements or the provider will fail silently:
+
+- **`idField` must be an integer** (INT or BIGINT). ArcGIS uses it as the OBJECTID. String IDs won't be recognized — features will appear but without a working OBJECTID, and queries like `objectIds=1,2,3` will fail.
+- **`idField` values must be unique** and in the range 0–2,147,483,647.
+- **Geometry must use `lon lat` order** for WKT (e.g. `POINT(-77.03 38.90)`, not `POINT(38.90 -77.03)`).
+- **Table name must be fully qualified**: `catalog.schema.table` (3-part name).
+- **SQL Warehouse must be running** — serverless warehouses auto-start but add 5–15s cold-start latency on first query.
+- **Network access** — If the Databricks workspace has IP ACLs enabled, the ArcGIS Server's public IP must be allowlisted.
+
+## Troubleshooting
+
+**Service won't start / "Provider not found"**
+- Verify the `.cdpk` was registered: check ArcGIS Server Manager > Site > Extensions
+- Confirm `dataProviderName` in the service JSON matches the registered provider name exactly
+- Check ArcGIS Server logs: `<install>/server/usr/logs/`
+
+**No data returned (empty features array)**
+- Test the Databricks connection independently — run a query in the SQL Warehouse console
+- Verify `tableName` is fully qualified (`catalog.schema.table`, not just `table`)
+- Check that the geometry column has non-null values: `SELECT COUNT(*) FROM table WHERE geometry IS NOT NULL`
+
+**Geometry not rendering / missing from response**
+- Verify `geometryFormat` matches the actual column type (WKT string vs native GEOMETRY)
+- For WKT, check coordinate order is `lon lat`: `SELECT geometry FROM table LIMIT 1`
+- Ensure WKT is valid: `SELECT ST_IsValid(ST_GeomFromText(geometry)) FROM table LIMIT 1`
+
+**OBJECTID issues (features show but can't be selected/queried by ID)**
+- The `idField` column must be INT or BIGINT — check with `DESCRIBE table`
+- Databricks returns BIGINT as strings; the provider casts via `Number()` but values above 2^53 will lose precision
+
+**Query is slow**
+- First query is slow due to warehouse cold-start — subsequent queries will be faster
+- Add Z-ordering: `OPTIMIZE table ZORDER BY (geometry_column)`
+- Use a materialized view instead of a regular view for computed geometry
+- Reduce `resultRecordCount` — default 2000 is reasonable, 10K+ will be slow
+
+**Spatial queries return nothing**
+- Verify `inSR` matches your geometry's CRS (default: 4326/WGS84)
+- Check the envelope coordinates make sense for your data's extent
+- Test the extent via the service metadata: `https://server/arcgis/rest/services/MyService/FeatureServer/0?f=json` — look at the `extent` field
 
 ## License
 
