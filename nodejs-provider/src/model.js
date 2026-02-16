@@ -12,8 +12,8 @@
  * - Environment variable configuration
  */
 
-// Load environment variables
-require('dotenv').config();
+// Load environment variables (optional — CDF runtime provides config via databricks-config.json)
+try { require('dotenv').config(); } catch (e) { /* dotenv not available in CDF runtime */ }
 
 const configTemplate = require('./databricks-config.json');
 const {
@@ -47,7 +47,7 @@ const config = {
 
 // Validate required configuration
 if (!config.databricks.serverHostname || !config.databricks.httpPath || !config.databricks.accessToken) {
-  throw new Error('Missing required Databricks configuration. Please check your .env file.');
+  throw new Error('Missing required Databricks configuration. Set environment variables or update databricks-config.json.');
 }
 
 // Initialize audit logger
@@ -56,14 +56,17 @@ const auditLogger = getAuditLogger();
 let requestCounter = 0;
 
 // Graceful shutdown: release pooled connections on process exit
-process.on('SIGTERM', async () => {
-  console.log('Received SIGTERM, shutting down connection pool...');
-  await shutdownPool();
-});
-process.on('SIGINT', async () => {
-  console.log('Received SIGINT, shutting down connection pool...');
-  await shutdownPool();
-});
+// Guard with try/catch — CDF runtime manages process lifecycle
+try {
+  process.on('SIGTERM', async () => {
+    console.log('Received SIGTERM, shutting down connection pool...');
+    await shutdownPool();
+  });
+  process.on('SIGINT', async () => {
+    console.log('Received SIGINT, shutting down connection pool...');
+    await shutdownPool();
+  });
+} catch (e) { /* signal handlers may not be available in CDF runtime */ }
 
 /**
  * Model class - CDF runtime injects {logger} in the constructor.
@@ -97,81 +100,63 @@ class Model {
   /**
    * authorize() method - Called before getData() for user authentication
    *
-   * This method is called automatically by ArcGIS when forwardUserIdentity is enabled.
-   * It receives the authenticated user's information from ArcGIS and can:
-   * - Allow or deny access
-   * - Perform custom authorization logic
-   * - Log authentication attempts
+   * CDF 12.0 runtime calls this as: authorize(req, data) expecting a Promise.
+   * Older runtimes call: authorize(req, callback) expecting callback(error, authorized).
+   * This method supports both patterns.
    *
    * @param {object} req - Request object with user information
-   *   req._user - User object from ArcGIS (if forwardUserIdentity enabled)
-   *   req._user.username - ArcGIS username
-   *   req._user.groups - Array of user's groups
-   *   req._user.role - User's role
-   * @param {function} callback - Callback function(error, authorized)
+   * @param {object|function} callbackOrData - Callback function (legacy) or data object (CDF 12.0)
    */
-  authorize(req, callback) {
+  authorize(req, callbackOrData) {
+    const isCallback = typeof callbackOrData === 'function';
     const enableUserAuth = process.env.ENABLE_USER_AUTH === 'true';
     const enableSimpleAuth = process.env.ENABLE_SIMPLE_AUTH === 'true';
     const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
 
+    // Helper to resolve or call callback
+    const allow = () => isCallback ? callbackOrData(null, true) : undefined;
+    const deny = (err) => {
+      if (isCallback) return callbackOrData(err, false);
+      throw err;
+    };
+
     // If no authentication is enabled, allow all requests
     if (!enableUserAuth && !enableSimpleAuth) {
-      return callback(null, true);
+      return allow();
     }
 
     // Simple token authentication (for development/testing)
     if (enableSimpleAuth) {
-      const authHeader = req.headers.authorization;
+      const authHeader = req.headers?.authorization;
       const expectedToken = process.env.SIMPLE_AUTH_TOKEN;
 
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Missing or invalid authorization header');
-        return callback(new Error('Authorization required. Use: Authorization: Bearer <token>'), false);
+        return deny(new Error('Authorization required. Use: Authorization: Bearer <token>'));
       }
 
-      const token = authHeader.substring(7); // Remove 'Bearer ' prefix
-
+      const token = authHeader.substring(7);
       if (token !== expectedToken) {
         auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Invalid token');
-        return callback(new Error('Invalid authentication token'), false);
+        return deny(new Error('Invalid authentication token'));
       }
 
       auditLogger.logAuthSuccess('simple_token_user', 'simple_token', ipAddress);
-      return callback(null, true);
+      return allow();
     }
 
     // ArcGIS user authentication (production)
     if (enableUserAuth) {
       const user = req._user;
-
       if (!user || !user.username) {
         auditLogger.logAuthFailure('anonymous', 'arcgis', ipAddress, 'No user information from ArcGIS');
-        return callback(new Error('User authentication required'), false);
+        return deny(new Error('User authentication required'));
       }
-
-      // Example authorization logic - customize based on your needs:
-      // - Check user's role
-      // - Check user's groups
-      // - Check against allowed users list
-      // - Query external authorization service
-
-      // For now, allow all authenticated ArcGIS users
-      // To restrict access, add your authorization logic here
-
       auditLogger.logAuthSuccess(user.username, 'arcgis', ipAddress);
-      return callback(null, true);
-
-      // Example: Restrict to specific groups
-      // const allowedGroups = ['GIS_Analysts', 'Data_Viewers'];
-      // const hasAccess = user.groups && user.groups.some(group => allowedGroups.includes(group));
-      // if (!hasAccess) {
-      //   auditLogger.logAuthorizationFailure(user.username, 'N/A', ipAddress, 'User not in allowed groups');
-      //   return callback(new Error('Access denied: insufficient permissions'), false);
-      // }
+      return allow();
     }
 
-    callback(null, true);
+    return allow();
   }
 
   /**
@@ -411,15 +396,9 @@ class Model {
 
     try {
       const firstGeom = JSON.parse(rows[0][geometryColumn]);
-      const typeMap = {
-        'Point': 'Point',
-        'MultiPoint': 'MultiPoint',
-        'LineString': 'Polyline',
-        'MultiLineString': 'Polyline',
-        'Polygon': 'Polygon',
-        'MultiPolygon': 'Polygon'
-      };
-      return typeMap[firstGeom.type] || 'Point';
+      // Return GeoJSON type name — CDF FeatureServer handles Esri type mapping
+      const validTypes = ['Point', 'MultiPoint', 'LineString', 'MultiLineString', 'Polygon', 'MultiPolygon'];
+      return validTypes.includes(firstGeom.type) ? firstGeom.type : 'Point';
     } catch (error) {
       return 'Point';
     }

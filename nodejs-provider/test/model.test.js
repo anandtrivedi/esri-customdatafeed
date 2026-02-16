@@ -192,17 +192,17 @@ describe("model", () => {
             '{"type":"LineString","coordinates":[[0,0],[1,1]]}',
         },
       ];
-      expect(model.inferGeometryType(rows, "geometry")).to.equal("Polyline");
+      expect(model.inferGeometryType(rows, "geometry")).to.equal("LineString");
     });
 
-    it("should map MultiLineString to Polyline", () => {
+    it("should return MultiLineString type", () => {
       const rows = [
         {
           geometry:
             '{"type":"MultiLineString","coordinates":[[[0,0],[1,1]]]}',
         },
       ];
-      expect(model.inferGeometryType(rows, "geometry")).to.equal("Polyline");
+      expect(model.inferGeometryType(rows, "geometry")).to.equal("MultiLineString");
     });
 
     it("should detect Polygon geometry", () => {
@@ -215,14 +215,14 @@ describe("model", () => {
       expect(model.inferGeometryType(rows, "geometry")).to.equal("Polygon");
     });
 
-    it("should map MultiPolygon to Polygon", () => {
+    it("should return MultiPolygon type", () => {
       const rows = [
         {
           geometry:
             '{"type":"MultiPolygon","coordinates":[[[[0,0],[1,0],[1,1],[0,0]]]]}',
         },
       ];
-      expect(model.inferGeometryType(rows, "geometry")).to.equal("Polygon");
+      expect(model.inferGeometryType(rows, "geometry")).to.equal("MultiPolygon");
     });
 
     it("should default to Point for invalid JSON", () => {

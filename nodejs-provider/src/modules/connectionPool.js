@@ -10,6 +10,7 @@
  */
 
 const { DBSQLClient } = require('@databricks/sql');
+const pkg = require('../../package.json');
 
 class DatabricksConnectionPool {
   constructor(config, options = {}) {
@@ -24,7 +25,7 @@ class DatabricksConnectionPool {
     this.waitQueue = [];
     this.shuttingDown = false;
 
-    console.log(`📊 Connection Pool initialized (min: ${this.minConnections}, max: ${this.maxConnections})`);
+    console.log(`[Pool] Initialized (min: ${this.minConnections}, max: ${this.maxConnections})`);
 
     // Pre-warm pool with minimum connections
     this.warmUp();
@@ -40,9 +41,9 @@ class DatabricksConnectionPool {
         warmUpPromises.push(this.createConnection());
       }
       await Promise.all(warmUpPromises);
-      console.log(`✅ Connection pool warmed up with ${this.minConnections} connections`);
+      console.log(`[Pool] Warmed up with ${this.minConnections} connections`);
     } catch (error) {
-      console.error('⚠️  Failed to warm up connection pool:', error.message);
+      console.error('[Pool] Failed to warm up connection pool:', error.message);
     }
   }
 
@@ -54,7 +55,8 @@ class DatabricksConnectionPool {
     const connectOptions = {
       token: this.config.accessToken,
       host: this.config.serverHostname,
-      path: this.config.httpPath
+      path: this.config.httpPath,
+      userAgentEntry: `esri_arcgis-customdatafeed/${pkg.version}`
     };
 
     try {
@@ -71,11 +73,11 @@ class DatabricksConnectionPool {
       };
 
       this.pool.push(connection);
-      console.log(`➕ Connection ${connection.id} created (pool size: ${this.pool.length})`);
+      console.log(`[Pool] Connection ${connection.id} created (pool size: ${this.pool.length})`);
 
       return connection;
     } catch (error) {
-      console.error('❌ Failed to create connection:', error.message);
+      console.error('[Pool] Failed to create connection:', error.message);
       throw error;
     }
   }
@@ -107,7 +109,7 @@ class DatabricksConnectionPool {
     }
 
     // Wait for a connection to become available
-    console.log(`⏳ Waiting for available connection (active: ${this.activeConnections}/${this.maxConnections})`);
+    console.log(`[Pool] Waiting for available connection (active: ${this.activeConnections}/${this.maxConnections})`);
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         const index = this.waitQueue.findIndex(item => item.resolve === resolve);
@@ -182,9 +184,9 @@ class DatabricksConnectionPool {
         await connection.client.close();
       }
 
-      console.log(`➖ Connection ${connection.id} destroyed (pool size: ${this.pool.length})`);
+      console.log(`[Pool] Connection ${connection.id} destroyed (pool size: ${this.pool.length})`);
     } catch (error) {
-      console.error(`⚠️  Error destroying connection ${connection.id}:`, error.message);
+      console.error(`[Pool] Error destroying connection ${connection.id}:`, error.message);
     }
   }
 
@@ -206,7 +208,7 @@ class DatabricksConnectionPool {
    * Shutdown the pool gracefully
    */
   async shutdown() {
-    console.log('🛑 Shutting down connection pool...');
+    console.log('[Pool] Shutting down connection pool...');
     this.shuttingDown = true;
 
     // Reject all waiting requests
@@ -220,7 +222,7 @@ class DatabricksConnectionPool {
     const closePromises = this.pool.map(conn => this.destroyConnection(conn));
     await Promise.all(closePromises);
 
-    console.log('✅ Connection pool shut down');
+    console.log('[Pool] Connection pool shut down');
   }
 }
 
@@ -232,7 +234,7 @@ let poolInstance = null;
  */
 function initializePool(config, options) {
   if (poolInstance) {
-    console.log('⚠️  Connection pool already initialized');
+    console.log('[Pool] Connection pool already initialized');
     return poolInstance;
   }
 

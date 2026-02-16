@@ -200,6 +200,20 @@ function toGeoJsonString(filter) {
       type: "LineString",
       coordinates: filter.paths[0],
     };
+  } else if (typeof filter === "object" && filter.xmin !== undefined) {
+    // Esri Envelope format
+    geojson = {
+      type: "Polygon",
+      coordinates: [
+        [
+          [filter.xmin, filter.ymin],
+          [filter.xmax, filter.ymin],
+          [filter.xmax, filter.ymax],
+          [filter.xmin, filter.ymax],
+          [filter.xmin, filter.ymin],
+        ],
+      ],
+    };
   } else if (typeof filter === "object" && filter.x !== undefined) {
     // Esri Point format
     geojson = {

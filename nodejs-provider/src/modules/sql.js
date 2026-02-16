@@ -48,8 +48,10 @@ function buildSqlQuery(
   } else if (returnIdsOnly) {
     selectClause = `${idField}`;
   } else if (returnDistinctValues && !returnGeometry) {
+    // Return requested fields + id; let CDF runtime's winnow handle DISTINCT
     const sanitizedFields = outFields.split(",").map((f) => validateFieldName(f)).join(", ");
-    selectClause = sanitizedFields;
+    const fieldList = outFields.split(",").map((f) => f.trim());
+    selectClause = fieldList.includes(idField) ? sanitizedFields : `${sanitizedFields}, ${idField}`;
   } else if (outFields === "*") {
     // Convert geometry to GeoJSON (supports WKT, WKB, GeoJSON, native GEOMETRY)
     const geomToGeoJSON = getGeometryToGeoJSON(geometryField, dbWKID, geometryFormat);
@@ -57,8 +59,9 @@ function buildSqlQuery(
   } else {
     const sanitizedOutFields = outFields.split(",").map((f) => validateFieldName(f)).join(", ");
     let outputFields = sanitizedOutFields;
-    if (!outFields.includes(idField)) {
-      // Koop needs OBJECTID field in geojson
+    const fieldList = outFields.split(",").map((f) => f.trim());
+    if (!fieldList.includes(idField)) {
+      // CDF runtime needs the ID field for OBJECTID mapping
       outputFields = sanitizedOutFields + `, ${idField}`;
     }
     // Convert geometry to GeoJSON (supports WKT, WKB, GeoJSON, native GEOMETRY)

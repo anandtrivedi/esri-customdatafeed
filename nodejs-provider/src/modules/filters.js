@@ -12,6 +12,7 @@ function generateFiltersApplied(geoParams, idField, geometryField) {
     geometry,
     resultRecordCount,
     returnDistinctValues,
+    outFields,
     time,
   } = geoParams;
 
@@ -44,6 +45,10 @@ function generateFiltersApplied(geoParams, idField, geometryField) {
 
   if (resultRecordCount) {
     filtersApplied.limit = true;
+  }
+
+  if (outFields && outFields !== '*') {
+    filtersApplied.outFields = true;
   }
 
   if (time) {

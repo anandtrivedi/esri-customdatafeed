@@ -38,12 +38,15 @@ function formatFeature(values, columns, idField, geometryField) {
         console.error(`Failed to parse geometry for ${idField}:`, error);
         feature.geometry = null;
       }
-    } else {
-      if (columns[i] === idField) {
-        if (!isValidId(value)) {
-          console.warn(`Invalid ID value: ${value}`);
-        }
+    } else if (columns[i] === idField) {
+      // Cast to integer — Databricks returns BIGINT as strings/BigInts,
+      // but CDF runtime requires safe integers for OBJECTID recognition
+      const intValue = Number(value);
+      if (!isValidId(intValue)) {
+        console.warn(`Invalid ID value: ${value}`);
       }
+      feature.properties[columns[i]] = intValue;
+    } else {
       feature.properties[columns[i]] = value;
     }
   }
