@@ -54,6 +54,11 @@ describe("editSql", () => {
     it("should return null for unrecognized geometry", () => {
       expect(toGeoJSON({ foo: "bar" })).to.be.null;
     });
+
+    it("should throw for non-numeric point coordinates", () => {
+      expect(() => toGeoJSON({ x: "bad", y: 38.9 })).to.throw("Invalid point coordinates");
+      expect(() => toGeoJSON({ x: -77.0, y: NaN })).to.throw("Invalid point coordinates");
+    });
   });
 
   describe("buildInsertSql", () => {

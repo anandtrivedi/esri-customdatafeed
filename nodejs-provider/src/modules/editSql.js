@@ -30,6 +30,9 @@ function toGeoJSON(geom) {
 
   // Esri point
   if (geom.x !== undefined && geom.y !== undefined) {
+    if (typeof geom.x !== 'number' || typeof geom.y !== 'number' || isNaN(geom.x) || isNaN(geom.y)) {
+      throw new Error('Invalid point coordinates: x and y must be numbers');
+    }
     return { type: 'Point', coordinates: [geom.x, geom.y] };
   }
 
