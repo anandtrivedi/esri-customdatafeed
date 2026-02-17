@@ -445,6 +445,22 @@ class Model {
   }
 
   /**
+   * getMetadata() — Required by CDF 12.0 for editable providers.
+   * Returns idField and inputCrs so the runtime knows which field is the OBJECTID
+   * and what CRS the data is in.
+   *
+   * The runtime calls this once when the service starts.
+   * For our dual-backend provider, idField and inputCrs come from config defaults
+   * (overridden per-service via serviceParameters in the service JSON).
+   */
+  async getMetadata() {
+    return {
+      idField: config.databricks.defaultIdField || 'id',
+      inputCrs: config.databricks.srid || 4326,
+    };
+  }
+
+  /**
    * Read data from Lakebase (PostgreSQL + PostGIS) for editable services.
    * Called by getData() when req.params.lakebaseHost is set.
    * Returns identical GeoJSON structure as the Databricks path.
@@ -570,6 +586,10 @@ class Model {
    * Apply edits (add/update/delete) via Lakebase.
    * Called by CDF runtime when editingEnabled is true.
    *
+   * Supports both patterns:
+   *   CDF 12.0+:  async editData(req, data) → returns result (Promise)
+   *   Legacy:     editData(req, data, callback) → calls callback(error, result)
+   *
    * Error codes follow Esri convention:
    *   1003 = operation rolled back
    *   1017 = insert failure
@@ -578,28 +598,44 @@ class Model {
    *
    * @param {object} req  - Request with params (lakebaseHost, lakebaseSchema, etc.)
    * @param {object} data - { adds: [...], updates: [...], deletes: [...], rollbackOnFailure: bool }
-   * @param {function} callback - callback(error, result)
+   * @param {function} [callback] - Optional callback(error, result). If omitted, returns Promise.
    */
   editData(req, data, callback) {
+    // Support async/Promise pattern (CDF 12.0) — if no callback, return Promise
+    if (typeof callback !== 'function') {
+      return this._processEditData(req, data);
+    }
+
+    // Callback pattern (legacy) — delegate to async implementation
+    this._processEditData(req, data)
+      .then(result => callback(null, result))
+      .catch(error => callback(error));
+  }
+
+  /**
+   * Core edit logic (async). Called by editData() for both callback and Promise patterns.
+   *
+   * Error codes follow Esri convention:
+   *   1003 = operation rolled back
+   *   1017 = insert failure
+   *   1018 = delete failure
+   *   1019 = update failure
+   */
+  async _processEditData(req, data) {
     const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
     const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
     const schema = req.params.lakebaseSchema || 'public';
     const table = req.params.lakebaseTable;
     const srid = config.databricks.srid || 4326;
 
-    try {
-      validateIdentifier(rawGeometryColumn);
-      validateIdentifier(rawIdField);
-    } catch (validationError) {
-      this.logger.error(`Edit validation failed: ${validationError.message}`);
-      return callback(validationError);
-    }
+    validateIdentifier(rawGeometryColumn);
+    validateIdentifier(rawIdField);
 
     if (!req.params.lakebaseHost) {
-      return callback(new Error('Editing requires lakebaseHost service parameter'));
+      throw new Error('Editing requires lakebaseHost service parameter');
     }
     if (!table) {
-      return callback(new Error('Editing requires lakebaseTable service parameter'));
+      throw new Error('Editing requires lakebaseTable service parameter');
     }
 
     const lakebaseConfig = {
@@ -608,13 +644,7 @@ class Model {
       database: req.params.lakebaseDatabase,
     };
 
-    let pool;
-    try {
-      pool = getLakebasePool(lakebaseConfig);
-    } catch (poolError) {
-      this.logger.error(`Lakebase pool error: ${poolError.message}`);
-      return callback(poolError);
-    }
+    const pool = getLakebasePool(lakebaseConfig);
 
     const adds = data.adds || [];
     const updates = data.updates || [];
@@ -624,130 +654,121 @@ class Model {
 
     this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes (rollback=${rollbackOnFailure})`);
 
-    const processEdits = async () => {
-      const addResults = [];
-      const updateResults = [];
-      const deleteResults = [];
+    const addResults = [];
+    const updateResults = [];
+    const deleteResults = [];
 
-      // Use a dedicated client for transaction support
-      const client = rollbackOnFailure ? await pool.connect() : null;
-      const query = client
-        ? (sql, params) => client.query(sql, params)
-        : (sql, params) => pool.query(sql, params);
+    // Use a dedicated client for transaction support
+    const client = rollbackOnFailure ? await pool.connect() : null;
+    const query = client
+      ? (sql, params) => client.query(sql, params)
+      : (sql, params) => pool.query(sql, params);
 
-      try {
-        if (client) {
-          await client.query('BEGIN');
-        }
+    try {
+      if (client) {
+        await client.query('BEGIN');
+      }
 
-        // Process adds
-        for (const feature of adds) {
-          try {
-            const attributes = feature.attributes || feature.properties || {};
-            const geometry = feature.geometry || null;
-            const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-            const result = await query(sql, params);
-            const newId = result.rows[0][rawIdField];
-            addResults.push({ objectId: Number(newId), success: true });
-          } catch (error) {
-            this.logger.error(`Edit add failed: ${error.message}`);
-            addResults.push({ success: false, error: { code: 1017, description: error.message } });
-          }
-        }
-
-        // Process updates
-        for (const feature of updates) {
-          try {
-            const attributes = feature.attributes || feature.properties || {};
-            const geometry = feature.geometry || null;
-            const oid = Number(attributes[rawIdField]);
-            const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-            const result = await query(sql, params);
-            if (result.rowCount === 0) {
-              updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
-            } else {
-              updateResults.push({ objectId: oid, success: true });
-            }
-          } catch (error) {
-            this.logger.error(`Edit update failed: ${error.message}`);
-            const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
-            updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
-          }
-        }
-
-        // Process deletes — uses RETURNING to identify which rows were actually deleted
-        if (deletes.length > 0) {
-          try {
-            const objectIds = deletes.map(Number);
-            const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
-            const result = await query(sql, params);
-            const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
-            for (const id of objectIds) {
-              if (deletedIds.has(id)) {
-                deleteResults.push({ objectId: id, success: true });
-              } else {
-                deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
-              }
-            }
-          } catch (error) {
-            this.logger.error(`Edit delete failed: ${error.message}`);
-            for (const id of deletes) {
-              deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
-            }
-          }
-        }
-
-        // Handle rollbackOnFailure
-        if (client) {
-          const hasFailure = [...addResults, ...updateResults, ...deleteResults].some(r => !r.success);
-          if (hasFailure) {
-            await client.query('ROLLBACK');
-            this.logger.warn('Edit rolled back due to failure(s)');
-            // Mark all results as rolled back
-            const rollbackError = { code: 1003, description: 'Operation rolled back' };
-            addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
-            updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
-            deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
-          } else {
-            await client.query('COMMIT');
-          }
-        }
-
-        return { addResults, updateResults, deleteResults };
-      } catch (error) {
-        if (client) {
-          try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
-        }
-        throw error;
-      } finally {
-        if (client) {
-          client.release();
+      // Process adds
+      for (const feature of adds) {
+        try {
+          const attributes = feature.attributes || feature.properties || {};
+          const geometry = feature.geometry || null;
+          const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+          const result = await query(sql, params);
+          const newId = result.rows[0][rawIdField];
+          addResults.push({ objectId: Number(newId), success: true });
+        } catch (error) {
+          this.logger.error(`Edit add failed: ${error.message}`);
+          addResults.push({ success: false, error: { code: 1017, description: error.message } });
         }
       }
-    };
 
-    processEdits()
-      .then((result) => {
-        this.logger.info(`Edit complete: ${result.addResults.length} added, ${result.updateResults.length} updated, ${result.deleteResults.length} deleted`);
+      // Process updates
+      for (const feature of updates) {
+        try {
+          const attributes = feature.attributes || feature.properties || {};
+          const geometry = feature.geometry || null;
+          const oid = Number(attributes[rawIdField]);
+          const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+          const result = await query(sql, params);
+          if (result.rowCount === 0) {
+            updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
+          } else {
+            updateResults.push({ objectId: oid, success: true });
+          }
+        } catch (error) {
+          this.logger.error(`Edit update failed: ${error.message}`);
+          const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
+          updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
+        }
+      }
 
-        // Log edit to audit
-        const username = req._user?.username || 'anonymous';
-        const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
-        auditLogger.log('EDIT', {
-          username,
-          table: `${schema}.${table}`,
-          adds: result.addResults.length,
-          updates: result.updateResults.length,
-          deletes: result.deleteResults.length,
-          ipAddress,
-        });
+      // Process deletes — uses RETURNING to identify which rows were actually deleted
+      if (deletes.length > 0) {
+        try {
+          const objectIds = deletes.map(Number);
+          const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
+          const result = await query(sql, params);
+          const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
+          for (const id of objectIds) {
+            if (deletedIds.has(id)) {
+              deleteResults.push({ objectId: id, success: true });
+            } else {
+              deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
+            }
+          }
+        } catch (error) {
+          this.logger.error(`Edit delete failed: ${error.message}`);
+          for (const id of deletes) {
+            deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
+          }
+        }
+      }
 
-        callback(null, result);
-      })
-      .catch((error) => {
-        this.logger.error(`Edit error: ${error.message}`);
-        callback(error);
+      // Handle rollbackOnFailure
+      if (client) {
+        const hasFailure = [...addResults, ...updateResults, ...deleteResults].some(r => !r.success);
+        if (hasFailure) {
+          await client.query('ROLLBACK');
+          this.logger.warn('Edit rolled back due to failure(s)');
+          const rollbackError = { code: 1003, description: 'Operation rolled back' };
+          addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
+          updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
+          deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
+        } else {
+          await client.query('COMMIT');
+        }
+      }
+
+      const result = { addResults, updateResults, deleteResults };
+
+      this.logger.info(`Edit complete: ${addResults.length} added, ${updateResults.length} updated, ${deleteResults.length} deleted`);
+
+      // Log edit to audit
+      const username = req._user?.username || 'anonymous';
+      const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+      auditLogger.log('EDIT', {
+        username,
+        table: `${schema}.${table}`,
+        adds: addResults.length,
+        updates: updateResults.length,
+        deletes: deleteResults.length,
+        ipAddress,
       });
+
+      return result;
+    } catch (error) {
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
+      }
+      this.logger.error(`Edit error: ${error.message}`);
+      throw error;
+    } finally {
+      if (client) {
+        client.release();
+      }
+    }
   }
 
   /**

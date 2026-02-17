@@ -574,6 +574,29 @@ describe("model", () => {
     });
   });
 
+  describe("getMetadata", () => {
+    it("should return idField and inputCrs", async () => {
+      const model = new Model();
+      const metadata = await model.getMetadata();
+      expect(metadata).to.have.property("idField");
+      expect(metadata).to.have.property("inputCrs");
+      expect(metadata.idField).to.be.a("string");
+      expect(metadata.inputCrs).to.be.a("number");
+    });
+
+    it("should return default idField of 'id'", async () => {
+      const model = new Model();
+      const metadata = await model.getMetadata();
+      expect(metadata.idField).to.equal("id");
+    });
+
+    it("should return default inputCrs of 4326", async () => {
+      const model = new Model();
+      const metadata = await model.getMetadata();
+      expect(metadata.inputCrs).to.equal(4326);
+    });
+  });
+
   describe("editData", () => {
     it("should process adds and return objectIds", (done) => {
       lakebaseQueryResult = { rows: [{ id: 100 }] };
@@ -912,6 +935,53 @@ describe("model", () => {
         expect(sqls[sqls.length - 1]).to.equal("COMMIT");
         done();
       });
+    });
+
+    it("should return a Promise when called without callback (CDF 12.0 pattern)", async () => {
+      lakebaseQueryResult = { rows: [{ id: 500 }] };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        adds: [{ attributes: { name: "Async Tower" }, geometry: { x: -77, y: 38 } }],
+      };
+
+      // Call without callback — should return a Promise
+      const result = await model.editData(req, data);
+      expect(result.addResults).to.have.lengthOf(1);
+      expect(result.addResults[0].success).to.be.true;
+      expect(result.addResults[0].objectId).to.equal(500);
+    });
+
+    it("should reject the Promise on error when called without callback", async () => {
+      const model = new Model();
+      const req = {
+        params: {
+          // Missing lakebaseHost — should throw
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      try {
+        await model.editData(req, { adds: [] });
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err.message).to.include("lakebaseHost");
+      }
     });
 
     it("should return empty results when no edits are provided", (done) => {
