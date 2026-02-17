@@ -26,7 +26,13 @@ const lakebasePoolStub = {
   getLakebasePool: () => ({
     query: async (sql, params) => {
       lakebaseQueryLog.push({ sql, params });
-      return lakebaseQueryResult;
+      // Support rowCount for UPDATE/DELETE verification
+      const result = { ...lakebaseQueryResult };
+      if (result.rowCount === undefined) {
+        // Default: assume all rows affected (for backward compat with existing tests)
+        result.rowCount = result.rows ? result.rows.length : 0;
+      }
+      return result;
     },
   }),
   shutdownLakebasePools: async () => {},
@@ -282,10 +288,21 @@ describe("model", () => {
       expect(fields.find((f) => f.name === "geometry")).to.not.exist;
     });
 
-    it("should set editable to false for all fields", () => {
+    it("should set editable to false for all fields by default", () => {
       const rows = [{ OBJECTID: 1, name: "Test", geometry: "{}" }];
       const fields = model.extractFields(rows, "geometry", "OBJECTID");
       fields.forEach((f) => expect(f.editable).to.be.false);
+    });
+
+    it("should set editable to true for non-id fields when isEditable is true", () => {
+      const rows = [{ OBJECTID: 1, name: "Test", height: 50, geometry: "{}" }];
+      const fields = model.extractFields(rows, "geometry", "OBJECTID", true);
+      const idField = fields.find((f) => f.name === "OBJECTID");
+      const nameField = fields.find((f) => f.name === "name");
+      const heightField = fields.find((f) => f.name === "height");
+      expect(idField.editable).to.be.false; // ID never editable
+      expect(nameField.editable).to.be.true;
+      expect(heightField.editable).to.be.true;
     });
 
     it("should include alias matching field name", () => {
@@ -448,6 +465,11 @@ describe("model", () => {
         expect(result.metadata).to.exist;
         expect(result.metadata.idField).to.equal("id");
         expect(result.crs.type).to.equal("EPSG:4326");
+        // Lakebase services should have editable fields
+        const nameField = result.metadata.fields.find((f) => f.name === "name");
+        const idFieldDef = result.metadata.fields.find((f) => f.name === "id");
+        expect(nameField.editable).to.be.true;
+        expect(idFieldDef.editable).to.be.false; // ID never editable
         done();
       });
     });
@@ -574,7 +596,7 @@ describe("model", () => {
     });
 
     it("should process updates", (done) => {
-      lakebaseQueryResult = { rows: [] };
+      lakebaseQueryResult = { rows: [], rowCount: 1 };
 
       const model = new Model();
       const req = {
@@ -609,7 +631,7 @@ describe("model", () => {
     });
 
     it("should process deletes", (done) => {
-      lakebaseQueryResult = { rows: [] };
+      lakebaseQueryResult = { rows: [], rowCount: 3 };
 
       const model = new Model();
       const req = {
@@ -639,9 +661,8 @@ describe("model", () => {
     });
 
     it("should process mixed adds, updates, and deletes", (done) => {
-      // First call (INSERT) returns new ID, second (UPDATE) returns nothing, third (DELETE) returns nothing
-      let callCount = 0;
-      const originalQuery = lakebasePoolStub.getLakebasePool().query;
+      // INSERT returns new ID + rowCount=1, UPDATE returns rowCount=1, DELETE returns rowCount=1
+      lakebaseQueryResult = { rows: [{ id: 200 }], rowCount: 1 };
 
       const model = new Model();
       const req = {
@@ -656,9 +677,6 @@ describe("model", () => {
         ip: "127.0.0.1",
       };
 
-      // Set up to return an ID for the INSERT
-      lakebaseQueryResult = { rows: [{ id: 200 }] };
-
       const data = {
         adds: [{ attributes: { name: "New" }, geometry: { x: -77, y: 38 } }],
         updates: [{ attributes: { id: 10, name: "Up" } }],
@@ -670,6 +688,9 @@ describe("model", () => {
         expect(result.addResults).to.have.lengthOf(1);
         expect(result.updateResults).to.have.lengthOf(1);
         expect(result.deleteResults).to.have.lengthOf(1);
+        expect(result.addResults[0].success).to.be.true;
+        expect(result.updateResults[0].success).to.be.true;
+        expect(result.deleteResults[0].success).to.be.true;
         // 3 queries total: INSERT, UPDATE, DELETE
         expect(lakebaseQueryLog).to.have.lengthOf(3);
         done();
@@ -729,6 +750,38 @@ describe("model", () => {
       model.editData(req, { adds: [] }, (err) => {
         expect(err).to.be.an("error");
         expect(err.message).to.include("Invalid identifier");
+        done();
+      });
+    });
+
+    it("should report failure when update targets non-existent ID", (done) => {
+      lakebaseQueryResult = { rows: [], rowCount: 0 };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        updates: [
+          { attributes: { id: 999999, name: "Ghost Tower" } },
+        ],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.updateResults).to.have.lengthOf(1);
+        expect(result.updateResults[0].success).to.be.false;
+        expect(result.updateResults[0].objectId).to.equal(999999);
+        expect(result.updateResults[0].error.description).to.include("not found");
         done();
       });
     });

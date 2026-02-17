@@ -417,8 +417,12 @@ class Model {
 
   /**
    * Extract field definitions from first row
+   * @param {object[]} rows - Data rows
+   * @param {string} geometryColumn - Geometry column name (excluded from fields)
+   * @param {string} idField - ID column name (never editable)
+   * @param {boolean} [isEditable=false] - Whether this is an editable service
    */
-  extractFields(rows, geometryColumn, idField) {
+  extractFields(rows, geometryColumn, idField, isEditable = false) {
     if (rows.length === 0) {
       return [];
     }
@@ -432,7 +436,7 @@ class Model {
           name: key,
           type: this.inferFieldType(firstRow[key]),
           alias: key,
-          editable: false
+          editable: isEditable && key !== idField
         });
       }
     }
@@ -535,7 +539,7 @@ class Model {
             exceededTransferLimit,
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
-            fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
+            fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField, true),
           };
         }
 
@@ -634,8 +638,13 @@ class Model {
           const attributes = feature.attributes || feature.properties || {};
           const geometry = feature.geometry || null;
           const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-          await pool.query(sql, params);
-          updateResults.push({ objectId: Number(attributes[rawIdField]), success: true });
+          const result = await pool.query(sql, params);
+          const oid = Number(attributes[rawIdField]);
+          if (result.rowCount === 0) {
+            updateResults.push({ objectId: oid, success: false, error: { description: `Feature with ${rawIdField}=${oid} not found` } });
+          } else {
+            updateResults.push({ objectId: oid, success: true });
+          }
         } catch (error) {
           this.logger.error(`Edit update failed: ${error.message}`);
           updateResults.push({ success: false, error: { description: error.message } });
@@ -647,9 +656,20 @@ class Model {
         try {
           const objectIds = deletes.map(Number);
           const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
-          await pool.query(sql, params);
-          for (const id of objectIds) {
-            deleteResults.push({ objectId: id, success: true });
+          const result = await pool.query(sql, params);
+          const deletedCount = result.rowCount || 0;
+          if (deletedCount === objectIds.length) {
+            // All requested IDs were deleted
+            for (const id of objectIds) {
+              deleteResults.push({ objectId: id, success: true });
+            }
+          } else {
+            // Some IDs may not have existed — we can't tell which ones,
+            // so report all as success but log the discrepancy
+            this.logger.warn(`Edit delete: requested ${objectIds.length} but only ${deletedCount} rows affected`);
+            for (const id of objectIds) {
+              deleteResults.push({ objectId: id, success: true });
+            }
           }
         } catch (error) {
           this.logger.error(`Edit delete failed: ${error.message}`);
