@@ -90,9 +90,33 @@ Databricks SQL Warehouse does not support interactive editing (DML latency too h
 | Operation | SQL Pattern | Notes |
 |-----------|-------------|-------|
 | **Add** | `INSERT INTO schema.table (...) VALUES ($1, ...) RETURNING id` | Auto-generated ID via RETURNING |
-| **Update** | `UPDATE schema.table SET col=$1, ... WHERE id=$N` | Must include idField in attributes |
-| **Delete** | `DELETE FROM schema.table WHERE id IN ($1, ...)` | Batch delete supported |
+| **Update** | `UPDATE schema.table SET col=$1, ... WHERE id=$N` | Must include idField in attributes; rowCount=0 reports failure |
+| **Delete** | `DELETE FROM schema.table WHERE id IN ($1, ...) RETURNING id` | Per-row failure via RETURNING |
 | **Geometry** | `ST_SetSRID(ST_GeomFromGeoJSON($N), srid)` | Esri JSON auto-converted to GeoJSON |
+| **Transactions** | `BEGIN` / `COMMIT` / `ROLLBACK` | `rollbackOnFailure=true` wraps all ops in transaction |
+
+### Error Codes (Esri standard)
+
+| Code | Meaning | When Used |
+|------|---------|-----------|
+| 1017 | Insert failure | Add operation fails (SQL error or constraint violation) |
+| 1018 | Delete failure | Delete targets non-existent ID (via RETURNING check) |
+| 1019 | Update failure | Update targets non-existent ID (rowCount=0) or SQL error |
+| 1003 | Rolled back | All results when `rollbackOnFailure=true` and any operation fails |
+
+### Editing Templates
+
+Lakebase metadata includes editing templates for ArcGIS clients (Pro "Create Features" pane, JS API Editor widget):
+
+```json
+{
+  "name": "New Feature",
+  "drawingTool": "esriFeatureEditToolPoint",
+  "prototype": { "attributes": { "name": null, "height": null } }
+}
+```
+
+Drawing tool mapped from geometry type: Point, LineString/Polyline, Polygon.
 
 ## 6. Configuration
 
@@ -129,4 +153,4 @@ Both backends return identical GeoJSON FeatureCollection responses. Key handling
 ---
 
 *Last updated: 2026-02-17*
-*Test count: 264 passing (175 Databricks + 64 Lakebase edit + 25 PostGIS spatial)*
+*Test count: 270 passing (175 Databricks + 70 Lakebase edit + 25 PostGIS spatial)*

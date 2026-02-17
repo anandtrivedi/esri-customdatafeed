@@ -224,13 +224,13 @@ describe("editSql", () => {
   describe("buildDeleteSql", () => {
     it("should build DELETE for single ID", () => {
       const result = buildDeleteSql("public", "towers", "id", [42]);
-      expect(result.sql).to.equal("DELETE FROM public.towers WHERE id IN ($1)");
+      expect(result.sql).to.equal("DELETE FROM public.towers WHERE id IN ($1) RETURNING id");
       expect(result.params).to.deep.equal([42]);
     });
 
     it("should build DELETE for multiple IDs", () => {
       const result = buildDeleteSql("public", "towers", "id", [1, 2, 3]);
-      expect(result.sql).to.equal("DELETE FROM public.towers WHERE id IN ($1, $2, $3)");
+      expect(result.sql).to.equal("DELETE FROM public.towers WHERE id IN ($1, $2, $3) RETURNING id");
       expect(result.params).to.deep.equal([1, 2, 3]);
     });
 

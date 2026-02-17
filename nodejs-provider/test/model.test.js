@@ -20,20 +20,31 @@ const connectionPoolStub = {
 };
 
 // Configurable lakebase pool stub for edit/read tests
+// Set to an object for a single result, or an array for a queue of results
 let lakebaseQueryResult = { rows: [] };
 let lakebaseQueryLog = [];
+const queryFn = async (sql, params) => {
+  lakebaseQueryLog.push({ sql, params });
+  let raw;
+  if (Array.isArray(lakebaseQueryResult)) {
+    raw = lakebaseQueryResult.shift() || { rows: [] };
+  } else {
+    raw = lakebaseQueryResult;
+  }
+  const result = { ...raw };
+  if (result.rowCount === undefined) {
+    result.rowCount = result.rows ? result.rows.length : 0;
+  }
+  return result;
+};
 const lakebasePoolStub = {
   getLakebasePool: () => ({
-    query: async (sql, params) => {
-      lakebaseQueryLog.push({ sql, params });
-      // Support rowCount for UPDATE/DELETE verification
-      const result = { ...lakebaseQueryResult };
-      if (result.rowCount === undefined) {
-        // Default: assume all rows affected (for backward compat with existing tests)
-        result.rowCount = result.rows ? result.rows.length : 0;
-      }
-      return result;
-    },
+    query: queryFn,
+    // pool.connect() returns a client with query/release for transactions
+    connect: async () => ({
+      query: queryFn,
+      release: () => {},
+    }),
   }),
   shutdownLakebasePools: async () => {},
 };
@@ -470,6 +481,12 @@ describe("model", () => {
         const idFieldDef = result.metadata.fields.find((f) => f.name === "id");
         expect(nameField.editable).to.be.true;
         expect(idFieldDef.editable).to.be.false; // ID never editable
+        // Lakebase metadata should include editing templates
+        expect(result.metadata.templates).to.be.an("array").with.lengthOf(1);
+        expect(result.metadata.templates[0].name).to.equal("New Feature");
+        expect(result.metadata.templates[0].drawingTool).to.equal("esriFeatureEditToolPoint");
+        expect(result.metadata.templates[0].prototype.attributes).to.have.property("name");
+        expect(result.metadata.templates[0].prototype.attributes).to.not.have.property("id");
         done();
       });
     });
@@ -631,7 +648,7 @@ describe("model", () => {
     });
 
     it("should process deletes", (done) => {
-      lakebaseQueryResult = { rows: [], rowCount: 3 };
+      lakebaseQueryResult = { rows: [{ id: 1 }, { id: 2 }, { id: 3 }], rowCount: 3 };
 
       const model = new Model();
       const req = {
@@ -661,8 +678,12 @@ describe("model", () => {
     });
 
     it("should process mixed adds, updates, and deletes", (done) => {
-      // INSERT returns new ID + rowCount=1, UPDATE returns rowCount=1, DELETE returns rowCount=1
-      lakebaseQueryResult = { rows: [{ id: 200 }], rowCount: 1 };
+      // Queue: INSERT returns new ID, UPDATE returns rowCount=1, DELETE returns deleted row
+      lakebaseQueryResult = [
+        { rows: [{ id: 200 }], rowCount: 1 },   // INSERT RETURNING
+        { rows: [], rowCount: 1 },               // UPDATE
+        { rows: [{ id: 5 }], rowCount: 1 },      // DELETE RETURNING
+      ];
 
       const model = new Model();
       const req = {
@@ -781,7 +802,114 @@ describe("model", () => {
         expect(result.updateResults).to.have.lengthOf(1);
         expect(result.updateResults[0].success).to.be.false;
         expect(result.updateResults[0].objectId).to.equal(999999);
+        expect(result.updateResults[0].error.code).to.equal(1019);
         expect(result.updateResults[0].error.description).to.include("not found");
+        done();
+      });
+    });
+
+    it("should report per-row delete failures for non-existent IDs", (done) => {
+      // DELETE RETURNING only returns id=1, so id=999 was not found
+      lakebaseQueryResult = { rows: [{ id: 1 }], rowCount: 1 };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, { deletes: [1, 999] }, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.deleteResults).to.have.lengthOf(2);
+        expect(result.deleteResults[0]).to.deep.include({ objectId: 1, success: true });
+        expect(result.deleteResults[1].success).to.be.false;
+        expect(result.deleteResults[1].objectId).to.equal(999);
+        expect(result.deleteResults[1].error.code).to.equal(1018);
+        done();
+      });
+    });
+
+    it("should rollback all operations when rollbackOnFailure is true and one fails", (done) => {
+      // Queue: BEGIN, INSERT succeeds, UPDATE fails (not found), ROLLBACK
+      lakebaseQueryResult = [
+        { rows: [] },                            // BEGIN
+        { rows: [{ id: 300 }], rowCount: 1 },   // INSERT succeeds
+        { rows: [], rowCount: 0 },               // UPDATE fails (not found)
+        { rows: [] },                            // ROLLBACK
+      ];
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        rollbackOnFailure: true,
+        adds: [{ attributes: { name: "New" }, geometry: { x: -77, y: 38 } }],
+        updates: [{ attributes: { id: 999, name: "Ghost" } }],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        // Both should be marked as failed due to rollback
+        expect(result.addResults[0].success).to.be.false;
+        expect(result.addResults[0].error.code).to.equal(1003);
+        expect(result.updateResults[0].success).to.be.false;
+        expect(result.updateResults[0].error.code).to.equal(1003);
+        // Should have BEGIN and ROLLBACK in the query log
+        const sqls = lakebaseQueryLog.map(q => q.sql);
+        expect(sqls[0]).to.equal("BEGIN");
+        expect(sqls[sqls.length - 1]).to.equal("ROLLBACK");
+        done();
+      });
+    });
+
+    it("should commit when rollbackOnFailure is true and all succeed", (done) => {
+      lakebaseQueryResult = [
+        { rows: [] },                           // BEGIN
+        { rows: [{ id: 400 }], rowCount: 1 },   // INSERT succeeds
+        { rows: [] },                           // COMMIT
+      ];
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      const data = {
+        rollbackOnFailure: true,
+        adds: [{ attributes: { name: "New" }, geometry: { x: -77, y: 38 } }],
+      };
+
+      model.editData(req, data, (err, result) => {
+        expect(err).to.be.null;
+        expect(result.addResults[0].success).to.be.true;
+        const sqls = lakebaseQueryLog.map(q => q.sql);
+        expect(sqls[0]).to.equal("BEGIN");
+        expect(sqls[sqls.length - 1]).to.equal("COMMIT");
         done();
       });
     });

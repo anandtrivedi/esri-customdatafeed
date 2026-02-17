@@ -183,7 +183,7 @@ function buildDeleteSql(schema, table, idField, objectIds) {
   }
 
   const placeholders = objectIds.map((_, i) => `$${i + 1}`);
-  const sql = `DELETE FROM ${schema}.${table} WHERE ${idField} IN (${placeholders.join(', ')})`;
+  const sql = `DELETE FROM ${schema}.${table} WHERE ${idField} IN (${placeholders.join(', ')}) RETURNING ${idField}`;
   const params = objectIds.map(Number);
 
   return { sql, params };

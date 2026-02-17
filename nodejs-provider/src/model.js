@@ -531,15 +531,19 @@ class Model {
 
           geojson = translateToGeoJSON(rows, sourceConfig);
 
+          const geometryType = this.inferGeometryType(rows, sourceConfig.geometryColumn);
+          const fields = this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField, true);
+
           geojson.metadata = {
             name: sourceConfig.name,
             description: sourceConfig.description,
-            geometryType: this.inferGeometryType(rows, sourceConfig.geometryColumn),
+            geometryType,
             maxRecordCount: sourceConfig.maxRecordCountPerPage,
             exceededTransferLimit,
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
-            fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField, true),
+            fields,
+            templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)],
           };
         }
 
@@ -566,8 +570,14 @@ class Model {
    * Apply edits (add/update/delete) via Lakebase.
    * Called by CDF runtime when editingEnabled is true.
    *
+   * Error codes follow Esri convention:
+   *   1003 = operation rolled back
+   *   1017 = insert failure
+   *   1018 = delete failure
+   *   1019 = update failure
+   *
    * @param {object} req  - Request with params (lakebaseHost, lakebaseSchema, etc.)
-   * @param {object} data - { adds: [...], updates: [...], deletes: [...] }
+   * @param {object} data - { adds: [...], updates: [...], deletes: [...], rollbackOnFailure: bool }
    * @param {function} callback - callback(error, result)
    */
   editData(req, data, callback) {
@@ -609,77 +619,111 @@ class Model {
     const adds = data.adds || [];
     const updates = data.updates || [];
     const deletes = data.deletes || [];
+    const rollbackOnFailure = data.rollbackOnFailure === true ||
+      data.rollbackOnFailure === 'true';
 
-    this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes`);
+    this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes (rollback=${rollbackOnFailure})`);
 
     const processEdits = async () => {
       const addResults = [];
       const updateResults = [];
       const deleteResults = [];
 
-      // Process adds
-      for (const feature of adds) {
-        try {
-          const attributes = feature.attributes || feature.properties || {};
-          const geometry = feature.geometry || null;
-          const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-          const result = await pool.query(sql, params);
-          const newId = result.rows[0][rawIdField];
-          addResults.push({ objectId: Number(newId), success: true });
-        } catch (error) {
-          this.logger.error(`Edit add failed: ${error.message}`);
-          addResults.push({ success: false, error: { description: error.message } });
-        }
-      }
+      // Use a dedicated client for transaction support
+      const client = rollbackOnFailure ? await pool.connect() : null;
+      const query = client
+        ? (sql, params) => client.query(sql, params)
+        : (sql, params) => pool.query(sql, params);
 
-      // Process updates
-      for (const feature of updates) {
-        try {
-          const attributes = feature.attributes || feature.properties || {};
-          const geometry = feature.geometry || null;
-          const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-          const result = await pool.query(sql, params);
-          const oid = Number(attributes[rawIdField]);
-          if (result.rowCount === 0) {
-            updateResults.push({ objectId: oid, success: false, error: { description: `Feature with ${rawIdField}=${oid} not found` } });
-          } else {
-            updateResults.push({ objectId: oid, success: true });
+      try {
+        if (client) {
+          await client.query('BEGIN');
+        }
+
+        // Process adds
+        for (const feature of adds) {
+          try {
+            const attributes = feature.attributes || feature.properties || {};
+            const geometry = feature.geometry || null;
+            const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+            const result = await query(sql, params);
+            const newId = result.rows[0][rawIdField];
+            addResults.push({ objectId: Number(newId), success: true });
+          } catch (error) {
+            this.logger.error(`Edit add failed: ${error.message}`);
+            addResults.push({ success: false, error: { code: 1017, description: error.message } });
           }
-        } catch (error) {
-          this.logger.error(`Edit update failed: ${error.message}`);
-          updateResults.push({ success: false, error: { description: error.message } });
         }
-      }
 
-      // Process deletes
-      if (deletes.length > 0) {
-        try {
-          const objectIds = deletes.map(Number);
-          const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
-          const result = await pool.query(sql, params);
-          const deletedCount = result.rowCount || 0;
-          if (deletedCount === objectIds.length) {
-            // All requested IDs were deleted
-            for (const id of objectIds) {
-              deleteResults.push({ objectId: id, success: true });
+        // Process updates
+        for (const feature of updates) {
+          try {
+            const attributes = feature.attributes || feature.properties || {};
+            const geometry = feature.geometry || null;
+            const oid = Number(attributes[rawIdField]);
+            const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+            const result = await query(sql, params);
+            if (result.rowCount === 0) {
+              updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
+            } else {
+              updateResults.push({ objectId: oid, success: true });
             }
-          } else {
-            // Some IDs may not have existed — we can't tell which ones,
-            // so report all as success but log the discrepancy
-            this.logger.warn(`Edit delete: requested ${objectIds.length} but only ${deletedCount} rows affected`);
-            for (const id of objectIds) {
-              deleteResults.push({ objectId: id, success: true });
-            }
-          }
-        } catch (error) {
-          this.logger.error(`Edit delete failed: ${error.message}`);
-          for (const id of deletes) {
-            deleteResults.push({ objectId: Number(id), success: false, error: { description: error.message } });
+          } catch (error) {
+            this.logger.error(`Edit update failed: ${error.message}`);
+            const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
+            updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
           }
         }
-      }
 
-      return { addResults, updateResults, deleteResults };
+        // Process deletes — uses RETURNING to identify which rows were actually deleted
+        if (deletes.length > 0) {
+          try {
+            const objectIds = deletes.map(Number);
+            const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
+            const result = await query(sql, params);
+            const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
+            for (const id of objectIds) {
+              if (deletedIds.has(id)) {
+                deleteResults.push({ objectId: id, success: true });
+              } else {
+                deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
+              }
+            }
+          } catch (error) {
+            this.logger.error(`Edit delete failed: ${error.message}`);
+            for (const id of deletes) {
+              deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
+            }
+          }
+        }
+
+        // Handle rollbackOnFailure
+        if (client) {
+          const hasFailure = [...addResults, ...updateResults, ...deleteResults].some(r => !r.success);
+          if (hasFailure) {
+            await client.query('ROLLBACK');
+            this.logger.warn('Edit rolled back due to failure(s)');
+            // Mark all results as rolled back
+            const rollbackError = { code: 1003, description: 'Operation rolled back' };
+            addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
+            updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
+            deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
+          } else {
+            await client.query('COMMIT');
+          }
+        }
+
+        return { addResults, updateResults, deleteResults };
+      } catch (error) {
+        if (client) {
+          try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
+        }
+        throw error;
+      } finally {
+        if (client) {
+          client.release();
+        }
+      }
     };
 
     processEdits()
@@ -704,6 +748,34 @@ class Model {
         this.logger.error(`Edit error: ${error.message}`);
         callback(error);
       });
+  }
+
+  /**
+   * Build an editing template for ArcGIS clients (Pro, JS API Editor widget).
+   * Templates define the drawing tool and default attribute values.
+   */
+  buildEditTemplate(geometryType, fields, idField) {
+    const drawingToolMap = {
+      Point: 'esriFeatureEditToolPoint',
+      MultiPoint: 'esriFeatureEditToolPoint',
+      LineString: 'esriFeatureEditToolLine',
+      MultiLineString: 'esriFeatureEditToolLine',
+      Polygon: 'esriFeatureEditToolPolygon',
+      MultiPolygon: 'esriFeatureEditToolPolygon',
+    };
+
+    const prototype = {};
+    for (const field of fields) {
+      if (field.name !== idField) {
+        prototype[field.name] = null;
+      }
+    }
+
+    return {
+      name: 'New Feature',
+      drawingTool: drawingToolMap[geometryType] || 'esriFeatureEditToolPoint',
+      prototype: { attributes: prototype },
+    };
   }
 
   /**
