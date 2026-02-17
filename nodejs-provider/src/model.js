@@ -27,6 +27,9 @@ const {
   validateIdentifier,
 } = require('./modules');
 const { initializePool, getPool, shutdownPool } = require('./modules/connectionPool');
+const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
+const { buildInsertSql, buildUpdateSql, buildDeleteSql } = require('./modules/editSql');
+const { buildLakebaseSelectSql } = require('./modules/lakebaseQuery');
 
 // Table name validation: must be catalog.schema.table or just a table name
 const TABLE_NAME_PATTERN = /^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+){0,2}$/;
@@ -60,12 +63,14 @@ let requestCounter = 0;
 // Guard with try/catch — CDF runtime manages process lifecycle
 try {
   process.on('SIGTERM', async () => {
-    console.log('Received SIGTERM, shutting down connection pool...');
+    console.log('Received SIGTERM, shutting down connection pools...');
     await shutdownPool();
+    await shutdownLakebasePools();
   });
   process.on('SIGINT', async () => {
-    console.log('Received SIGINT, shutting down connection pool...');
+    console.log('Received SIGINT, shutting down connection pools...');
     await shutdownPool();
+    await shutdownLakebasePools();
   });
 } catch (e) { /* signal handlers may not be available in CDF runtime */ }
 
@@ -169,6 +174,11 @@ class Model {
    */
   getData(req, callback) {
     requestCounter++;
+
+    // Route to Lakebase if this is an editable service
+    if (req.params.lakebaseHost) {
+      return this.getDataFromLakebase(req, callback);
+    }
 
     // Convert boolean strings to actual booleans
     Object.keys(req.query).forEach((key) => {
@@ -407,8 +417,12 @@ class Model {
 
   /**
    * Extract field definitions from first row
+   * @param {object[]} rows - Data rows
+   * @param {string} geometryColumn - Geometry column name (excluded from fields)
+   * @param {string} idField - ID column name (never editable)
+   * @param {boolean} [isEditable=false] - Whether this is an editable service
    */
-  extractFields(rows, geometryColumn, idField) {
+  extractFields(rows, geometryColumn, idField, isEditable = false) {
     if (rows.length === 0) {
       return [];
     }
@@ -422,12 +436,367 @@ class Model {
           name: key,
           type: this.inferFieldType(firstRow[key]),
           alias: key,
-          editable: false
+          editable: isEditable && key !== idField
         });
       }
     }
 
     return fields;
+  }
+
+  /**
+   * getMetadata() — Required by CDF 12.0 for editable providers.
+   * Returns idField and inputCrs so the runtime knows which field is the OBJECTID
+   * and what CRS the data is in.
+   *
+   * The runtime calls this once when the service starts.
+   * For our dual-backend provider, idField and inputCrs come from config defaults
+   * (overridden per-service via serviceParameters in the service JSON).
+   */
+  async getMetadata() {
+    return {
+      idField: config.databricks.defaultIdField || 'id',
+      inputCrs: config.databricks.srid || 4326,
+    };
+  }
+
+  /**
+   * Read data from Lakebase (PostgreSQL + PostGIS) for editable services.
+   * Called by getData() when req.params.lakebaseHost is set.
+   * Returns identical GeoJSON structure as the Databricks path.
+   */
+  getDataFromLakebase(req, callback) {
+    // Convert boolean strings to actual booleans
+    Object.keys(req.query).forEach((key) => {
+      const val = (req.query[key] + "").toLowerCase();
+      if (val === "true") {
+        req.query[key] = true;
+      } else if (val === "false") {
+        req.query[key] = false;
+      }
+    });
+
+    const { query: geoserviceParams } = req;
+    const { returnCountOnly } = geoserviceParams;
+
+    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
+    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
+
+    try {
+      validateIdentifier(rawGeometryColumn);
+      validateIdentifier(rawIdField);
+    } catch (validationError) {
+      this.logger.error(`Input validation failed: ${validationError.message}`);
+      return callback(validationError);
+    }
+
+    const sourceConfig = {
+      lakebaseSchema: req.params.lakebaseSchema || 'public',
+      lakebaseTable: req.params.lakebaseTable,
+      geometryColumn: rawGeometryColumn,
+      idField: rawIdField,
+      dbWKID: config.databricks.srid || 4326,
+      maxRecordCountPerPage: config.databricks.maxRecordCount || 2000,
+      name: req.params.lakebaseTable || 'LakebaseLayer',
+      description: `Lakebase table: ${req.params.lakebaseSchema || 'public'}.${req.params.lakebaseTable}`,
+    };
+
+    if (!sourceConfig.lakebaseTable) {
+      return callback(new Error('lakebaseTable service parameter is required for editable services'));
+    }
+
+    const lakebaseConfig = {
+      host: req.params.lakebaseHost,
+      port: parseInt(req.params.lakebasePort) || 5432,
+      database: req.params.lakebaseDatabase,
+    };
+
+    let pool;
+    try {
+      pool = getLakebasePool(lakebaseConfig);
+    } catch (poolError) {
+      this.logger.error(`Lakebase pool error: ${poolError.message}`);
+      return callback(poolError);
+    }
+
+    this.logger.info(`Query ${requestCounter}: Executing Lakebase query...`);
+
+    const { sql, params } = buildLakebaseSelectSql(geoserviceParams, sourceConfig);
+    this.logger.info(`Query ${requestCounter}: ${sql.substring(0, 150)}...`);
+
+    pool.query(sql, params)
+      .then((result) => {
+        const rows = result.rows;
+        this.logger.info(`Query ${requestCounter}: Lakebase returned ${rows.length} rows`);
+
+        let geojson = { type: 'FeatureCollection', features: [] };
+
+        if (rows.length === 0) {
+          return callback(null, geojson);
+        }
+
+        if (returnCountOnly) {
+          geojson.count = Number(rows[0].count);
+        } else {
+          // Check exceeded transfer limit
+          let exceededTransferLimit = false;
+          if (rows.length > sourceConfig.maxRecordCountPerPage) {
+            exceededTransferLimit = true;
+            rows.pop();
+          }
+
+          geojson = translateToGeoJSON(rows, sourceConfig);
+
+          const geometryType = this.inferGeometryType(rows, sourceConfig.geometryColumn);
+          const fields = this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField, true);
+
+          geojson.metadata = {
+            name: sourceConfig.name,
+            description: sourceConfig.description,
+            geometryType,
+            maxRecordCount: sourceConfig.maxRecordCountPerPage,
+            exceededTransferLimit,
+            idField: sourceConfig.idField,
+            inputCrs: sourceConfig.dbWKID,
+            fields,
+            templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)],
+          };
+        }
+
+        geojson.filtersApplied = generateFiltersApplied(
+          geoserviceParams,
+          sourceConfig.idField,
+          sourceConfig.geometryColumn
+        );
+
+        geojson.crs = {
+          type: `EPSG:${sourceConfig.dbWKID}`,
+          properties: { name: `urn:ogc:def:crs:EPSG::${sourceConfig.dbWKID}` },
+        };
+
+        callback(null, geojson);
+      })
+      .catch((error) => {
+        this.logger.error(`Query ${requestCounter}: Lakebase error: ${error.message}`);
+        callback(error);
+      });
+  }
+
+  /**
+   * Apply edits (add/update/delete) via Lakebase.
+   * Called by CDF runtime when editingEnabled is true.
+   *
+   * Supports both patterns:
+   *   CDF 12.0+:  async editData(req, data) → returns result (Promise)
+   *   Legacy:     editData(req, data, callback) → calls callback(error, result)
+   *
+   * Error codes follow Esri convention:
+   *   1003 = operation rolled back
+   *   1017 = insert failure
+   *   1018 = delete failure
+   *   1019 = update failure
+   *
+   * @param {object} req  - Request with params (lakebaseHost, lakebaseSchema, etc.)
+   * @param {object} data - { adds: [...], updates: [...], deletes: [...], rollbackOnFailure: bool }
+   * @param {function} [callback] - Optional callback(error, result). If omitted, returns Promise.
+   */
+  editData(req, data, callback) {
+    // Support async/Promise pattern (CDF 12.0) — if no callback, return Promise
+    if (typeof callback !== 'function') {
+      return this._processEditData(req, data);
+    }
+
+    // Callback pattern (legacy) — delegate to async implementation
+    this._processEditData(req, data)
+      .then(result => callback(null, result))
+      .catch(error => callback(error));
+  }
+
+  /**
+   * Core edit logic (async). Called by editData() for both callback and Promise patterns.
+   *
+   * Error codes follow Esri convention:
+   *   1003 = operation rolled back
+   *   1017 = insert failure
+   *   1018 = delete failure
+   *   1019 = update failure
+   */
+  async _processEditData(req, data) {
+    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
+    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
+    const schema = req.params.lakebaseSchema || 'public';
+    const table = req.params.lakebaseTable;
+    const srid = config.databricks.srid || 4326;
+
+    validateIdentifier(rawGeometryColumn);
+    validateIdentifier(rawIdField);
+
+    if (!req.params.lakebaseHost) {
+      throw new Error('Editing requires lakebaseHost service parameter');
+    }
+    if (!table) {
+      throw new Error('Editing requires lakebaseTable service parameter');
+    }
+
+    const lakebaseConfig = {
+      host: req.params.lakebaseHost,
+      port: parseInt(req.params.lakebasePort) || 5432,
+      database: req.params.lakebaseDatabase,
+    };
+
+    const pool = getLakebasePool(lakebaseConfig);
+
+    const adds = data.adds || [];
+    const updates = data.updates || [];
+    const deletes = data.deletes || [];
+    const rollbackOnFailure = data.rollbackOnFailure === true ||
+      data.rollbackOnFailure === 'true';
+
+    this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes (rollback=${rollbackOnFailure})`);
+
+    const addResults = [];
+    const updateResults = [];
+    const deleteResults = [];
+
+    // Use a dedicated client for transaction support
+    const client = rollbackOnFailure ? await pool.connect() : null;
+    const query = client
+      ? (sql, params) => client.query(sql, params)
+      : (sql, params) => pool.query(sql, params);
+
+    try {
+      if (client) {
+        await client.query('BEGIN');
+      }
+
+      // Process adds
+      for (const feature of adds) {
+        try {
+          const attributes = feature.attributes || feature.properties || {};
+          const geometry = feature.geometry || null;
+          const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+          const result = await query(sql, params);
+          const newId = result.rows[0][rawIdField];
+          addResults.push({ objectId: Number(newId), success: true });
+        } catch (error) {
+          this.logger.error(`Edit add failed: ${error.message}`);
+          addResults.push({ success: false, error: { code: 1017, description: error.message } });
+        }
+      }
+
+      // Process updates
+      for (const feature of updates) {
+        try {
+          const attributes = feature.attributes || feature.properties || {};
+          const geometry = feature.geometry || null;
+          const oid = Number(attributes[rawIdField]);
+          const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+          const result = await query(sql, params);
+          if (result.rowCount === 0) {
+            updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
+          } else {
+            updateResults.push({ objectId: oid, success: true });
+          }
+        } catch (error) {
+          this.logger.error(`Edit update failed: ${error.message}`);
+          const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
+          updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
+        }
+      }
+
+      // Process deletes — uses RETURNING to identify which rows were actually deleted
+      if (deletes.length > 0) {
+        try {
+          const objectIds = deletes.map(Number);
+          const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
+          const result = await query(sql, params);
+          const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
+          for (const id of objectIds) {
+            if (deletedIds.has(id)) {
+              deleteResults.push({ objectId: id, success: true });
+            } else {
+              deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
+            }
+          }
+        } catch (error) {
+          this.logger.error(`Edit delete failed: ${error.message}`);
+          for (const id of deletes) {
+            deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
+          }
+        }
+      }
+
+      // Handle rollbackOnFailure
+      if (client) {
+        const hasFailure = [...addResults, ...updateResults, ...deleteResults].some(r => !r.success);
+        if (hasFailure) {
+          await client.query('ROLLBACK');
+          this.logger.warn('Edit rolled back due to failure(s)');
+          const rollbackError = { code: 1003, description: 'Operation rolled back' };
+          addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
+          updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
+          deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
+        } else {
+          await client.query('COMMIT');
+        }
+      }
+
+      const result = { addResults, updateResults, deleteResults };
+
+      this.logger.info(`Edit complete: ${addResults.length} added, ${updateResults.length} updated, ${deleteResults.length} deleted`);
+
+      // Log edit to audit
+      const username = req._user?.username || 'anonymous';
+      const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+      auditLogger.log('EDIT', {
+        username,
+        table: `${schema}.${table}`,
+        adds: addResults.length,
+        updates: updateResults.length,
+        deletes: deleteResults.length,
+        ipAddress,
+      });
+
+      return result;
+    } catch (error) {
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
+      }
+      this.logger.error(`Edit error: ${error.message}`);
+      throw error;
+    } finally {
+      if (client) {
+        client.release();
+      }
+    }
+  }
+
+  /**
+   * Build an editing template for ArcGIS clients (Pro, JS API Editor widget).
+   * Templates define the drawing tool and default attribute values.
+   */
+  buildEditTemplate(geometryType, fields, idField) {
+    const drawingToolMap = {
+      Point: 'esriFeatureEditToolPoint',
+      MultiPoint: 'esriFeatureEditToolPoint',
+      LineString: 'esriFeatureEditToolLine',
+      MultiLineString: 'esriFeatureEditToolLine',
+      Polygon: 'esriFeatureEditToolPolygon',
+      MultiPolygon: 'esriFeatureEditToolPolygon',
+    };
+
+    const prototype = {};
+    for (const field of fields) {
+      if (field.name !== idField) {
+        prototype[field.name] = null;
+      }
+    }
+
+    return {
+      name: 'New Feature',
+      drawingTool: drawingToolMap[geometryType] || 'esriFeatureEditToolPoint',
+      prototype: { attributes: prototype },
+    };
   }
 
   /**

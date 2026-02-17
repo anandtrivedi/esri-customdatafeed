@@ -17,7 +17,8 @@
   "license": "MIT",
   "dependencies": {
     "@databricks/sql": "^1.5.3",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.0.3",
+    "pg": "^8.18.0"
   },
   "devDependencies": {
     "chai": "^4.5.0",

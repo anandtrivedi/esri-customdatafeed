@@ -172,6 +172,36 @@ When creating a Feature Service, you configure these parameters:
 | Extent | ✅ | Automatic calculation via ST_Union_Agg |
 | CRS Transformation | ✅ | Via ST_Transform |
 
+## Performance: Lakebase (PostGIS) vs SQL Warehouse
+
+Benchmark on 17M Overture Maps Places (Point features), second pass (warm), measured end-to-end through ArcGIS Server REST API:
+
+| # | Query Type | Lakebase | SQL Warehouse | Speedup |
+|---|---|---|---|---|
+| 1 | COUNT (full table) | 848 ms | 289 ms | SQL Warehouse faster |
+| 2 | Spatial: DC metro (2k features, all fields) | **521 ms** | 5,999 ms | **11.5x** |
+| 3 | Spatial: city block (1.1k features) | **348 ms** | 6,976 ms | **20x** |
+| 4 | Spatial: LA metro (2k features) | **634 ms** | 5,784 ms | **9.1x** |
+| 5 | Spatial: wide region 10x10° (2k features) | **344 ms** | 969 ms | **2.8x** |
+| 6 | Attribute: name LIKE '%Starbucks%' | **163 ms** | 423 ms | **2.6x** |
+| 7 | objectIds lookup (5 features) | **176 ms** | 520 ms | **3x** |
+| 8 | PBF tile (Map Viewer format) | **367 ms** | 4,393 ms | **12x** |
+| 9 | Spatial count only (DC metro) | **304 ms** | 2,155 ms | **7x** |
+| 10 | Spatial + WHERE filter (restaurants in DC) | **478 ms** | 1,853 ms | **3.9x** |
+
+**Key findings:**
+
+- **Spatial queries are 9-20x faster on Lakebase** thanks to PostGIS GIST spatial indexes. SQL Warehouse performs a full table scan with `ST_Intersects` on 17M WKT strings for every spatial query.
+- **All Lakebase queries are sub-second** (163-848 ms), making the service fully interactive for map rendering and user interaction.
+- **Map Viewer tiles (PBF): 367 ms vs 4,393 ms** — Lakebase is well within Map Viewer's tile timeout threshold, eliminating the tile loading failures seen with SQL Warehouse at low zoom levels.
+- **COUNT is the one case SQL Warehouse wins** — Databricks leverages columnar statistics for aggregate counts without scanning rows.
+- **Smaller spatial extents = bigger Lakebase advantage** — city block queries (20x) benefit more from index pruning than wide regional queries (2.8x).
+
+**Configuration:**
+- Lakebase: CU_4, PostGIS 3.3, GIST spatial index on geometry column
+- SQL Warehouse: Large (Serverless), Databricks Runtime
+- ArcGIS Server: 12.0 on EC2 t3.xlarge (us-east-1)
+
 ## Databricks Table Requirements
 
 Your Databricks tables must have:

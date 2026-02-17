@@ -72,6 +72,7 @@ start-local.sh
 LOCAL_DEPLOYMENT.md
 arcgis-install-creds.md
 CUJ_*.md
+COMPETITIVE-COMPARISON.md
 
 # Provider packages
 *.cdpk
