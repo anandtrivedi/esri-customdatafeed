@@ -56,7 +56,7 @@ class DatabricksConnectionPool {
       token: this.config.accessToken,
       host: this.config.serverHostname,
       path: this.config.httpPath,
-      userAgentEntry: `esri_arcgis-customdatafeed/${pkg.version}`
+      userAgentEntry: `esri_databricks-customdatafeed/${pkg.version}`
     };
 
     try {

@@ -13,7 +13,8 @@
  */
 
 // Load environment variables (optional — CDF runtime provides config via databricks-config.json)
-try { require('dotenv').config(); } catch (e) { /* dotenv not available in CDF runtime */ }
+// Use explicit path since CDF runtime's working directory differs from provider directory
+try { require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }); } catch (e) { /* dotenv not available in CDF runtime */ }
 
 const configTemplate = require('./databricks-config.json');
 const {

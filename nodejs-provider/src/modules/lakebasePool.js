@@ -9,6 +9,7 @@
  */
 
 const { Pool } = require('pg');
+const pkg = require('../../package.json');
 
 // Map of serviceKey -> pg.Pool
 const pools = {};
@@ -48,9 +49,10 @@ function getLakebasePool(config) {
     host: config.host,
     port: config.port || 5432,
     database: config.database,
-    user: config.user || 'databricks',
+    user: config.user || process.env.LAKEBASE_USER || 'databricks',
     password,
     ssl: { rejectUnauthorized: false },
+    application_name: `esri_databricks-lakebase-customdatafeed/${pkg.version}`,
     min: 2,
     max: 10,
     idleTimeoutMillis: 60000,
