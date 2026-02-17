@@ -17,7 +17,7 @@ const {
   validateInteger,
 } = require("./sanitize");
 const { buildInsertSql, buildUpdateSql, buildDeleteSql, toGeoJSON } = require("./editSql");
-const { buildLakebaseSelectSql, parseGeometryFilter } = require("./lakebaseQuery");
+const { buildLakebaseSelectSql, parseGeometryFilter, getSpatialPredicate, buildGeomParam, parseInSR } = require("./lakebaseQuery");
 const { getLakebasePool, shutdownLakebasePools } = require("./lakebasePool");
 
 module.exports = {
@@ -39,6 +39,9 @@ module.exports = {
   toGeoJSON,
   buildLakebaseSelectSql,
   parseGeometryFilter,
+  getSpatialPredicate,
+  buildGeomParam,
+  parseInSR,
   getLakebasePool,
   shutdownLakebasePools,
 };

@@ -2,6 +2,9 @@ const { expect } = require("chai");
 const {
   buildLakebaseSelectSql,
   parseGeometryFilter,
+  getSpatialPredicate,
+  buildGeomParam,
+  parseInSR,
 } = require("../src/modules/lakebaseQuery");
 
 describe("lakebaseQuery", () => {
@@ -202,6 +205,169 @@ describe("lakebaseQuery", () => {
     it("should return null for unrecognized object", () => {
       const result = parseGeometryFilter({ foo: "bar" });
       expect(result).to.be.null;
+    });
+  });
+
+  describe("getSpatialPredicate — native PostGIS functions", () => {
+    const col = "geometry";
+    const param = "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)";
+
+    it("should use ST_Intersects for esriSpatialRelIntersects", () => {
+      const result = getSpatialPredicate("esriSpatialRelIntersects", col, param);
+      expect(result).to.equal(`ST_Intersects(${col}, ${param})`);
+    });
+
+    it("should use ST_Contains for esriSpatialRelContains", () => {
+      const result = getSpatialPredicate("esriSpatialRelContains", col, param);
+      expect(result).to.equal(`ST_Contains(${col}, ${param})`);
+    });
+
+    it("should use ST_Within for esriSpatialRelWithin", () => {
+      const result = getSpatialPredicate("esriSpatialRelWithin", col, param);
+      expect(result).to.equal(`ST_Within(${col}, ${param})`);
+    });
+
+    it("should use ST_Touches for esriSpatialRelTouches", () => {
+      const result = getSpatialPredicate("esriSpatialRelTouches", col, param);
+      expect(result).to.equal(`ST_Touches(${col}, ${param})`);
+    });
+
+    it("should use native ST_Overlaps (no DE-9IM workaround)", () => {
+      const result = getSpatialPredicate("esriSpatialRelOverlaps", col, param);
+      expect(result).to.equal(`ST_Overlaps(${col}, ${param})`);
+      // Verify it's a simple function call, not a compound expression
+      expect(result).to.not.include("ST_Dimension");
+      expect(result).to.not.include("ST_Covers");
+    });
+
+    it("should use native ST_Crosses (no DE-9IM workaround)", () => {
+      const result = getSpatialPredicate("esriSpatialRelCrosses", col, param);
+      expect(result).to.equal(`ST_Crosses(${col}, ${param})`);
+      // Verify it's a simple function call, not a compound expression
+      expect(result).to.not.include("ST_Intersection");
+      expect(result).to.not.include("GREATEST");
+    });
+
+    it("should throw for unsupported spatial relation", () => {
+      expect(() => getSpatialPredicate("esriSpatialRelRelation", col, param))
+        .to.throw("Unsupported spatial relation");
+    });
+  });
+
+  describe("spatialRel in buildLakebaseSelectSql", () => {
+    const envelope = JSON.stringify({ xmin: -78, ymin: 38, xmax: -77, ymax: 39 });
+
+    it("should default to ST_Intersects when spatialRel not specified", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { geometry: envelope },
+        baseConfig
+      );
+      expect(sql).to.include("ST_Intersects(geometry,");
+    });
+
+    it("should use ST_Contains when spatialRel is esriSpatialRelContains", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { geometry: envelope, spatialRel: "esriSpatialRelContains" },
+        baseConfig
+      );
+      expect(sql).to.include("ST_Contains(geometry,");
+    });
+
+    it("should use ST_Overlaps (native) when spatialRel is esriSpatialRelOverlaps", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { geometry: envelope, spatialRel: "esriSpatialRelOverlaps" },
+        baseConfig
+      );
+      expect(sql).to.include("ST_Overlaps(geometry,");
+      expect(sql).to.not.include("ST_Dimension");
+    });
+
+    it("should use ST_Crosses (native) when spatialRel is esriSpatialRelCrosses", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { geometry: envelope, spatialRel: "esriSpatialRelCrosses" },
+        baseConfig
+      );
+      expect(sql).to.include("ST_Crosses(geometry,");
+      expect(sql).to.not.include("ST_Intersection");
+    });
+
+    it("should use ST_Within when spatialRel is esriSpatialRelWithin", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { geometry: envelope, spatialRel: "esriSpatialRelWithin" },
+        baseConfig
+      );
+      expect(sql).to.include("ST_Within(geometry,");
+    });
+
+    it("should use ST_Touches when spatialRel is esriSpatialRelTouches", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { geometry: envelope, spatialRel: "esriSpatialRelTouches" },
+        baseConfig
+      );
+      expect(sql).to.include("ST_Touches(geometry,");
+    });
+  });
+
+  describe("buildGeomParam — CRS transformation", () => {
+    it("should build basic param with target SRID", () => {
+      const result = buildGeomParam(1, 4326);
+      expect(result).to.equal("ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)");
+    });
+
+    it("should not transform when inSR matches target SRID", () => {
+      const result = buildGeomParam(1, 4326, 4326);
+      expect(result).to.equal("ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)");
+      expect(result).to.not.include("ST_Transform");
+    });
+
+    it("should add ST_Transform when inSR differs from target SRID", () => {
+      const result = buildGeomParam(1, 4326, 3857);
+      expect(result).to.include("ST_Transform");
+      expect(result).to.include("3857");
+      expect(result).to.include("4326");
+    });
+
+    it("should handle string inSR", () => {
+      const result = buildGeomParam(2, 4326, "3857");
+      expect(result).to.include("ST_Transform");
+    });
+
+    it("should handle null inSR (no transform)", () => {
+      const result = buildGeomParam(1, 4326, null);
+      expect(result).to.not.include("ST_Transform");
+    });
+  });
+
+  describe("parseInSR", () => {
+    it("should return null for falsy input", () => {
+      expect(parseInSR(null)).to.be.null;
+      expect(parseInSR(undefined)).to.be.null;
+      expect(parseInSR("")).to.be.null;
+    });
+
+    it("should return numeric SRID directly", () => {
+      expect(parseInSR(4326)).to.equal(4326);
+      expect(parseInSR(3857)).to.equal(3857);
+    });
+
+    it("should parse numeric string", () => {
+      expect(parseInSR("4326")).to.equal(4326);
+    });
+
+    it("should parse JSON with wkid", () => {
+      expect(parseInSR('{"wkid": 3857}')).to.equal(3857);
+    });
+
+    it("should parse JSON with spatialReference.wkid", () => {
+      expect(parseInSR('{"spatialReference": {"wkid": 3857}}')).to.equal(3857);
+    });
+
+    it("should parse object with wkid", () => {
+      expect(parseInSR({ wkid: 3857 })).to.equal(3857);
+    });
+
+    it("should return null for non-numeric string", () => {
+      expect(parseInSR("not-a-number")).to.be.null;
     });
   });
 });

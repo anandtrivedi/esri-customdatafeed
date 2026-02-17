@@ -5,6 +5,9 @@
  * Maps ArcGIS query parameters to PostgreSQL/PostGIS syntax.
  * All user-supplied values use $1, $2, ... placeholders.
  * Identifiers validated via sanitize.validateIdentifier().
+ *
+ * PostGIS provides native ST_Overlaps and ST_Crosses — no DE-9IM
+ * workarounds needed (unlike the Databricks SQL path in geometry.js).
  */
 
 const {
@@ -35,6 +38,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     objectIds,
     geometry,
     inSR,
+    spatialRel = 'esriSpatialRelIntersects',
     resultOffset,
     resultRecordCount,
     returnCountOnly,
@@ -99,9 +103,9 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     const geoJsonFilter = parseGeometryFilter(geometry);
     if (geoJsonFilter) {
       params.push(JSON.stringify(geoJsonFilter));
-      whereClauses.push(
-        `ST_Intersects(${geometryColumn}, ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${Number(srid)}))`
-      );
+      const geomParam = buildGeomParam(paramIndex, srid, inSR);
+      const spatialPredicate = getSpatialPredicate(spatialRel, geometryColumn, geomParam);
+      whereClauses.push(spatialPredicate);
       paramIndex++;
     }
   }
@@ -208,7 +212,83 @@ function parseGeometryFilter(geometry) {
   return null;
 }
 
+/**
+ * Build the PostGIS geometry parameter expression, handling CRS transformation.
+ *
+ * @param {number} paramIndex - Current $N index for the GeoJSON parameter
+ * @param {number} srid - Target SRID (typically 4326)
+ * @param {string|number} [inSR] - Source spatial reference if different from srid
+ * @returns {string} SQL expression like "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)"
+ */
+function buildGeomParam(paramIndex, srid, inSR) {
+  const base = `ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${Number(srid)})`;
+
+  // If inSR differs from target SRID, transform
+  const sourceSR = parseInSR(inSR);
+  if (sourceSR && sourceSR !== Number(srid)) {
+    return `ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${sourceSR}), ${Number(srid)})`;
+  }
+
+  return base;
+}
+
+/**
+ * Parse the ArcGIS inSR parameter to a numeric SRID.
+ *
+ * @param {string|number|object} inSR
+ * @returns {number|null}
+ */
+function parseInSR(inSR) {
+  if (!inSR) return null;
+  if (typeof inSR === 'number') return inSR;
+  if (typeof inSR === 'string') {
+    try {
+      const parsed = JSON.parse(inSR);
+      return parsed.spatialReference?.wkid || parsed.wkid || parseInt(inSR, 10) || null;
+    } catch {
+      const num = parseInt(inSR, 10);
+      return isNaN(num) ? null : num;
+    }
+  }
+  if (typeof inSR === 'object') {
+    return inSR.spatialReference?.wkid || inSR.wkid || null;
+  }
+  return null;
+}
+
+/**
+ * Map an ArcGIS spatialRel to a native PostGIS predicate.
+ *
+ * PostGIS supports all 6 predicates natively — no DE-9IM workarounds needed.
+ *
+ * @param {string} spatialRel - ArcGIS spatial relationship
+ * @param {string} geomColumn - Table geometry column name
+ * @param {string} geomParam - SQL expression for the filter geometry
+ * @returns {string} SQL WHERE clause fragment
+ */
+function getSpatialPredicate(spatialRel, geomColumn, geomParam) {
+  switch (spatialRel) {
+    case 'esriSpatialRelIntersects':
+      return `ST_Intersects(${geomColumn}, ${geomParam})`;
+    case 'esriSpatialRelContains':
+      return `ST_Contains(${geomColumn}, ${geomParam})`;
+    case 'esriSpatialRelWithin':
+      return `ST_Within(${geomColumn}, ${geomParam})`;
+    case 'esriSpatialRelTouches':
+      return `ST_Touches(${geomColumn}, ${geomParam})`;
+    case 'esriSpatialRelOverlaps':
+      return `ST_Overlaps(${geomColumn}, ${geomParam})`;
+    case 'esriSpatialRelCrosses':
+      return `ST_Crosses(${geomColumn}, ${geomParam})`;
+    default:
+      throw new Error(`Unsupported spatial relation: ${spatialRel}`);
+  }
+}
+
 module.exports = {
   buildLakebaseSelectSql,
   parseGeometryFilter,
+  getSpatialPredicate,
+  buildGeomParam,
+  parseInSR,
 };
