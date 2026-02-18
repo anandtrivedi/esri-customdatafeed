@@ -339,19 +339,18 @@ All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon
 
 ## Environment Variables
 
-Set these on the ArcGIS Server machine (e.g. in the server's `init_user_param.sh` or system environment):
+Lakehouse connection can be configured via `databricks-config.json` (Step 2 above) **or** environment variables — env vars take precedence. On ArcGIS Server, env vars are typically set in `init_user_param.sh`. Lakebase credentials are env-var only.
 
-| Variable | Backend | Required | Description |
-|----------|---------|----------|-------------|
-| `DATABRICKS_SERVER_HOSTNAME` | Lakehouse | Yes | Workspace hostname |
-| `DATABRICKS_HTTP_PATH` | Lakehouse | Yes | SQL Warehouse HTTP path |
-| `DATABRICKS_ACCESS_TOKEN` | Lakehouse | Yes | Personal access token |
-| `LAKEBASE_PASSWORD` | Lakebase | Yes | OAuth token or role-based password |
-| `LAKEBASE_USER` | Lakebase | No | Username (default: `databricks`) |
-| `DATABRICKS_SRID` | Both | No | Coordinate system (default: `4326`) |
-| `DATABRICKS_MAX_RECORD_COUNT` | Both | No | Max features per page (default: `2000`) |
-| `ENABLE_AUDIT_LOG` | Both | No | Enable query audit logging |
-| `ENABLE_USER_AUTH` | Both | No | Require ArcGIS user authentication |
+| Variable | Description |
+|----------|-------------|
+| `DATABRICKS_SERVER_HOSTNAME` | Workspace hostname (overrides config file) |
+| `DATABRICKS_HTTP_PATH` | SQL Warehouse HTTP path (overrides config file) |
+| `DATABRICKS_ACCESS_TOKEN` | Personal access token (overrides config file) |
+| `LAKEBASE_PASSWORD` | Lakebase OAuth token or password (required for Lakebase) |
+| `LAKEBASE_USER` | Lakebase username (default: `databricks`) |
+| `DATABRICKS_MAX_RECORD_COUNT` | Max features per page (default: `2000`) |
+| `ENABLE_AUDIT_LOG` | Set to `true` to enable query audit logging |
+| `ENABLE_USER_AUTH` | Set to `true` to require ArcGIS user authentication |
 
 ---
 
