@@ -258,6 +258,9 @@ function isEnvelopeArray(envelopeArray) {
  * Calculate extent from GeoJSON polygon
  */
 function getExtentFromGeoJson(geoJsonPolygon, dbWKID) {
+  if (!geoJsonPolygon || !geoJsonPolygon.coordinates || !geoJsonPolygon.coordinates[0]) {
+    return null;
+  }
   const coordinates = geoJsonPolygon.coordinates[0];
   let minX = Infinity,
     minY = Infinity,

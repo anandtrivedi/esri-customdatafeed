@@ -45,11 +45,11 @@ class AuditLogger {
 
     const logLine = JSON.stringify(logEntry) + '\n';
 
-    try {
-      fs.appendFileSync(this.logFilePath, logLine, 'utf8');
-    } catch (error) {
-      console.error('Failed to write audit log:', error.message);
-    }
+    fs.appendFile(this.logFilePath, logLine, 'utf8', (error) => {
+      if (error) {
+        console.error('Failed to write audit log:', error.message);
+      }
+    });
   }
 
   /**

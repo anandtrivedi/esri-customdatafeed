@@ -45,16 +45,23 @@ function getLakebasePool(config) {
     throw new Error('LAKEBASE_PASSWORD environment variable is required for Lakebase connections');
   }
 
+  // Lakebase uses Databricks-managed certificates — rejectUnauthorized defaults to false.
+  // Set LAKEBASE_SSL_VERIFY=true to enable strict TLS verification.
+  const sslVerify = process.env.LAKEBASE_SSL_VERIFY === 'true';
+
+  const poolMin = parseInt(process.env.LAKEBASE_POOL_MIN) || 2;
+  const poolMax = parseInt(process.env.LAKEBASE_POOL_MAX) || 10;
+
   const pool = new Pool({
     host: config.host,
     port: config.port || 5432,
     database: config.database,
     user: config.user || process.env.LAKEBASE_USER || 'databricks',
     password,
-    ssl: { rejectUnauthorized: false },
+    ssl: { rejectUnauthorized: sslVerify },
     application_name: `esri_databricks-lakebase-customdatafeed/${pkg.version}`,
-    min: 2,
-    max: 10,
+    min: poolMin,
+    max: poolMax,
     idleTimeoutMillis: 60000,
     connectionTimeoutMillis: 30000,
   });

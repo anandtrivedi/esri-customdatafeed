@@ -334,5 +334,19 @@ describe("geometry", () => {
       const extent = getExtentFromGeoJson(polygon, 3857);
       expect(extent.spatialReference.wkid).to.equal(3857);
     });
+
+    it("should return null for null input", () => {
+      expect(getExtentFromGeoJson(null, 4326)).to.be.null;
+    });
+
+    it("should return null for undefined input", () => {
+      expect(getExtentFromGeoJson(undefined, 4326)).to.be.null;
+    });
+
+    it("should return null for geometry with no coordinates", () => {
+      expect(getExtentFromGeoJson({}, 4326)).to.be.null;
+      expect(getExtentFromGeoJson({ coordinates: null }, 4326)).to.be.null;
+      expect(getExtentFromGeoJson({ coordinates: [] }, 4326)).to.be.null;
+    });
   });
 });

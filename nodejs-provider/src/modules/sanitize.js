@@ -7,10 +7,11 @@
 const FIELD_NAME_PATTERN = /^[a-zA-Z0-9_*]+$/;
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9_]+$/;
 
-// DDL/DML keywords that should never appear in a WHERE clause from user input
+// DDL/DML/data-exfiltration keywords that should never appear in a WHERE clause
 const DANGEROUS_KEYWORDS = [
   'DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT',
-  'UPDATE', 'GRANT', 'REVOKE', 'EXEC', 'EXECUTE', 'MERGE'
+  'UPDATE', 'GRANT', 'REVOKE', 'EXEC', 'EXECUTE', 'MERGE',
+  'UNION', 'SELECT', 'INTO'
 ];
 
 const DANGEROUS_KEYWORD_REGEX = new RegExp(
@@ -82,6 +83,21 @@ function checkWhereClauseSafety(clause) {
   const match = DANGEROUS_KEYWORD_REGEX.exec(clause);
   if (match) {
     throw new Error(`Potentially dangerous SQL keyword detected in WHERE clause: "${match[1]}"`);
+  }
+
+  // Block subqueries via parenthesized SELECT
+  if (/\(\s*SELECT\b/i.test(clause)) {
+    throw new Error('Subqueries are not allowed in WHERE clause');
+  }
+
+  // Block multiple statements via semicolons
+  if (/;/.test(clause)) {
+    throw new Error('Multiple statements (;) are not allowed in WHERE clause');
+  }
+
+  // Block SQL comments that could hide injected code
+  if (/--/.test(clause) || /\/\*/.test(clause)) {
+    throw new Error('SQL comments are not allowed in WHERE clause');
   }
 
   return clause;

@@ -94,10 +94,10 @@ class Model {
     // Initialize connection pool on first instantiation
     if (!Model.poolInitialized) {
       initializePool(config.databricks, {
-        min: 2,    // Minimum connections (always ready)
-        max: 10,   // Maximum connections (scale up under load)
-        idleTimeout: 60000,      // Close idle connections after 60 seconds
-        connectionTimeout: 30000 // Wait max 30 seconds for connection
+        min: parseInt(process.env.DATABRICKS_POOL_MIN) || 2,
+        max: parseInt(process.env.DATABRICKS_POOL_MAX) || 10,
+        idleTimeout: 60000,
+        connectionTimeout: 30000
       });
       Model.poolInitialized = true;
     }
@@ -349,6 +349,19 @@ class Model {
             inputCrs: sourceConfig.dbWKID,
             fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
             ...(dbExtent && { extent: dbExtent }),
+            ...(sourceConfig.timeColumn && {
+              timeInfo: {
+                startTimeField: sourceConfig.timeColumn,
+                endTimeField: null,
+                trackIdField: null,
+                timeExtent: null,
+                timeReference: null,
+                exportOptions: {
+                  useTime: true,
+                  timeDataCumulative: false
+                }
+              }
+            }),
           };
 
           // Add CRS information

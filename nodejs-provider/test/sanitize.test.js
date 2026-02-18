@@ -134,13 +134,13 @@ describe("sanitize", () => {
 
     it("should reject DROP keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; DROP TABLE users")
+        checkWhereClauseSafety("DROP TABLE users")
       ).to.throw(/dangerous SQL keyword.*DROP/i);
     });
 
     it("should reject DELETE keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; DELETE FROM users")
+        checkWhereClauseSafety("DELETE FROM users WHERE 1=1")
       ).to.throw(/dangerous SQL keyword.*DELETE/i);
     });
 
@@ -152,49 +152,49 @@ describe("sanitize", () => {
 
     it("should reject ALTER keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; ALTER TABLE users ADD col INT")
+        checkWhereClauseSafety("ALTER TABLE users ADD col INT")
       ).to.throw(/dangerous SQL keyword.*ALTER/i);
     });
 
     it("should reject CREATE keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; CREATE TABLE hack(x INT)")
+        checkWhereClauseSafety("CREATE TABLE hack(x INT)")
       ).to.throw(/dangerous SQL keyword.*CREATE/i);
     });
 
     it("should reject INSERT keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; INSERT INTO users VALUES(1)")
+        checkWhereClauseSafety("INSERT INTO users VALUES(1)")
       ).to.throw(/dangerous SQL keyword.*INSERT/i);
     });
 
     it("should reject UPDATE keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; UPDATE users SET admin=1")
+        checkWhereClauseSafety("UPDATE users SET admin=1")
       ).to.throw(/dangerous SQL keyword.*UPDATE/i);
     });
 
     it("should reject GRANT keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; GRANT ALL TO public")
+        checkWhereClauseSafety("GRANT ALL TO public")
       ).to.throw(/dangerous SQL keyword.*GRANT/i);
     });
 
     it("should reject REVOKE keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; REVOKE ALL FROM user1")
+        checkWhereClauseSafety("REVOKE ALL FROM user1")
       ).to.throw(/dangerous SQL keyword.*REVOKE/i);
     });
 
     it("should reject EXEC keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; EXEC xp_cmdshell 'dir'")
+        checkWhereClauseSafety("EXEC xp_cmdshell 'dir'")
       ).to.throw(/dangerous SQL keyword.*EXEC/i);
     });
 
     it("should reject EXECUTE keyword", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; EXECUTE sp_configure")
+        checkWhereClauseSafety("EXECUTE sp_configure")
       ).to.throw(/dangerous SQL keyword.*EXECUTE/i);
     });
 
@@ -213,6 +213,48 @@ describe("sanitize", () => {
       );
     });
 
+    it("should reject UNION keyword", () => {
+      expect(() =>
+        checkWhereClauseSafety("1=1 UNION SELECT password FROM users")
+      ).to.throw(/dangerous SQL keyword.*UNION/i);
+    });
+
+    it("should reject SELECT keyword", () => {
+      expect(() =>
+        checkWhereClauseSafety("id IN (SELECT id FROM admin)")
+      ).to.throw(/dangerous SQL keyword.*SELECT/i);
+    });
+
+    it("should reject INTO keyword", () => {
+      expect(() =>
+        checkWhereClauseSafety("1=1 INTO OUTFILE '/tmp/data'")
+      ).to.throw(/dangerous SQL keyword.*INTO/i);
+    });
+
+    it("should reject subqueries with parenthesized SELECT", () => {
+      expect(() =>
+        checkWhereClauseSafety("id = (SELECT MAX(id) FROM users)")
+      ).to.throw(/dangerous SQL keyword|Subqueries/i);
+    });
+
+    it("should reject semicolons (multiple statements)", () => {
+      expect(() =>
+        checkWhereClauseSafety("id = 1; WAITFOR DELAY '00:00:05'")
+      ).to.throw(/Multiple statements/i);
+    });
+
+    it("should reject SQL comments (double dash)", () => {
+      expect(() =>
+        checkWhereClauseSafety("1=1 -- comment")
+      ).to.throw(/SQL comments/i);
+    });
+
+    it("should reject SQL comments (block comments)", () => {
+      expect(() =>
+        checkWhereClauseSafety("1=1 /* comment */")
+      ).to.throw(/SQL comments/i);
+    });
+
     it("should handle null/undefined input gracefully", () => {
       expect(checkWhereClauseSafety(null)).to.be.null;
       expect(checkWhereClauseSafety(undefined)).to.be.undefined;
@@ -226,6 +268,14 @@ describe("sanitize", () => {
       // 'merge_key' contains 'merge' but should not trigger
       expect(checkWhereClauseSafety("merge_key = 'abc'")).to.equal(
         "merge_key = 'abc'"
+      );
+      // 'selection' contains 'select' but should not trigger
+      expect(checkWhereClauseSafety("selection = 'yes'")).to.equal(
+        "selection = 'yes'"
+      );
+      // 'union_type' contains 'union' but should not trigger
+      expect(checkWhereClauseSafety("union_type = 'A'")).to.equal(
+        "union_type = 'A'"
       );
     });
   });
@@ -285,7 +335,7 @@ describe("sanitize", () => {
 
     it("should block DDL in WHERE clauses", () => {
       expect(() =>
-        checkWhereClauseSafety("1=1; DROP TABLE sensitive_data")
+        checkWhereClauseSafety("DROP TABLE sensitive_data")
       ).to.throw();
     });
 

@@ -223,7 +223,7 @@ describe("model", () => {
       expect(model.inferGeometryType(rows, "geometry")).to.equal("MultiPoint");
     });
 
-    it("should map LineString to Polyline", () => {
+    it("should return LineString type", () => {
       const rows = [
         {
           geometry:
