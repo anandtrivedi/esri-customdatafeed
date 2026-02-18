@@ -57,14 +57,15 @@ nodejs-provider/
 
 ## Setup
 
+Everything below runs on the **ArcGIS Server machine** (the provider is a Node.js plugin that runs inside ArcGIS Server's CDF runtime).
+
 ### Prerequisites
 
-- ArcGIS Server 11.4+ with Custom Data Feeds (12.0+ for editing)
-- Node.js 16+
+- ArcGIS Server 11.4+ with Custom Data Feeds (12.0+ for editing) — includes Node.js
 - **Lakehouse**: Databricks SQL Warehouse with geospatial functions enabled
 - **Lakebase**: Databricks Lakebase instance with PostGIS
 
-### 1. Install
+### 1. Install dependencies
 
 ```bash
 cd nodejs-provider
@@ -126,6 +127,7 @@ There are two ways to create a service (pick either one):
 | `geometryColumn` | No | `geometry` | Name of the geometry column |
 | `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
 | `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native) |
+| `timeColumn` | No | - | Timestamp column for time-aware queries |
 
 ### Lakebase Service Parameters
 
@@ -336,6 +338,8 @@ All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon
 ---
 
 ## Environment Variables
+
+Set these on the ArcGIS Server machine (e.g. in the server's `init_user_param.sh` or system environment):
 
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|
