@@ -478,7 +478,7 @@ class Model {
    * Called by getData() when req.params.lakebaseHost is set.
    * Returns identical GeoJSON structure as the Databricks path.
    */
-  getDataFromLakebase(req, callback) {
+  async getDataFromLakebase(req, callback) {
     // Convert boolean strings to actual booleans
     Object.keys(req.query).forEach((key) => {
       const val = (req.query[key] + "").toLowerCase();
@@ -526,7 +526,7 @@ class Model {
 
     let pool;
     try {
-      pool = getLakebasePool(lakebaseConfig);
+      pool = await getLakebasePool(lakebaseConfig);
     } catch (poolError) {
       this.logger.error(`Lakebase pool error: ${poolError.message}`);
       return callback(poolError);
@@ -657,7 +657,7 @@ class Model {
       database: req.params.lakebaseDatabase,
     };
 
-    const pool = getLakebasePool(lakebaseConfig);
+    const pool = await getLakebasePool(lakebaseConfig);
 
     const adds = data.adds || [];
     const updates = data.updates || [];

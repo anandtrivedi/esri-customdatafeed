@@ -38,7 +38,7 @@ const queryFn = async (sql, params) => {
   return result;
 };
 const lakebasePoolStub = {
-  getLakebasePool: () => ({
+  getLakebasePool: async () => ({
     query: queryFn,
     // pool.connect() returns a client with query/release for transactions
     connect: async () => ({
