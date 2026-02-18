@@ -15,6 +15,8 @@ One provider is registered once. Each Feature Service chooses its backend via se
 
 ![CDF Architecture — Databricks + Lakebase](cdf-architecture.png)
 
+![Cell Towers served from Databricks Lakebase via ArcGIS Feature Service](screenshots/03-celltowers-editable-map.png)
+
 ## Project Structure
 
 ```
