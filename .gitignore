@@ -73,6 +73,7 @@ LOCAL_DEPLOYMENT.md
 arcgis-install-creds.md
 CUJ_*.md
 COMPETITIVE-COMPARISON.md
+docs/
 
 # Provider packages
 *.cdpk
