@@ -118,27 +118,18 @@ There are two ways to create a service (pick either one):
 - **CDF CLI** (`cdf create-service`) — simpler, recommended
 - **Admin REST API** (`createService` endpoint) — useful for automation or when CDF CLI isn't available
 
-### Service Parameters
-
-All services share these common parameters:
-
-| Parameter | Required | Default | Description |
-|-----------|----------|---------|-------------|
-| `geometryColumn` | No | `geometry` | Name of the geometry column |
-| `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
-
-#### Lakehouse-only parameters
-
-Set these when querying Delta Lake tables via Databricks SQL Warehouse:
+### Lakehouse Service Parameters
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `tableName` | Yes | - | Fully qualified table name (`catalog.schema.table`) |
+| `geometryColumn` | No | `geometry` | Name of the geometry column |
+| `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
 | `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native) |
 
-#### Lakebase-only parameters
+### Lakebase Service Parameters
 
-Set `lakebaseHost` to route a service to Lakebase instead of Lakehouse:
+Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
@@ -147,6 +138,8 @@ Set `lakebaseHost` to route a service to Lakebase instead of Lakehouse:
 | `lakebaseDatabase` | Yes | - | Database name |
 | `lakebaseSchema` | No | `public` | PostgreSQL schema |
 | `lakebaseTable` | Yes | - | Table name |
+| `geometryColumn` | No | `geometry` | Geometry column (PostGIS native) |
+| `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
 | `editingEnabled` | No | `false` | Set to `true` to enable add/update/delete |
 
 Lakebase services work for read-only use cases too — omit `editingEnabled` if you only need fast reads.
@@ -284,22 +277,29 @@ Transaction support: set `rollbackOnFailure=true` to wrap all operations in a si
 
 ## Performance: Lakebase vs Lakehouse
 
-Benchmark on 17M Overture Maps Places (Point features), second pass (warm), measured end-to-end through ArcGIS Server REST API:
+Informal benchmark on 17M Overture Maps Places (Point features), single warm run per query (not averaged), measured end-to-end through ArcGIS Server REST API. Lakehouse tested before and after `OPTIMIZE ... ZORDER BY (geometry)`:
 
-| Query Type | Lakebase | Lakehouse | Speedup |
-|---|---|---|---|
-| Spatial: city block (1.1k features) | **348 ms** | 6,976 ms | **20x** |
-| Map Viewer PBF tile | **367 ms** | 4,393 ms | **12x** |
-| Spatial: DC metro (2k features) | **521 ms** | 5,999 ms | **11.5x** |
-| Spatial count only (DC metro) | **304 ms** | 2,155 ms | **7x** |
-| Spatial + WHERE filter (restaurants in DC) | **478 ms** | 1,853 ms | **3.9x** |
-| objectIds lookup (5 features) | **176 ms** | 520 ms | **3x** |
-| Attribute: name LIKE '%Starbucks%' | **163 ms** | 423 ms | **2.6x** |
-| COUNT (full table) | 848 ms | 289 ms | Lakehouse faster |
+| Query Type | Lakebase | Lakehouse | Lakehouse + Z-order | LB vs best LH |
+|---|---|---|---|---|
+| Spatial: city block (1.1k features) | **364 ms** | 6,976 ms | 4,232 ms | **11.6x** |
+| Map Viewer PBF tile (DC metro) | **417 ms** | 4,393 ms | 3,604 ms | **8.6x** |
+| Spatial: DC metro (2k features) | **547 ms** | 5,999 ms | 3,972 ms | **7.3x** |
+| Spatial: LA metro (2k features) | **574 ms** | 5,784 ms | 2,961 ms | **5.2x** |
+| Spatial count only (DC metro) | **303 ms** | 2,155 ms | 1,541 ms | **5.1x** |
+| objectIds lookup (5 features) | **160 ms** | 520 ms | 531 ms | **3.3x** |
+| Attribute: name LIKE '%Starbucks%' | **169 ms** | 423 ms | 428 ms | **2.5x** |
+| Spatial + WHERE filter | **526 ms** | 1,853 ms | 1,199 ms | **2.3x** |
+| COUNT (full table) | 829 ms | 289 ms | 305 ms | Lakehouse faster |
 
-All Lakebase queries are sub-second (163–848 ms), making the service fully interactive for map rendering. Spatial queries benefit from PostGIS GIST indexes — Lakehouse performs a full table scan with `ST_Intersects` on 17M rows for every spatial query. COUNT is the one case Lakehouse wins, leveraging columnar statistics.
+**Note:** These are single-run timings from one test session, not rigorous benchmarks. Results will vary with warehouse warm-up state, network conditions, and concurrent load. They're directionally useful for understanding the architectural tradeoffs.
 
-Config: Lakebase CU_4 with GIST index, Lakehouse Large Serverless, ArcGIS Server 12.0 on EC2.
+**Key takeaways:**
+- **Lakebase is 2-12x faster** for spatial queries thanks to PostGIS GIST indexes (row-level R-tree pruning vs Lakehouse file-level scanning).
+- **Z-ordering helps Lakehouse 18-49%** on focused spatial queries by clustering nearby features in the same Parquet files. It's a free optimization (just run `OPTIMIZE ... ZORDER BY (geometry)`).
+- **All Lakebase queries are sub-second** (160-829 ms), making the service interactive for map rendering.
+- **COUNT is the one case Lakehouse wins** — columnar statistics enable instant aggregation without scanning rows.
+
+Config: Lakebase CU_4 with GIST index, Lakehouse Large Serverless SQL Warehouse, ArcGIS Server 12.0 on EC2 t3.xlarge (us-east-1).
 
 ---
 
