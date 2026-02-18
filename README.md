@@ -52,8 +52,8 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 ### Prerequisites
 
 - ArcGIS Server 11.4+ with Custom Data Feeds (12.0+ for editing) — includes Node.js
-- **Lakehouse**: Databricks SQL Warehouse with geospatial functions enabled
-- **Lakebase**: Databricks Lakebase instance with PostGIS
+- Databricks SQL Warehouse with geospatial functions enabled
+- **Optional**: Databricks Lakebase instance — needed for low-latency serving or feature editing
 
 ### 1. Install dependencies
 
