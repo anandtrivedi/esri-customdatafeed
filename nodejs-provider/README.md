@@ -132,26 +132,35 @@ nodejs-provider/
 
 Transaction support: set `rollbackOnFailure=true` to wrap all operations in a single PostgreSQL transaction.
 
-## Performance: Lakebase vs Lakehouse
+## Performance: Lakebase vs Lakehouse (with Z-ordering)
 
-Benchmark on 17M Overture Maps Places (Point features), second pass (warm), measured end-to-end through ArcGIS Server REST API:
+Benchmark on 17M Overture Maps Places (Point features), second pass (warm), measured end-to-end through ArcGIS Server REST API. Lakehouse tested before and after `OPTIMIZE ... ZORDER BY (geometry)`:
 
-| Query Type | Lakebase | Lakehouse | Speedup |
-|---|---|---|---|
-| Spatial: city block (1.1k features) | **348 ms** | 6,976 ms | **20x** |
-| Map Viewer PBF tile | **367 ms** | 4,393 ms | **12x** |
-| Spatial: DC metro (2k features) | **521 ms** | 5,999 ms | **11.5x** |
-| Spatial: LA metro (2k features) | **634 ms** | 5,784 ms | **9.1x** |
-| Spatial count only (DC metro) | **304 ms** | 2,155 ms | **7x** |
-| Spatial + WHERE filter (restaurants in DC) | **478 ms** | 1,853 ms | **3.9x** |
-| objectIds lookup (5 features) | **176 ms** | 520 ms | **3x** |
-| Spatial: wide region 10x10 degrees (2k features) | **344 ms** | 969 ms | **2.8x** |
-| Attribute: name LIKE '%Starbucks%' | **163 ms** | 423 ms | **2.6x** |
-| COUNT (full table) | 848 ms | 289 ms | Lakehouse faster |
+| Query Type | Lakebase | Lakehouse | Lakehouse + Z-order | Z-order gain | LB vs best Lakehouse |
+|---|---|---|---|---|---|
+| Spatial: city block (1.1k features) | **364 ms** | 6,976 ms | 4,232 ms | 39% faster | **11.6x** |
+| Map Viewer PBF tile (DC metro) | **417 ms** | 4,393 ms | 3,604 ms | 18% faster | **8.6x** |
+| Spatial: DC metro (2k features) | **547 ms** | 5,999 ms | 3,972 ms | 34% faster | **7.3x** |
+| Spatial: wide region 10x10° | **432 ms** | 969 ms | 2,624 ms | slower | **6.1x** |
+| Spatial: LA metro (2k features) | **574 ms** | 5,784 ms | 2,961 ms | 49% faster | **5.2x** |
+| Spatial count only (DC metro) | **303 ms** | 2,155 ms | 1,541 ms | 28% faster | **5.1x** |
+| objectIds lookup (5 features) | **160 ms** | 520 ms | 531 ms | — | **3.3x** |
+| Attribute: name LIKE '%Starbucks%' | **169 ms** | 423 ms | 428 ms | — | **2.5x** |
+| Spatial + WHERE filter | **526 ms** | 1,853 ms | 1,199 ms | 35% faster | **2.3x** |
+| COUNT (full table) | 829 ms | 289 ms | 305 ms | — | Lakehouse faster |
 
-All Lakebase queries are sub-second (163-848 ms), making the service fully interactive for map rendering. Spatial queries benefit from PostGIS GIST indexes — Lakehouse performs a full table scan with `ST_Intersects` on 17M rows for every spatial query. COUNT is the one case Lakehouse wins, leveraging columnar statistics.
+**Key findings:**
 
-Config: Lakebase CU_4 with GIST index, Lakehouse Large Serverless, ArcGIS Server 12.0 on EC2.
+- **Z-ordering helps Lakehouse 18-49% on focused spatial queries** by clustering nearby features in the same Parquet files, enabling file-level data skipping. It's a free optimization (no infrastructure change).
+- **Z-ordering hurts wide-region queries** (969 ms → 2,624 ms) because spreading data across 15 Z-ordered files increases I/O without pruning benefit when most files match.
+- **Lakebase is still 2.3-11.6x faster than Z-ordered Lakehouse.** The gap is architectural: Z-ordering provides file-level pruning (skip Parquet files), while PostGIS GIST indexes provide row-level pruning via R-tree (jump directly to matching rows).
+- **All Lakebase queries are sub-second** (160-829 ms), making the service fully interactive for map rendering and user interaction. Z-ordered Lakehouse still exceeds 1s on most spatial queries.
+- **COUNT is the one case Lakehouse wins** — columnar statistics enable instant aggregation without scanning rows.
+
+**Configuration:**
+- Lakebase: CU_4, PostGIS 3.3, GIST spatial index on geometry column
+- Lakehouse: Large Serverless SQL Warehouse, Delta table with ZORDER BY (geometry)
+- ArcGIS Server: 12.0 on EC2 t3.xlarge (us-east-1)
 
 ## Environment Variables
 
