@@ -13,19 +13,7 @@ One provider is registered once. Each Feature Service chooses its backend via se
 
 ## Architecture
 
-```
-         ArcGIS Pro / Portal / JS API
-                     |
-         ArcGIS Server Feature Service
-                     |
-         Custom Data Provider (this repo)
-                /          \
-               /            \
-     Lakehouse path      Lakebase path
-     (Databricks SQL)    (PostgreSQL + PostGIS)
-           |                   |
-     Delta Lake Tables   Lakebase Database
-```
+![CDF Architecture — Databricks + Lakebase](cdf-architecture.png)
 
 ## Project Structure
 
