@@ -14,17 +14,17 @@ One provider is registered once. Each Feature Service chooses its backend via se
 ## Architecture
 
 ```
-ArcGIS Pro / Portal / JS API
-        |
-ArcGIS Server Feature Service
-        |
-Custom Data Provider (this repo)
-       / \
-      /   \
-Lakehouse path          Lakebase path
-(Databricks SQL)        (PostgreSQL + PostGIS)
-     |                       |
-Delta Lake Tables      Lakebase Database
+         ArcGIS Pro / Portal / JS API
+                     |
+         ArcGIS Server Feature Service
+                     |
+         Custom Data Provider (this repo)
+                /          \
+               /            \
+     Lakehouse path      Lakebase path
+     (Databricks SQL)    (PostgreSQL + PostGIS)
+           |                   |
+     Delta Lake Tables   Lakebase Database
 ```
 
 ## Project Structure
@@ -112,40 +112,33 @@ cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOK
 
 ## Creating Feature Services
 
-### Lakehouse Service (analytics-scale read)
+You register the provider once, then create individual Feature Services. Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend is used.
 
-For querying large Delta Lake tables via Databricks SQL Warehouse:
+There are two ways to create a service (pick either one):
+- **CDF CLI** (`cdf create-service`) — simpler, recommended
+- **Admin REST API** (`createService` endpoint) — useful for automation or when CDF CLI isn't available
 
-```bash
-cdf create-service databricks-geospatial-provider \
-  https://your-server/arcgis/admin TOKEN \
-  -s "MyCellTowers" \
-  --service-parameters "tableName:catalog.schema.us_cell_towers,geometryColumn:geometry,idField:id"
-```
+### Service Parameters
 
-#### Lakehouse Service Parameters
+All services share these common parameters:
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `geometryColumn` | No | `geometry` | Name of the geometry column |
+| `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
+
+#### Lakehouse-only parameters
+
+Set these when querying Delta Lake tables via Databricks SQL Warehouse:
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `tableName` | Yes | - | Fully qualified table name (`catalog.schema.table`) |
-| `geometryColumn` | No | `geometry` | Name of the geometry column |
-| `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
 | `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native) |
-| `timeColumn` | No | - | Timestamp column for time-aware queries |
 
-### Lakebase Service (low-latency read + edit)
+#### Lakebase-only parameters
 
-For fast interactive serving and/or editing via Databricks Lakebase:
-
-```bash
-cdf create-service databricks-geospatial-provider \
-  https://your-server/arcgis/admin TOKEN \
-  -s "CellTowersEditable" \
-  --capabilities "Query,Editing" \
-  --service-parameters "lakebaseHost:instance-xxx.database.cloud.databricks.com,lakebasePort:5432,lakebaseDatabase:geospatial,lakebaseSchema:public,lakebaseTable:cell_towers,geometryColumn:geometry,idField:id,editingEnabled:true"
-```
-
-#### Lakebase Service Parameters
+Set `lakebaseHost` to route a service to Lakebase instead of Lakehouse:
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
@@ -154,31 +147,35 @@ cdf create-service databricks-geospatial-provider \
 | `lakebaseDatabase` | Yes | - | Database name |
 | `lakebaseSchema` | No | `public` | PostgreSQL schema |
 | `lakebaseTable` | Yes | - | Table name |
-| `geometryColumn` | No | `geometry` | Geometry column (PostGIS native) |
-| `idField` | No | `id` | Integer primary key column |
-| `editingEnabled` | No | `false` | Set to `true` to enable editing |
+| `editingEnabled` | No | `false` | Set to `true` to enable add/update/delete |
 
-Lakebase services work for read-only use cases too — omit `editingEnabled` and set capabilities to just `"Query"` if you only need fast reads without editing.
+Lakebase services work for read-only use cases too — omit `editingEnabled` if you only need fast reads.
 
-### How Routing Works
+### Examples
 
-The provider routes automatically based on service parameters:
+#### Lakehouse service (CDF CLI)
 
-```
-getData(req) called
-  → req.params.lakebaseHost set?
-    YES → PostgreSQL path (lakebaseQuery.js + lakebasePool.js)
-    NO  → Databricks SQL path (sql.js + connectionPool.js)
-
-editData(req) called
-  → Always goes to Lakebase (Lakehouse is read-only)
+```bash
+cdf create-service databricks-geospatial-provider \
+  https://your-server/arcgis/admin TOKEN \
+  -s "MyCellTowers" \
+  --service-parameters "tableName:catalog.schema.us_cell_towers,geometryColumn:geometry,idField:id"
 ```
 
-#### Admin REST API Registration
+#### Lakebase service (CDF CLI)
+
+```bash
+cdf create-service databricks-geospatial-provider \
+  https://your-server/arcgis/admin TOKEN \
+  -s "CellTowersEditable" \
+  --capabilities "Query,Editing" \
+  --service-parameters "lakebaseHost:instance-xxx.database.cloud.databricks.com,lakebaseDatabase:geospatial,lakebaseTable:cell_towers,idField:id,editingEnabled:true"
+```
 
 <details>
-<summary>Click to expand — Lakehouse service JSON</summary>
+<summary>Same examples via Admin REST API (click to expand)</summary>
 
+**Lakehouse:**
 ```bash
 curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
@@ -205,11 +202,8 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
     }
   }'
 ```
-</details>
 
-<details>
-<summary>Click to expand — Lakebase service JSON (low-latency read + edit)</summary>
-
+**Lakebase:**
 ```bash
 curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
@@ -241,6 +235,15 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
   }'
 ```
 </details>
+
+### How Routing Works
+
+The provider routes automatically — no configuration needed beyond service parameters:
+
+```
+getData(req) → lakebaseHost set? → YES: PostgreSQL path / NO: Databricks SQL path
+editData(req) → Always Lakebase (Lakehouse is read-only)
+```
 
 ---
 
