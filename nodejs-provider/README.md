@@ -50,13 +50,16 @@ Lakebase connection details (host, port, database) are set per-service via servi
 
 ### Step 1: Package the Provider
 
+Requires [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/) (12.0+). From the CDF app directory:
+
 ```bash
 cdf export databricks-geospatial-provider
+# Output: databricks-geospatial-provider.cdpk
 ```
 
 ### Step 2: Register
 
-**Via CDF CLI** (ArcGIS 11.3+):
+**Via CDF CLI:**
 
 ```bash
 cdf register databricks-geospatial-provider \
@@ -64,7 +67,21 @@ cdf register databricks-geospatial-provider \
   YOUR_TOKEN
 ```
 
-**Via Admin Directory:**
+> **Self-signed certs:** Set `export NODE_TLS_REJECT_UNAUTHORIZED=0` or `export NODE_EXTRA_CA_CERTS=/path/to/cert.pem` ([Esri docs](https://developers.arcgis.com/enterprise-sdk/guide/custom-data-feeds/custom-data-feeds-troubleshooting/)). If token validation still fails, use the Admin REST API method below.
+
+**Via Admin REST API** (recommended for self-signed certs):
+
+```bash
+# Upload .cdpk
+curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
+  -F "itemFile=@databricks-geospatial-provider.cdpk"
+
+# Register (use itemID from upload response)
+curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=TOKEN&f=json" \
+  --data-urlencode "id=ITEM_ID"
+```
+
+**Via Admin Directory UI:**
 
 1. Navigate to: `https://your-server/arcgis/admin`
 2. Click **uploads** > **upload**, upload the `.cdpk` file

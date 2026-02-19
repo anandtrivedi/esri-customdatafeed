@@ -94,9 +94,32 @@ Lakebase connection details are set per-service (host, port, database) — see S
 
 ### 4. Package and Register Provider
 
+**Option A: CDF CLI** (requires [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/))
+
 ```bash
+# From the CDF app directory (created via `cdf createapp`)
 cdf export databricks-geospatial-provider
 cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOKEN
+```
+
+> **Self-signed certs:** If ArcGIS Server uses a self-signed certificate, set `export NODE_TLS_REJECT_UNAUTHORIZED=0` or `export NODE_EXTRA_CA_CERTS=/path/to/cert.pem` ([Esri docs](https://developers.arcgis.com/enterprise-sdk/guide/custom-data-feeds/custom-data-feeds-troubleshooting/)). If you still get "Invalid token, ClientID does not match", use Option B — the CDF CLI sends tokens as `Authorization: Bearer` which can conflict with ArcGIS referer-based token validation.
+
+**Option B: Admin REST API** (works with any ArcGIS Server)
+
+```bash
+# 1. Export the .cdpk (via CDF CLI or copy from build)
+cdf export databricks-geospatial-provider
+
+# 2. Upload the .cdpk
+curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
+  -H "Referer: https://your-server:6443" \
+  -F "itemFile=@databricks-geospatial-provider.cdpk"
+# Returns: {"status":"success","item":{"itemID":"i..."}}
+
+# 3. Register using the itemID from step 2
+curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=TOKEN&f=json" \
+  -H "Referer: https://your-server:6443" \
+  --data-urlencode "id=ITEM_ID_FROM_STEP_2"
 ```
 
 ---
@@ -105,9 +128,7 @@ cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOK
 
 You register the provider once, then create individual Feature Services. Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend is used.
 
-There are two ways to create a service (pick either one):
-- **CDF CLI** (`cdf create-service`) — simpler, recommended
-- **Admin REST API** (`createService` endpoint) — useful for automation or when CDF CLI isn't available
+Create services via the **Admin REST API** (`createService` endpoint):
 
 ### Lakehouse Service Parameters
 
