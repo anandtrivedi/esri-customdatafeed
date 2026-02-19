@@ -64,33 +64,39 @@ npm install    # Installs both @databricks/sql and pg drivers
 
 ### 2. Configure Databricks Connection (Lakehouse)
 
+**Option A: `.env` file** (recommended)
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` — only 3 values are required:
+
+```bash
+DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+DATABRICKS_ACCESS_TOKEN=dapi_your_token_here
+```
+
+**Option B: `databricks-config.json`**
+
 ```bash
 cp src/databricks-config.json.example src/databricks-config.json
 ```
 
-Edit `databricks-config.json`:
-
-```json
-{
-  "databricks": {
-    "serverHostname": "your-workspace.cloud.databricks.com",
-    "httpPath": "/sql/1.0/warehouses/your-warehouse-id",
-    "accessToken": "dapi...",
-    "srid": 4326,
-    "maxRecordCount": 2000
-  }
-}
-```
+Edit `src/databricks-config.json` with the same 3 values. Environment variables take precedence over the config file.
 
 ### 3. Configure Lakebase (optional)
 
-Set the Lakebase password as an environment variable (OAuth token or role-based password):
+Lakebase connection details (host, port, database) are set per-service — see Service Parameters below.
+
+Authentication is automatic: the provider generates short-lived OAuth tokens using your `DATABRICKS_ACCESS_TOKEN` (PAT) via the Databricks `/api/2.0/database/credentials` endpoint. No additional configuration needed.
+
+To use a static password instead of auto-generated tokens:
 
 ```bash
 export LAKEBASE_PASSWORD="your-oauth-token-or-password"
 ```
-
-Lakebase connection details are set per-service (host, port, database) — see Service Parameters below.
 
 ### 4. Package and Register Provider
 
@@ -128,8 +134,6 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
 
 You register the provider once, then create individual Feature Services. Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend is used.
 
-Create services via the **Admin REST API** (`createService` endpoint):
-
 ### Lakehouse Service Parameters
 
 | Parameter | Required | Default | Description |
@@ -153,35 +157,17 @@ Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 | `lakebaseTable` | Yes | - | Table name |
 | `geometryColumn` | No | `geometry` | Geometry column (PostGIS native) |
 | `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
-| `editingEnabled` | No | `false` | Set to `true` to enable add/update/delete |
 
-Lakebase services work for read-only use cases too — omit `editingEnabled` if you only need fast reads.
+Editing is enabled at the provider level (`editingEnabled: true` in `cdconfig.json`). To actually expose editing on a service, set `"capabilities": "Query,Editing"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
 
 ### Examples
 
-#### Lakehouse service (CDF CLI)
+Create services via the **Admin REST API** (`createService` endpoint). All 10 service parameters from `cdconfig.json` must be included — use empty strings for parameters that don't apply.
 
-```bash
-cdf create-service databricks-geospatial-provider \
-  https://your-server/arcgis/admin TOKEN \
-  -s "MyCellTowers" \
-  --service-parameters "tableName:catalog.schema.us_cell_towers,geometryColumn:geometry,idField:id"
-```
+> **Note:** There is no `cdf create-service` CLI command. Services are created through the Admin REST API or the ArcGIS Server Admin Directory UI.
 
-#### Lakebase service (CDF CLI)
+#### Lakehouse service (read-only)
 
-```bash
-cdf create-service databricks-geospatial-provider \
-  https://your-server/arcgis/admin TOKEN \
-  -s "CellTowersEditable" \
-  --capabilities "Query,Editing" \
-  --service-parameters "lakebaseHost:instance-xxx.database.cloud.databricks.com,lakebaseDatabase:geospatial,lakebaseTable:cell_towers,idField:id,editingEnabled:true"
-```
-
-<details>
-<summary>Same examples via Admin REST API (click to expand)</summary>
-
-**Lakehouse:**
 ```bash
 curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
@@ -202,14 +188,21 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
           "tableName": "catalog.schema.us_cell_towers",
           "geometryColumn": "geometry",
           "idField": "id",
-          "geometryFormat": "GEOMETRY"
+          "geometryFormat": "GEOMETRY",
+          "timeColumn": "",
+          "lakebaseHost": "",
+          "lakebasePort": "",
+          "lakebaseDatabase": "",
+          "lakebaseSchema": "",
+          "lakebaseTable": ""
         }
       }
     }
   }'
 ```
 
-**Lakebase:**
+#### Lakebase service (read + write)
+
 ```bash
 curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
@@ -227,20 +220,21 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
       "customDataProviderInfo": {
         "dataProviderName": "databricks-geospatial-provider",
         "serviceParameters": {
+          "tableName": "",
+          "geometryColumn": "geometry",
+          "idField": "id",
+          "geometryFormat": "",
+          "timeColumn": "",
           "lakebaseHost": "instance-xxx.database.cloud.databricks.com",
           "lakebasePort": "5432",
           "lakebaseDatabase": "geospatial",
           "lakebaseSchema": "public",
-          "lakebaseTable": "cell_towers",
-          "geometryColumn": "geometry",
-          "idField": "id",
-          "editingEnabled": "true"
+          "lakebaseTable": "cell_towers"
         }
       }
     }
   }'
 ```
-</details>
 
 ### How Routing Works
 
@@ -353,7 +347,7 @@ Lakehouse connection can be configured via `databricks-config.json` (Step 2 abov
 | `DATABRICKS_SERVER_HOSTNAME` | Workspace hostname (overrides config file) |
 | `DATABRICKS_HTTP_PATH` | SQL Warehouse HTTP path (overrides config file) |
 | `DATABRICKS_ACCESS_TOKEN` | Personal access token (overrides config file) |
-| `LAKEBASE_PASSWORD` | Lakebase OAuth token or password (required for Lakebase) |
+| `LAKEBASE_PASSWORD` | Lakebase OAuth token or password (optional — auto-generated from PAT if omitted) |
 | `LAKEBASE_USER` | Lakebase username (default: `databricks`) |
 | `DATABRICKS_MAX_RECORD_COUNT` | Max features per page (default: `2000`) |
 | `ENABLE_AUDIT_LOG` | Set to `true` to enable query audit logging |
@@ -401,7 +395,7 @@ npm test
 **Lakebase:**
 - `idField` must be an integer type with unique values
 - Table must have a PostGIS geometry column
-- `LAKEBASE_PASSWORD` must be set (OAuth token expires ~1hr — refresh via CLI)
+- Authentication: auto-generated from `DATABRICKS_ACCESS_TOKEN` (PAT), or set `LAKEBASE_PASSWORD` manually
 
 **Both:**
 - `idField` values must be unique and in range 0–2,147,483,647
@@ -416,7 +410,7 @@ npm test
 
 **No data returned (empty features array)**
 - Lakehouse: test the SQL Warehouse connection independently
-- Lakebase: verify `LAKEBASE_PASSWORD` is set and not expired
+- Lakebase: verify authentication works (auto-generated token via PAT, or check `LAKEBASE_PASSWORD` if set manually)
 - Verify table name and schema are correct
 
 **OBJECTID issues**
@@ -424,9 +418,9 @@ npm test
 - Databricks BIGINT returns as string — provider casts via `Number()`
 
 **Editing fails (Lakebase)**
-- Verify `editingEnabled: true` in service parameters
-- Verify `capabilities: "Query,Editing"` on the service
-- Check `LAKEBASE_PASSWORD` is valid (refresh: `databricks database generate-database-credential`)
+- Verify `capabilities: "Query,Editing"` on the service (set during `createService`)
+- Verify `lakebaseHost` is set in service parameters (editing only works via Lakebase)
+- Check Lakebase auth: if using manual token, ensure `LAKEBASE_PASSWORD` is not expired
 - ArcGIS Server 12.0+ required for `editData()` support
 
 **Query is slow**
