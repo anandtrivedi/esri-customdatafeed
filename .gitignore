@@ -54,6 +54,7 @@ Thumbs.db
 !config/*.json
 !**/package*.json
 !**/*.json.example
+!**/cdconfig.json
 
 # Databricks credentials
 nodejs-provider/src/databricks-config.json

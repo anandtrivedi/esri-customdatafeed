@@ -1,0 +1,63 @@
+{
+  "name": "databricks-geospatial-provider",
+  "arcgisVersion": "12.0.0",
+  "parentServiceType": "FeatureServer",
+  "customdataRuntimeVersion": "1",
+  "type": "provider",
+  "editingEnabled": true,
+  "properties": {
+    "serviceParameters": [
+      {
+        "key": "tableName",
+        "label": "Table Name",
+        "description": "Fully qualified Databricks table name (catalog.schema.table). Used for read-only services."
+      },
+      {
+        "key": "geometryColumn",
+        "label": "Geometry Column",
+        "description": "Name of the geometry column in the table"
+      },
+      {
+        "key": "idField",
+        "label": "ID Field",
+        "description": "Name of the unique identifier field (optional, defaults to 'id')"
+      },
+      {
+        "key": "geometryFormat",
+        "label": "Geometry Format",
+        "description": "Storage format of the geometry column: WKT, WKB, GEOJSON, or GEOMETRY (optional, auto-detected from column name if not set)"
+      },
+      {
+        "key": "timeColumn",
+        "label": "Time Column",
+        "description": "Name of the timestamp column for time filtering (optional)"
+      },
+      {
+        "key": "lakebaseHost",
+        "label": "Lakebase Host",
+        "description": "Lakebase (PostgreSQL) hostname. When set, routes reads and writes through Lakebase for editing support."
+      },
+      {
+        "key": "lakebasePort",
+        "label": "Lakebase Port",
+        "description": "Lakebase port (default: 5432)"
+      },
+      {
+        "key": "lakebaseDatabase",
+        "label": "Lakebase Database",
+        "description": "Lakebase database name"
+      },
+      {
+        "key": "lakebaseSchema",
+        "label": "Lakebase Schema",
+        "description": "PostgreSQL schema in Lakebase (default: public)"
+      },
+      {
+        "key": "lakebaseTable",
+        "label": "Lakebase Table",
+        "description": "Table name in Lakebase for reads and writes"
+      }
+    ]
+  },
+  "fileName": "databricks-geospatial-provider.cdpk"
+}
