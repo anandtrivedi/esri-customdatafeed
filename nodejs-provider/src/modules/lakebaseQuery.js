@@ -51,7 +51,8 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   const geometryColumn = sourceConfig.geometryColumn;
   const idField = sourceConfig.idField;
   const srid = sourceConfig.dbWKID || 4326;
-  const fetchSize = resultRecordCount || sourceConfig.maxRecordCountPerPage || 2000;
+  const maxRecords = sourceConfig.maxRecordCountPerPage || 2000;
+  const fetchSize = Math.min(parseInt(resultRecordCount) || maxRecords, maxRecords);
 
   validateIdentifier(schema);
   validateIdentifier(table);

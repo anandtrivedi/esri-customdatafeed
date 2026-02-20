@@ -56,7 +56,7 @@ function databricksApiRequest(method, path, body) {
         'Authorization': `Bearer ${pat}`,
         'Content-Type': 'application/json',
       },
-      rejectAuthorized: false,
+      rejectUnauthorized: false,
     };
 
     if (bodyStr) {

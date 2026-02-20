@@ -21,10 +21,12 @@ One provider is registered once. Each Feature Service chooses its backend via se
 
 ```
 nodejs-provider/
+  cdconfig.json               # CDF provider manifest (registered with ArcGIS Server)
+  package.json
+  .env.example                # Environment config template
   src/
     index.js                  # Provider entry point
     model.js                  # getData/editData/authorize — routes between backends
-    databricks-config.json    # Databricks connection defaults
     modules/
       # --- Shared ---
       sanitize.js             # SQL injection prevention
@@ -40,9 +42,7 @@ nodejs-provider/
       lakebasePool.js         # PostgreSQL connection pooling (pg module)
       lakebaseQuery.js        # PostGIS SELECT query builder
       editSql.js              # INSERT/UPDATE/DELETE SQL builders
-  test/                       # 285 unit tests (mocha + chai)
-  cdconfig.json               # CDF provider manifest
-  package.json
+  test/                       # 307 unit tests (mocha + chai)
 ```
 
 ## Setup
@@ -51,7 +51,7 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 
 ### Prerequisites
 
-- ArcGIS Server 11.4+ with Custom Data Feeds (12.0+ for editing) — includes Node.js
+- ArcGIS Server 11.4+ with Custom Data Feeds (11.4 added editing via `applyEdits`, 12.0 added `editingEnabled` property) — includes Node.js
 - Databricks SQL Warehouse with geospatial functions enabled
 - **Optional**: Databricks Lakebase instance — needed for low-latency serving or feature editing
 
@@ -62,9 +62,9 @@ cd nodejs-provider
 npm install    # Installs both @databricks/sql and pg drivers
 ```
 
-### 2. Configure Databricks Connection (Lakehouse)
+### 2. Configure Databricks Connection
 
-**Option A: `.env` file** (recommended)
+Create a `.env` file with your Databricks credentials — this is the only config file you need:
 
 ```bash
 cp .env.example .env
@@ -75,16 +75,10 @@ Edit `.env` — only 3 values are required:
 ```bash
 DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-DATABRICKS_ACCESS_TOKEN=dapi_your_token_here
+DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here   # Personal Access Token (PAT)
 ```
 
-**Option B: `databricks-config.json`**
-
-```bash
-cp src/databricks-config.json.example src/databricks-config.json
-```
-
-Edit `src/databricks-config.json` with the same 3 values. Environment variables take precedence over the config file.
+Per-table settings (table name, geometry column, etc.) are configured per-service when you create each Feature Service — not in `.env`. See [Service Parameters](#creating-feature-services) below.
 
 ### 3. Configure Lakebase (optional)
 
@@ -141,8 +135,10 @@ You register the provider once, then create individual Feature Services. Each se
 | `tableName` | Yes | - | Fully qualified table name (`catalog.schema.table`) |
 | `geometryColumn` | No | `geometry` | Name of the geometry column |
 | `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
-| `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native) |
+| `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native). Leave empty for auto-detect — set explicitly if the column is named `geometry` but stores WKT strings |
 | `timeColumn` | No | - | Timestamp column for time-aware queries |
+| `maxRecordCount` | No | `2000` | Max features returned per page (clients can request fewer) |
+| `srid` | No | `4326` | EPSG SRID of the geometry column |
 
 ### Lakebase Service Parameters
 
@@ -157,12 +153,15 @@ Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 | `lakebaseTable` | Yes | - | Table name |
 | `geometryColumn` | No | `geometry` | Geometry column (PostGIS native) |
 | `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
+| `maxRecordCount` | No | `2000` | Max features returned per page (clients can request fewer) |
+| `srid` | No | `4326` | EPSG SRID of the geometry column |
+| `editingEnabled` | No | `false` | Set to `true` to enable applyEdits (also requires `capabilities: "Query,Editing"`) |
 
-Editing is enabled at the provider level (`editingEnabled: true` in `cdconfig.json`). To actually expose editing on a service, set `"capabilities": "Query,Editing"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
+Editing is enabled at the provider level (`editingEnabled: true` in `cdconfig.json`). To actually expose editing on a service, set `"capabilities": "Query,Editing"` and `"editingEnabled": "true"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
 
 ### Examples
 
-Create services via the **Admin REST API** (`createService` endpoint). All 10 service parameters from `cdconfig.json` must be included — use empty strings for parameters that don't apply.
+Create services via the **Admin REST API** (`createService` endpoint). All service parameters from `cdconfig.json` must be included — use empty strings for parameters that don't apply.
 
 > **Note:** There is no `cdf create-service` CLI command. Services are created through the Admin REST API or the ArcGIS Server Admin Directory UI.
 
@@ -188,13 +187,16 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
           "tableName": "catalog.schema.us_cell_towers",
           "geometryColumn": "geometry",
           "idField": "id",
-          "geometryFormat": "GEOMETRY",
+          "geometryFormat": "WKT",
           "timeColumn": "",
           "lakebaseHost": "",
           "lakebasePort": "",
           "lakebaseDatabase": "",
           "lakebaseSchema": "",
-          "lakebaseTable": ""
+          "lakebaseTable": "",
+          "maxRecordCount": "2000",
+          "srid": "4326",
+          "editingEnabled": ""
         }
       }
     }
@@ -229,7 +231,10 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
           "lakebasePort": "5432",
           "lakebaseDatabase": "geospatial",
           "lakebaseSchema": "public",
-          "lakebaseTable": "cell_towers"
+          "lakebaseTable": "cell_towers",
+          "maxRecordCount": "2000",
+          "srid": "4326",
+          "editingEnabled": "true"
         }
       }
     }
@@ -340,18 +345,28 @@ All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon
 
 ## Environment Variables
 
-Lakehouse connection can be configured via `databricks-config.json` (Step 2 above) **or** environment variables — env vars take precedence. On ArcGIS Server, env vars are typically set in `init_user_param.sh`. Lakebase credentials are env-var only.
+Set these in your `.env` file, or in `init_user_param.sh` on ArcGIS Server. Per-table settings (`tableName`, `geometryColumn`, `idField`, etc.) are NOT set here — they're configured per-service via `createService`.
 
 | Variable | Description |
 |----------|-------------|
-| `DATABRICKS_SERVER_HOSTNAME` | Workspace hostname (overrides config file) |
-| `DATABRICKS_HTTP_PATH` | SQL Warehouse HTTP path (overrides config file) |
-| `DATABRICKS_ACCESS_TOKEN` | Personal access token (overrides config file) |
-| `LAKEBASE_PASSWORD` | Lakebase OAuth token or password (optional — auto-generated from PAT if omitted) |
-| `LAKEBASE_USER` | Lakebase username (default: `databricks`) |
+| **Databricks Connection (required for Lakehouse)** | |
+| `DATABRICKS_SERVER_HOSTNAME` | Workspace hostname |
+| `DATABRICKS_HTTP_PATH` | SQL Warehouse HTTP path |
+| `DATABRICKS_ACCESS_TOKEN` | Personal Access Token (PAT) — generate at Settings > Developer > Access tokens |
+| **Lakebase Connection (optional)** | |
+| `LAKEBASE_PASSWORD` | OAuth token or password (auto-generated from PAT if omitted) |
+| `LAKEBASE_USER` | Username (default: `databricks`) |
+| `LAKEBASE_INSTANCE_NAME` | Instance name override (skips hostname→name lookup) |
+| **Query Defaults** | |
 | `DATABRICKS_MAX_RECORD_COUNT` | Max features per page (default: `2000`) |
-| `ENABLE_AUDIT_LOG` | Set to `true` to enable query audit logging |
+| `DATABRICKS_QUERY_TIMEOUT` | Query timeout in ms (default: `120000`) |
+| **Connection Pool Tuning** | |
+| `DATABRICKS_POOL_MIN` / `DATABRICKS_POOL_MAX` | Lakehouse pool size (default: `2` / `10`) |
+| `LAKEBASE_POOL_MIN` / `LAKEBASE_POOL_MAX` | Lakebase pool size (default: `2` / `10`) |
+| `LAKEBASE_SSL_VERIFY` | Set to `true` to verify Lakebase SSL certs (default: `false`) |
+| **Security** | |
 | `ENABLE_USER_AUTH` | Set to `true` to require ArcGIS user authentication |
+| `ENABLE_AUDIT_LOG` | Set to `true` to enable query audit logging |
 
 ---
 
@@ -381,7 +396,7 @@ WHERE latitude IS NOT NULL;
 ```bash
 cd nodejs-provider
 npm test
-# 285 passing (175 Lakehouse + 110 Lakebase)
+# 307 passing
 ```
 
 ## Table Requirements

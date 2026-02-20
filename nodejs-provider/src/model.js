@@ -2,21 +2,23 @@
  * model.js
  * Databricks Custom Data Provider Model
  *
- * Implements ArcGIS Custom Data Feed interface for Databricks SQL Warehouse
- * with native geospatial function support (ST_*)
+ * Implements ArcGIS Custom Data Feed (CDF 12.0) interface for Databricks:
+ *   getData(req, callback) — query features
+ *   editData(req, editData) — add/update/delete features (async, Lakebase only)
+ *   authorize(req) — user authentication (async)
+ *   getMetadata() — idField + inputCrs for the CDF runtime
  *
- * Features:
- * - Connection pooling for optimal performance
- * - User authentication via authorize() method
- * - Audit logging for security tracking
- * - Environment variable configuration
+ * Two backends:
+ *   Lakehouse (Databricks SQL) — read-only, large-scale
+ *   Lakebase (PostgreSQL + PostGIS) — read+write, low-latency
+ *
+ * Routing: if req.params.lakebaseHost is set → Lakebase, otherwise → Lakehouse.
  */
 
-// Load environment variables (optional — CDF runtime provides config via databricks-config.json)
+// Load environment variables from .env file
 // Use explicit path since CDF runtime's working directory differs from provider directory
 try { require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }); } catch (e) { /* dotenv not available in CDF runtime */ }
 
-const configTemplate = require('./databricks-config.json');
 const {
   translateToGeoJSON,
   buildSqlQuery,
@@ -24,6 +26,7 @@ const {
   getExtentFromGeoJson,
   getAuditLogger,
   getGeometryFieldExpression,
+  resolveGeometryFormat,
   validateIdentifier,
 } = require('./modules');
 const { initializePool, getPool, shutdownPool } = require('./modules/connectionPool');
@@ -34,24 +37,23 @@ const { buildLakebaseSelectSql } = require('./modules/lakebaseQuery');
 // Table name validation: must be catalog.schema.table or just a table name
 const TABLE_NAME_PATTERN = /^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+){0,2}$/;
 
-// Load configuration from environment variables
+// Configuration from environment variables
+// Per-table settings (tableName, geometryColumn, idField, srid, maxRecordCount)
+// are configured per-service via createService, not here.
 const config = {
   databricks: {
-    serverHostname: process.env.DATABRICKS_SERVER_HOSTNAME || configTemplate.databricks.serverHostname,
-    httpPath: process.env.DATABRICKS_HTTP_PATH || configTemplate.databricks.httpPath,
-    accessToken: process.env.DATABRICKS_ACCESS_TOKEN || configTemplate.databricks.accessToken,
-    srid: parseInt(process.env.DATABRICKS_SRID) || configTemplate.databricks.srid,
-    maxRecordCount: parseInt(process.env.DATABRICKS_MAX_RECORD_COUNT) || configTemplate.databricks.maxRecordCount,
-    defaultTable: process.env.DATABRICKS_DEFAULT_TABLE || configTemplate.databricks.defaultTable,
-    defaultGeometryColumn: process.env.DATABRICKS_GEOMETRY_COLUMN || configTemplate.databricks.defaultGeometryColumn,
-    defaultIdField: process.env.DATABRICKS_ID_FIELD || configTemplate.databricks.defaultIdField,
+    serverHostname: process.env.DATABRICKS_SERVER_HOSTNAME,
+    httpPath: process.env.DATABRICKS_HTTP_PATH,
+    accessToken: process.env.DATABRICKS_ACCESS_TOKEN,
+    srid: parseInt(process.env.DATABRICKS_SRID) || 4326,
+    maxRecordCount: parseInt(process.env.DATABRICKS_MAX_RECORD_COUNT) || 2000,
     queryTimeout: parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000 // 2 minutes default
   }
 };
 
 // Validate required configuration
 if (!config.databricks.serverHostname || !config.databricks.httpPath || !config.databricks.accessToken) {
-  throw new Error('Missing required Databricks configuration. Set environment variables or update databricks-config.json.');
+  throw new Error('Missing required Databricks configuration. Set DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH, and DATABRICKS_ACCESS_TOKEN environment variables.');
 }
 
 // Initialize audit logger
@@ -86,7 +88,6 @@ class Model {
 
     this.logger.info('Databricks Custom Data Provider initialized');
     this.logger.info(`  Server: ${config.databricks.serverHostname}`);
-    this.logger.info(`  Default table: ${config.databricks.defaultTable || 'not configured'}`);
     this.logger.info(`  User auth: ${process.env.ENABLE_USER_AUTH === 'true' ? 'ENABLED' : 'disabled'}`);
     this.logger.info(`  Simple auth: ${process.env.ENABLE_SIMPLE_AUTH === 'true' ? 'ENABLED (testing only)' : 'disabled'}`);
     this.logger.info(`  Audit log: ${process.env.ENABLE_AUDIT_LOG === 'true' ? 'ENABLED' : 'disabled'}`);
@@ -104,65 +105,68 @@ class Model {
   }
 
   /**
-   * authorize() method - Called before getData() for user authentication
-   *
-   * CDF 12.0 runtime calls this as: authorize(req, data) expecting a Promise.
-   * Older runtimes call: authorize(req, callback) expecting callback(error, authorized).
-   * This method supports both patterns.
+   * authorize() — Called by CDF runtime before getData() and editData().
+   * Supports both calling conventions:
+   *   11.4: authorize(req, callback) — callback(err, authorized)
+   *   12.0: async authorize(req) — return to allow, throw to deny
    *
    * @param {object} req - Request object with user information
-   * @param {object|function} callbackOrData - Callback function (legacy) or data object (CDF 12.0)
+   * @param {function} [callback] - Optional callback for 11.4 compat
    */
-  authorize(req, callbackOrData) {
-    const isCallback = typeof callbackOrData === 'function';
-    const enableUserAuth = process.env.ENABLE_USER_AUTH === 'true';
-    const enableSimpleAuth = process.env.ENABLE_SIMPLE_AUTH === 'true';
-    const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+  async authorize(req, callback) {
+    try {
+      const enableUserAuth = process.env.ENABLE_USER_AUTH === 'true';
+      const enableSimpleAuth = process.env.ENABLE_SIMPLE_AUTH === 'true';
+      const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
 
-    // Helper to resolve or call callback
-    const allow = () => isCallback ? callbackOrData(null, true) : undefined;
-    const deny = (err) => {
-      if (isCallback) return callbackOrData(err, false);
+      // If no authentication is enabled, allow all requests
+      if (!enableUserAuth && !enableSimpleAuth) {
+        if (typeof callback === 'function') return callback(null, true);
+        return;
+      }
+
+      // Simple token authentication (for development/testing)
+      if (enableSimpleAuth) {
+        const authHeader = req.headers?.authorization;
+        const expectedToken = process.env.SIMPLE_AUTH_TOKEN;
+
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+          auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Missing or invalid authorization header');
+          const err = new Error('Authorization required. Use: Authorization: Bearer <token>');
+          if (typeof callback === 'function') return callback(err, false);
+          throw err;
+        }
+
+        const token = authHeader.substring(7);
+        if (token !== expectedToken) {
+          auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Invalid token');
+          const err = new Error('Invalid authentication token');
+          if (typeof callback === 'function') return callback(err, false);
+          throw err;
+        }
+
+        auditLogger.logAuthSuccess('simple_token_user', 'simple_token', ipAddress);
+        if (typeof callback === 'function') return callback(null, true);
+        return;
+      }
+
+      // ArcGIS user authentication (production)
+      if (enableUserAuth) {
+        const user = req._user;
+        if (!user || !user.username) {
+          auditLogger.logAuthFailure('anonymous', 'arcgis', ipAddress, 'No user information from ArcGIS');
+          const err = new Error('User authentication required');
+          if (typeof callback === 'function') return callback(err, false);
+          throw err;
+        }
+        auditLogger.logAuthSuccess(user.username, 'arcgis', ipAddress);
+        if (typeof callback === 'function') return callback(null, true);
+        return;
+      }
+    } catch (err) {
+      if (typeof callback === 'function') return callback(err, false);
       throw err;
-    };
-
-    // If no authentication is enabled, allow all requests
-    if (!enableUserAuth && !enableSimpleAuth) {
-      return allow();
     }
-
-    // Simple token authentication (for development/testing)
-    if (enableSimpleAuth) {
-      const authHeader = req.headers?.authorization;
-      const expectedToken = process.env.SIMPLE_AUTH_TOKEN;
-
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Missing or invalid authorization header');
-        return deny(new Error('Authorization required. Use: Authorization: Bearer <token>'));
-      }
-
-      const token = authHeader.substring(7);
-      if (token !== expectedToken) {
-        auditLogger.logAuthFailure('anonymous', 'simple_token', ipAddress, 'Invalid token');
-        return deny(new Error('Invalid authentication token'));
-      }
-
-      auditLogger.logAuthSuccess('simple_token_user', 'simple_token', ipAddress);
-      return allow();
-    }
-
-    // ArcGIS user authentication (production)
-    if (enableUserAuth) {
-      const user = req._user;
-      if (!user || !user.username) {
-        auditLogger.logAuthFailure('anonymous', 'arcgis', ipAddress, 'No user information from ArcGIS');
-        return deny(new Error('User authentication required'));
-      }
-      auditLogger.logAuthSuccess(user.username, 'arcgis', ipAddress);
-      return allow();
-    }
-
-    return allow();
   }
 
   /**
@@ -195,8 +199,8 @@ class Model {
 
     // Extract service parameters (configured when creating Feature Service)
     // Validate user-provided column names to prevent SQL injection
-    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
-    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
+    const rawGeometryColumn = req.params.geometryColumn || 'geometry';
+    const rawIdField = req.params.idField || 'id';
 
     try {
       if (req.params.geometryColumn) validateIdentifier(rawGeometryColumn);
@@ -207,19 +211,19 @@ class Model {
     }
 
     const sourceConfig = {
-      tableName: req.params.tableName || config.databricks.defaultTable,
+      tableName: req.params.tableName,
       geometryColumn: rawGeometryColumn,
       geometryFormat: req.params.geometryFormat || null, // Optional: 'WKT' | 'WKB' | 'GEOJSON' | 'GEOMETRY'
       idField: rawIdField,
       timeColumn: req.params.timeColumn || null,
-      dbWKID: config.databricks.srid || 4326,
-      maxRecordCountPerPage: config.databricks.maxRecordCount || 2000,
+      dbWKID: parseInt(req.params.srid) || config.databricks.srid || 4326,
+      maxRecordCountPerPage: parseInt(req.params.maxRecordCount) || config.databricks.maxRecordCount || 2000,
       name: req.params.tableName ? req.params.tableName.split('.').pop() : 'DatabricksLayer',
-      description: `Databricks table: ${req.params.tableName || config.databricks.defaultTable}`
+      description: `Databricks table: ${req.params.tableName}`
     };
 
     // Validate table name format to prevent SQL injection via misconfiguration
-    if (sourceConfig.tableName && !TABLE_NAME_PATTERN.test(sourceConfig.tableName)) {
+    if (!sourceConfig.tableName || !TABLE_NAME_PATTERN.test(sourceConfig.tableName)) {
       this.logger.error(`Invalid table name format: ${sourceConfig.tableName}`);
       return callback(new Error(`Invalid table name format: expected catalog.schema.table`));
     }
@@ -230,10 +234,13 @@ class Model {
         geoserviceParams.hasOwnProperty("f")) ||
       Object.keys(geoserviceParams).length === 0;
 
-    // Set fetch size (1 for metadata, configured max for data)
+    // Set fetch size (1 for metadata, capped to configured max for data)
     const fetchSize = isMetadataRequest
       ? 1
-      : resultRecordCount || sourceConfig.maxRecordCountPerPage;
+      : Math.min(
+          parseInt(resultRecordCount) || sourceConfig.maxRecordCountPerPage,
+          sourceConfig.maxRecordCountPerPage
+        );
 
     // Use connection pool (works with serverless and classic SQL warehouses)
     const pool = getPool();
@@ -251,6 +258,23 @@ class Model {
         try {
           this.logger.info(`Query ${requestCounter}: Using pooled connection ${connection.id}`);
 
+          // Resolve geometry format: uses explicit config, name hints, or
+          // probes DESCRIBE TABLE once and caches for the process lifetime.
+          const resolvedFormat = await resolveGeometryFormat(
+            sourceConfig.tableName,
+            sourceConfig.geometryColumn,
+            sourceConfig.geometryFormat,
+            async (sql) => {
+              const op = await connection.session.executeStatement(sql, {
+                runAsync: true,
+                queryTimeout: config.databricks.queryTimeout
+              });
+              const rows = await op.fetchAll();
+              await op.close();
+              return rows;
+            }
+          );
+
           // Build SQL query using helper module
           const sqlQuery = buildSqlQuery(
             geoserviceParams,
@@ -259,7 +283,7 @@ class Model {
             sourceConfig.tableName,
             sourceConfig.dbWKID,
             fetchSize,
-            sourceConfig.geometryFormat,
+            resolvedFormat,
             sourceConfig.timeColumn
           );
 
@@ -270,11 +294,9 @@ class Model {
           if (isMetadataRequest) {
             try {
               // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
-              const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, sourceConfig.geometryFormat);
+              const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, resolvedFormat);
 
-              // ST_Envelope_Agg computes the bounding box in a single aggregate pass,
-              // more efficient than ST_Envelope(ST_Union_Agg(...)) which materializes
-              // the full union geometry first
+              // ST_Envelope_Agg computes the bounding box in a single aggregate pass
               const extentQuery = `
                 SELECT ST_AsGeoJSON(ST_Envelope_Agg(${geomExpression})) AS extent
                 FROM ${sourceConfig.tableName}
@@ -384,12 +406,16 @@ class Model {
           this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
           callback(error);
         } finally {
-          // Clean up operations (not connection - it goes back to pool)
-          try {
-            if (extentOperation) await extentOperation.close();
-            if (queryOperation) await queryOperation.close();
-          } catch (cleanupError) {
-            this.logger.error(`Query ${requestCounter}: Error during cleanup: ${cleanupError.message}`);
+          // Clean up operations independently (not connection - it goes back to pool)
+          if (extentOperation) {
+            try { await extentOperation.close(); } catch (e) {
+              this.logger.error(`Query ${requestCounter}: Error closing extent operation: ${e.message}`);
+            }
+          }
+          if (queryOperation) {
+            try { await queryOperation.close(); } catch (e) {
+              this.logger.error(`Query ${requestCounter}: Error closing query operation: ${e.message}`);
+            }
           }
 
           // Release connection back to pool (reused for next request)
@@ -461,14 +487,10 @@ class Model {
    * getMetadata() — Required by CDF 12.0 for editable providers.
    * Returns idField and inputCrs so the runtime knows which field is the OBJECTID
    * and what CRS the data is in.
-   *
-   * The runtime calls this once when the service starts.
-   * For our dual-backend provider, idField and inputCrs come from config defaults
-   * (overridden per-service via serviceParameters in the service JSON).
    */
   async getMetadata() {
     return {
-      idField: config.databricks.defaultIdField || 'id',
+      idField: 'id',
       inputCrs: config.databricks.srid || 4326,
     };
   }
@@ -492,8 +514,8 @@ class Model {
     const { query: geoserviceParams } = req;
     const { returnCountOnly } = geoserviceParams;
 
-    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
-    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
+    const rawGeometryColumn = req.params.geometryColumn || 'geometry';
+    const rawIdField = req.params.idField || 'id';
 
     try {
       validateIdentifier(rawGeometryColumn);
@@ -508,8 +530,8 @@ class Model {
       lakebaseTable: req.params.lakebaseTable,
       geometryColumn: rawGeometryColumn,
       idField: rawIdField,
-      dbWKID: config.databricks.srid || 4326,
-      maxRecordCountPerPage: config.databricks.maxRecordCount || 2000,
+      dbWKID: parseInt(req.params.srid) || config.databricks.srid || 4326,
+      maxRecordCountPerPage: parseInt(req.params.maxRecordCount) || config.databricks.maxRecordCount || 2000,
       name: req.params.lakebaseTable || 'LakebaseLayer',
       description: `Lakebase table: ${req.params.lakebaseSchema || 'public'}.${req.params.lakebaseTable}`,
     };
@@ -597,11 +619,9 @@ class Model {
 
   /**
    * Apply edits (add/update/delete) via Lakebase.
-   * Called by CDF runtime when editingEnabled is true.
+   * Called by CDF 12.0 runtime when editingEnabled is true.
    *
-   * Supports both patterns:
-   *   CDF 12.0+:  async editData(req, data) → returns result (Promise)
-   *   Legacy:     editData(req, data, callback) → calls callback(error, result)
+   * CDF 12.0 async pattern: async editData(req, data) → returns result
    *
    * Error codes follow Esri convention:
    *   1003 = operation rolled back
@@ -611,176 +631,163 @@ class Model {
    *
    * @param {object} req  - Request with params (lakebaseHost, lakebaseSchema, etc.)
    * @param {object} data - { adds: [...], updates: [...], deletes: [...], rollbackOnFailure: bool }
-   * @param {function} [callback] - Optional callback(error, result). If omitted, returns Promise.
+   * @param {function} [callback] - Optional callback for 11.4 compat: callback(err, result)
+   * @returns {Promise<{addResults, updateResults, deleteResults}>}
    */
-  editData(req, data, callback) {
-    // Support async/Promise pattern (CDF 12.0) — if no callback, return Promise
-    if (typeof callback !== 'function') {
-      return this._processEditData(req, data);
-    }
-
-    // Callback pattern (legacy) — delegate to async implementation
-    this._processEditData(req, data)
-      .then(result => callback(null, result))
-      .catch(error => callback(error));
-  }
-
-  /**
-   * Core edit logic (async). Called by editData() for both callback and Promise patterns.
-   *
-   * Error codes follow Esri convention:
-   *   1003 = operation rolled back
-   *   1017 = insert failure
-   *   1018 = delete failure
-   *   1019 = update failure
-   */
-  async _processEditData(req, data) {
-    const rawGeometryColumn = req.params.geometryColumn || config.databricks.defaultGeometryColumn || 'geometry';
-    const rawIdField = req.params.idField || config.databricks.defaultIdField || 'id';
-    const schema = req.params.lakebaseSchema || 'public';
-    const table = req.params.lakebaseTable;
-    const srid = config.databricks.srid || 4326;
-
-    validateIdentifier(rawGeometryColumn);
-    validateIdentifier(rawIdField);
-
-    if (!req.params.lakebaseHost) {
-      throw new Error('Editing requires lakebaseHost service parameter');
-    }
-    if (!table) {
-      throw new Error('Editing requires lakebaseTable service parameter');
-    }
-
-    const lakebaseConfig = {
-      host: req.params.lakebaseHost,
-      port: parseInt(req.params.lakebasePort) || 5432,
-      database: req.params.lakebaseDatabase,
-    };
-
-    const pool = await getLakebasePool(lakebaseConfig);
-
-    const adds = data.adds || [];
-    const updates = data.updates || [];
-    const deletes = data.deletes || [];
-    const rollbackOnFailure = data.rollbackOnFailure === true ||
-      data.rollbackOnFailure === 'true';
-
-    this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes (rollback=${rollbackOnFailure})`);
-
-    const addResults = [];
-    const updateResults = [];
-    const deleteResults = [];
-
-    // Use a dedicated client for transaction support
-    const client = rollbackOnFailure ? await pool.connect() : null;
-    const query = client
-      ? (sql, params) => client.query(sql, params)
-      : (sql, params) => pool.query(sql, params);
-
+  async editData(req, data, callback) {
     try {
-      if (client) {
-        await client.query('BEGIN');
+      const rawGeometryColumn = req.params.geometryColumn || 'geometry';
+      const rawIdField = req.params.idField || 'id';
+      const schema = req.params.lakebaseSchema || 'public';
+      const table = req.params.lakebaseTable;
+      const srid = parseInt(req.params.srid) || config.databricks.srid || 4326;
+
+      validateIdentifier(rawGeometryColumn);
+      validateIdentifier(rawIdField);
+
+      if (!req.params.lakebaseHost) {
+        throw new Error('Editing requires lakebaseHost service parameter');
+      }
+      if (!table) {
+        throw new Error('Editing requires lakebaseTable service parameter');
       }
 
-      // Process adds
-      for (const feature of adds) {
-        try {
-          const attributes = feature.attributes || feature.properties || {};
-          const geometry = feature.geometry || null;
-          const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-          const result = await query(sql, params);
-          const newId = result.rows[0][rawIdField];
-          addResults.push({ objectId: Number(newId), success: true });
-        } catch (error) {
-          this.logger.error(`Edit add failed: ${error.message}`);
-          addResults.push({ success: false, error: { code: 1017, description: error.message } });
+      const lakebaseConfig = {
+        host: req.params.lakebaseHost,
+        port: parseInt(req.params.lakebasePort) || 5432,
+        database: req.params.lakebaseDatabase,
+      };
+
+      const pool = await getLakebasePool(lakebaseConfig);
+
+      const adds = data.adds || [];
+      const updates = data.updates || [];
+      const deletes = data.deletes || [];
+      const rollbackOnFailure = data.rollbackOnFailure === true ||
+        data.rollbackOnFailure === 'true';
+
+      this.logger.info(`Edit: ${adds.length} adds, ${updates.length} updates, ${deletes.length} deletes (rollback=${rollbackOnFailure})`);
+
+      const addResults = [];
+      const updateResults = [];
+      const deleteResults = [];
+
+      // Use a dedicated client for transaction support
+      const client = rollbackOnFailure ? await pool.connect() : null;
+      const query = client
+        ? (sql, params) => client.query(sql, params)
+        : (sql, params) => pool.query(sql, params);
+
+      try {
+        if (client) {
+          await client.query('BEGIN');
         }
-      }
 
-      // Process updates
-      for (const feature of updates) {
-        try {
-          const attributes = feature.attributes || feature.properties || {};
-          const geometry = feature.geometry || null;
-          const oid = Number(attributes[rawIdField]);
-          const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
-          const result = await query(sql, params);
-          if (result.rowCount === 0) {
-            updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
-          } else {
-            updateResults.push({ objectId: oid, success: true });
+        // Process adds
+        for (const feature of adds) {
+          try {
+            const attributes = feature.attributes || feature.properties || {};
+            const geometry = feature.geometry || null;
+            const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+            const result = await query(sql, params);
+            const newId = result.rows[0][rawIdField];
+            addResults.push({ objectId: Number(newId), success: true });
+          } catch (error) {
+            this.logger.error(`Edit add failed: ${error.message}`);
+            addResults.push({ success: false, error: { code: 1017, description: error.message } });
           }
-        } catch (error) {
-          this.logger.error(`Edit update failed: ${error.message}`);
-          const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
-          updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
         }
-      }
 
-      // Process deletes — uses RETURNING to identify which rows were actually deleted
-      if (deletes.length > 0) {
-        try {
-          const objectIds = deletes.map(Number);
-          const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
-          const result = await query(sql, params);
-          const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
-          for (const id of objectIds) {
-            if (deletedIds.has(id)) {
-              deleteResults.push({ objectId: id, success: true });
+        // Process updates
+        for (const feature of updates) {
+          try {
+            const attributes = feature.attributes || feature.properties || {};
+            const geometry = feature.geometry || null;
+            const oid = Number(attributes[rawIdField]);
+            const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+            const result = await query(sql, params);
+            if (result.rowCount === 0) {
+              updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
             } else {
-              deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
+              updateResults.push({ objectId: oid, success: true });
+            }
+          } catch (error) {
+            this.logger.error(`Edit update failed: ${error.message}`);
+            const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
+            updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
+          }
+        }
+
+        // Process deletes — uses RETURNING to identify which rows were actually deleted
+        if (deletes.length > 0) {
+          try {
+            const objectIds = deletes.map(Number);
+            const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
+            const result = await query(sql, params);
+            const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
+            for (const id of objectIds) {
+              if (deletedIds.has(id)) {
+                deleteResults.push({ objectId: id, success: true });
+              } else {
+                deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
+              }
+            }
+          } catch (error) {
+            this.logger.error(`Edit delete failed: ${error.message}`);
+            for (const id of deletes) {
+              deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
             }
           }
-        } catch (error) {
-          this.logger.error(`Edit delete failed: ${error.message}`);
-          for (const id of deletes) {
-            deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
+        }
+
+        // Handle rollbackOnFailure
+        if (client) {
+          const hasFailure = [...addResults, ...updateResults, ...deleteResults].some(r => !r.success);
+          if (hasFailure) {
+            await client.query('ROLLBACK');
+            this.logger.warn('Edit rolled back due to failure(s)');
+            const rollbackError = { code: 1003, description: 'Operation rolled back' };
+            addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
+            updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
+            deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
+          } else {
+            await client.query('COMMIT');
           }
         }
-      }
 
-      // Handle rollbackOnFailure
-      if (client) {
-        const hasFailure = [...addResults, ...updateResults, ...deleteResults].some(r => !r.success);
-        if (hasFailure) {
-          await client.query('ROLLBACK');
-          this.logger.warn('Edit rolled back due to failure(s)');
-          const rollbackError = { code: 1003, description: 'Operation rolled back' };
-          addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
-          updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
-          deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
-        } else {
-          await client.query('COMMIT');
+        const result = { addResults, updateResults, deleteResults };
+
+        this.logger.info(`Edit complete: ${addResults.length} added, ${updateResults.length} updated, ${deleteResults.length} deleted`);
+
+        // Log edit to audit
+        const username = req._user?.username || 'anonymous';
+        const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+        auditLogger.log('EDIT', {
+          username,
+          table: `${schema}.${table}`,
+          adds: addResults.length,
+          updates: updateResults.length,
+          deletes: deleteResults.length,
+          ipAddress,
+        });
+
+        if (typeof callback === 'function') return callback(null, result);
+        return result;
+      } catch (error) {
+        if (client) {
+          try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
+        }
+        this.logger.error(`Edit error: ${error.message}`);
+        if (typeof callback === 'function') return callback(error);
+        throw error;
+      } finally {
+        if (client) {
+          client.release();
         }
       }
-
-      const result = { addResults, updateResults, deleteResults };
-
-      this.logger.info(`Edit complete: ${addResults.length} added, ${updateResults.length} updated, ${deleteResults.length} deleted`);
-
-      // Log edit to audit
-      const username = req._user?.username || 'anonymous';
-      const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
-      auditLogger.log('EDIT', {
-        username,
-        table: `${schema}.${table}`,
-        adds: addResults.length,
-        updates: updateResults.length,
-        deletes: deleteResults.length,
-        ipAddress,
-      });
-
-      return result;
-    } catch (error) {
-      if (client) {
-        try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
-      }
-      this.logger.error(`Edit error: ${error.message}`);
-      throw error;
-    } finally {
-      if (client) {
-        client.release();
-      }
+    } catch (err) {
+      if (typeof callback === 'function') return callback(err);
+      throw err;
     }
   }
 

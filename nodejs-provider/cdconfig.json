@@ -56,6 +56,21 @@
         "key": "lakebaseTable",
         "label": "Lakebase Table",
         "description": "Table name in Lakebase for reads and writes"
+      },
+      {
+        "key": "maxRecordCount",
+        "label": "Max Record Count",
+        "description": "Maximum features returned per page (default: 2000). Clients can request fewer via resultRecordCount."
+      },
+      {
+        "key": "srid",
+        "label": "Spatial Reference ID",
+        "description": "EPSG SRID of the geometry column (default: 4326 / WGS 84)"
+      },
+      {
+        "key": "editingEnabled",
+        "label": "Editing Enabled",
+        "description": "Set to 'true' to enable feature editing via applyEdits (Lakebase only). Also requires capabilities: 'Query,Editing' on the service."
       }
     ]
   },

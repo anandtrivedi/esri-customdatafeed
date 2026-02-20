@@ -8,7 +8,7 @@ const { buildSqlQuery } = require("./sql");
 const { generateFiltersApplied } = require("./filters");
 const { getGeometryQuery, getExtentFromGeoJson } = require("./geometry");
 const { getAuditLogger } = require("./auditLog");
-const { getGeometryFieldExpression } = require("./geometryFormat");
+const { getGeometryFieldExpression, resolveGeometryFormat } = require("./geometryFormat");
 const {
   validateFieldName,
   validateIdentifier,
@@ -28,6 +28,7 @@ module.exports = {
   getExtentFromGeoJson,
   getAuditLogger,
   getGeometryFieldExpression,
+  resolveGeometryFormat,
   validateFieldName,
   validateIdentifier,
   escapeSqlString,

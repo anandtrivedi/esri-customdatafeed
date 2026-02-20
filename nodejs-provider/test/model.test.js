@@ -88,7 +88,99 @@ describe("model", () => {
   });
 
   describe("authorize", () => {
-    it("should allow all requests when auth is disabled", (done) => {
+    it("should allow all requests when auth is disabled", async () => {
+      const model = new Model();
+      const req = { ip: "127.0.0.1", headers: {} };
+      // async authorize() returns (no throw) to allow
+      await model.authorize(req);
+    });
+
+    it("should reject missing token when simple auth is enabled", async () => {
+      process.env.ENABLE_SIMPLE_AUTH = "true";
+      process.env.SIMPLE_AUTH_TOKEN = "secret123";
+
+      const model = new Model();
+      const req = { ip: "127.0.0.1", headers: {} };
+      try {
+        await model.authorize(req);
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("Authorization required");
+      } finally {
+        process.env.ENABLE_SIMPLE_AUTH = "false";
+        delete process.env.SIMPLE_AUTH_TOKEN;
+      }
+    });
+
+    it("should reject invalid token when simple auth is enabled", async () => {
+      process.env.ENABLE_SIMPLE_AUTH = "true";
+      process.env.SIMPLE_AUTH_TOKEN = "secret123";
+
+      const model = new Model();
+      const req = {
+        ip: "127.0.0.1",
+        headers: { authorization: "Bearer wrong-token" },
+      };
+      try {
+        await model.authorize(req);
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("Invalid authentication token");
+      } finally {
+        process.env.ENABLE_SIMPLE_AUTH = "false";
+        delete process.env.SIMPLE_AUTH_TOKEN;
+      }
+    });
+
+    it("should accept valid token when simple auth is enabled", async () => {
+      process.env.ENABLE_SIMPLE_AUTH = "true";
+      process.env.SIMPLE_AUTH_TOKEN = "secret123";
+
+      const model = new Model();
+      const req = {
+        ip: "127.0.0.1",
+        headers: { authorization: "Bearer secret123" },
+      };
+      await model.authorize(req);
+
+      process.env.ENABLE_SIMPLE_AUTH = "false";
+      delete process.env.SIMPLE_AUTH_TOKEN;
+    });
+
+    it("should allow authenticated ArcGIS user when user auth is enabled", async () => {
+      process.env.ENABLE_USER_AUTH = "true";
+
+      const model = new Model();
+      const req = {
+        ip: "127.0.0.1",
+        headers: {},
+        _user: { username: "analyst1", groups: ["GIS_Analysts"] },
+      };
+      await model.authorize(req);
+
+      process.env.ENABLE_USER_AUTH = "false";
+    });
+
+    it("should reject unauthenticated user when user auth is enabled", async () => {
+      process.env.ENABLE_USER_AUTH = "true";
+
+      const model = new Model();
+      const req = { ip: "127.0.0.1", headers: {} };
+      try {
+        await model.authorize(req);
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("User authentication required");
+      } finally {
+        process.env.ENABLE_USER_AUTH = "false";
+      }
+    });
+
+    // 11.4 callback compatibility tests
+    it("should work with callback pattern (11.4 compat)", (done) => {
       const model = new Model();
       const req = { ip: "127.0.0.1", headers: {} };
       model.authorize(req, (err, authorized) => {
@@ -98,12 +190,10 @@ describe("model", () => {
       });
     });
 
-    it("should reject missing token when simple auth is enabled", (done) => {
+    it("should pass error to callback on rejection (11.4 compat)", (done) => {
       process.env.ENABLE_SIMPLE_AUTH = "true";
       process.env.SIMPLE_AUTH_TOKEN = "secret123";
 
-      // Need to re-require to pick up env change for authorize logic
-      // but authorize reads env at call time, so this works on the same instance
       const model = new Model();
       const req = { ip: "127.0.0.1", headers: {} };
       model.authorize(req, (err, authorized) => {
@@ -113,78 +203,6 @@ describe("model", () => {
 
         process.env.ENABLE_SIMPLE_AUTH = "false";
         delete process.env.SIMPLE_AUTH_TOKEN;
-        done();
-      });
-    });
-
-    it("should reject invalid token when simple auth is enabled", (done) => {
-      process.env.ENABLE_SIMPLE_AUTH = "true";
-      process.env.SIMPLE_AUTH_TOKEN = "secret123";
-
-      const model = new Model();
-      const req = {
-        ip: "127.0.0.1",
-        headers: { authorization: "Bearer wrong-token" },
-      };
-      model.authorize(req, (err, authorized) => {
-        expect(err).to.be.an("error");
-        expect(err.message).to.include("Invalid authentication token");
-        expect(authorized).to.be.false;
-
-        process.env.ENABLE_SIMPLE_AUTH = "false";
-        delete process.env.SIMPLE_AUTH_TOKEN;
-        done();
-      });
-    });
-
-    it("should accept valid token when simple auth is enabled", (done) => {
-      process.env.ENABLE_SIMPLE_AUTH = "true";
-      process.env.SIMPLE_AUTH_TOKEN = "secret123";
-
-      const model = new Model();
-      const req = {
-        ip: "127.0.0.1",
-        headers: { authorization: "Bearer secret123" },
-      };
-      model.authorize(req, (err, authorized) => {
-        expect(err).to.be.null;
-        expect(authorized).to.be.true;
-
-        process.env.ENABLE_SIMPLE_AUTH = "false";
-        delete process.env.SIMPLE_AUTH_TOKEN;
-        done();
-      });
-    });
-
-    it("should allow authenticated ArcGIS user when user auth is enabled", (done) => {
-      process.env.ENABLE_USER_AUTH = "true";
-
-      const model = new Model();
-      const req = {
-        ip: "127.0.0.1",
-        headers: {},
-        _user: { username: "analyst1", groups: ["GIS_Analysts"] },
-      };
-      model.authorize(req, (err, authorized) => {
-        expect(err).to.be.null;
-        expect(authorized).to.be.true;
-
-        process.env.ENABLE_USER_AUTH = "false";
-        done();
-      });
-    });
-
-    it("should reject unauthenticated user when user auth is enabled", (done) => {
-      process.env.ENABLE_USER_AUTH = "true";
-
-      const model = new Model();
-      const req = { ip: "127.0.0.1", headers: {} };
-      model.authorize(req, (err, authorized) => {
-        expect(err).to.be.an("error");
-        expect(err.message).to.include("User authentication required");
-        expect(authorized).to.be.false;
-
-        process.env.ENABLE_USER_AUTH = "false";
         done();
       });
     });
@@ -598,7 +616,7 @@ describe("model", () => {
   });
 
   describe("editData", () => {
-    it("should process adds and return objectIds", (done) => {
+    it("should process adds and return objectIds", async () => {
       lakebaseQueryResult = { rows: [{ id: 100 }] };
 
       const model = new Model();
@@ -623,19 +641,16 @@ describe("model", () => {
         ],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.addResults).to.have.lengthOf(1);
-        expect(result.addResults[0].success).to.be.true;
-        expect(result.addResults[0].objectId).to.equal(100);
-        expect(lakebaseQueryLog).to.have.lengthOf(1);
-        expect(lakebaseQueryLog[0].sql).to.include("INSERT INTO");
-        expect(lakebaseQueryLog[0].sql).to.include("RETURNING id");
-        done();
-      });
+      const result = await model.editData(req, data);
+      expect(result.addResults).to.have.lengthOf(1);
+      expect(result.addResults[0].success).to.be.true;
+      expect(result.addResults[0].objectId).to.equal(100);
+      expect(lakebaseQueryLog).to.have.lengthOf(1);
+      expect(lakebaseQueryLog[0].sql).to.include("INSERT INTO");
+      expect(lakebaseQueryLog[0].sql).to.include("RETURNING id");
     });
 
-    it("should process updates", (done) => {
+    it("should process updates", async () => {
       lakebaseQueryResult = { rows: [], rowCount: 1 };
 
       const model = new Model();
@@ -660,17 +675,14 @@ describe("model", () => {
         ],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.updateResults).to.have.lengthOf(1);
-        expect(result.updateResults[0].success).to.be.true;
-        expect(result.updateResults[0].objectId).to.equal(42);
-        expect(lakebaseQueryLog[0].sql).to.include("UPDATE");
-        done();
-      });
+      const result = await model.editData(req, data);
+      expect(result.updateResults).to.have.lengthOf(1);
+      expect(result.updateResults[0].success).to.be.true;
+      expect(result.updateResults[0].objectId).to.equal(42);
+      expect(lakebaseQueryLog[0].sql).to.include("UPDATE");
     });
 
-    it("should process deletes", (done) => {
+    it("should process deletes", async () => {
       lakebaseQueryResult = { rows: [{ id: 1 }, { id: 2 }, { id: 3 }], rowCount: 3 };
 
       const model = new Model();
@@ -690,17 +702,14 @@ describe("model", () => {
         deletes: [1, 2, 3],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.deleteResults).to.have.lengthOf(3);
-        result.deleteResults.forEach((r) => expect(r.success).to.be.true);
-        expect(lakebaseQueryLog[0].sql).to.include("DELETE FROM");
-        expect(lakebaseQueryLog[0].sql).to.include("IN ($1, $2, $3)");
-        done();
-      });
+      const result = await model.editData(req, data);
+      expect(result.deleteResults).to.have.lengthOf(3);
+      result.deleteResults.forEach((r) => expect(r.success).to.be.true);
+      expect(lakebaseQueryLog[0].sql).to.include("DELETE FROM");
+      expect(lakebaseQueryLog[0].sql).to.include("IN ($1, $2, $3)");
     });
 
-    it("should process mixed adds, updates, and deletes", (done) => {
+    it("should process mixed adds, updates, and deletes", async () => {
       // Queue: INSERT returns new ID, UPDATE returns rowCount=1, DELETE returns deleted row
       lakebaseQueryResult = [
         { rows: [{ id: 200 }], rowCount: 1 },   // INSERT RETURNING
@@ -727,21 +736,18 @@ describe("model", () => {
         deletes: [5],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.addResults).to.have.lengthOf(1);
-        expect(result.updateResults).to.have.lengthOf(1);
-        expect(result.deleteResults).to.have.lengthOf(1);
-        expect(result.addResults[0].success).to.be.true;
-        expect(result.updateResults[0].success).to.be.true;
-        expect(result.deleteResults[0].success).to.be.true;
-        // 3 queries total: INSERT, UPDATE, DELETE
-        expect(lakebaseQueryLog).to.have.lengthOf(3);
-        done();
-      });
+      const result = await model.editData(req, data);
+      expect(result.addResults).to.have.lengthOf(1);
+      expect(result.updateResults).to.have.lengthOf(1);
+      expect(result.deleteResults).to.have.lengthOf(1);
+      expect(result.addResults[0].success).to.be.true;
+      expect(result.updateResults[0].success).to.be.true;
+      expect(result.deleteResults[0].success).to.be.true;
+      // 3 queries total: INSERT, UPDATE, DELETE
+      expect(lakebaseQueryLog).to.have.lengthOf(3);
     });
 
-    it("should fail when lakebaseHost is missing", (done) => {
+    it("should fail when lakebaseHost is missing", async () => {
       const model = new Model();
       const req = {
         params: {
@@ -752,14 +758,16 @@ describe("model", () => {
         ip: "127.0.0.1",
       };
 
-      model.editData(req, { adds: [] }, (err) => {
+      try {
+        await model.editData(req, { adds: [] });
+        expect.fail("Should have thrown");
+      } catch (err) {
         expect(err).to.be.an("error");
         expect(err.message).to.include("lakebaseHost");
-        done();
-      });
+      }
     });
 
-    it("should fail when lakebaseTable is missing", (done) => {
+    it("should fail when lakebaseTable is missing", async () => {
       const model = new Model();
       const req = {
         params: {
@@ -771,14 +779,16 @@ describe("model", () => {
         ip: "127.0.0.1",
       };
 
-      model.editData(req, { adds: [] }, (err) => {
+      try {
+        await model.editData(req, { adds: [] });
+        expect.fail("Should have thrown");
+      } catch (err) {
         expect(err).to.be.an("error");
         expect(err.message).to.include("lakebaseTable");
-        done();
-      });
+      }
     });
 
-    it("should reject invalid identifiers in edit params", (done) => {
+    it("should reject invalid identifiers in edit params", async () => {
       const model = new Model();
       const req = {
         params: {
@@ -791,14 +801,16 @@ describe("model", () => {
         ip: "127.0.0.1",
       };
 
-      model.editData(req, { adds: [] }, (err) => {
+      try {
+        await model.editData(req, { adds: [] });
+        expect.fail("Should have thrown");
+      } catch (err) {
         expect(err).to.be.an("error");
         expect(err.message).to.include("Invalid identifier");
-        done();
-      });
+      }
     });
 
-    it("should report failure when update targets non-existent ID", (done) => {
+    it("should report failure when update targets non-existent ID", async () => {
       lakebaseQueryResult = { rows: [], rowCount: 0 };
 
       const model = new Model();
@@ -820,18 +832,15 @@ describe("model", () => {
         ],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.updateResults).to.have.lengthOf(1);
-        expect(result.updateResults[0].success).to.be.false;
-        expect(result.updateResults[0].objectId).to.equal(999999);
-        expect(result.updateResults[0].error.code).to.equal(1019);
-        expect(result.updateResults[0].error.description).to.include("not found");
-        done();
-      });
+      const result = await model.editData(req, data);
+      expect(result.updateResults).to.have.lengthOf(1);
+      expect(result.updateResults[0].success).to.be.false;
+      expect(result.updateResults[0].objectId).to.equal(999999);
+      expect(result.updateResults[0].error.code).to.equal(1019);
+      expect(result.updateResults[0].error.description).to.include("not found");
     });
 
-    it("should report per-row delete failures for non-existent IDs", (done) => {
+    it("should report per-row delete failures for non-existent IDs", async () => {
       // DELETE RETURNING only returns id=1, so id=999 was not found
       lakebaseQueryResult = { rows: [{ id: 1 }], rowCount: 1 };
 
@@ -848,18 +857,15 @@ describe("model", () => {
         ip: "127.0.0.1",
       };
 
-      model.editData(req, { deletes: [1, 999] }, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.deleteResults).to.have.lengthOf(2);
-        expect(result.deleteResults[0]).to.deep.include({ objectId: 1, success: true });
-        expect(result.deleteResults[1].success).to.be.false;
-        expect(result.deleteResults[1].objectId).to.equal(999);
-        expect(result.deleteResults[1].error.code).to.equal(1018);
-        done();
-      });
+      const result = await model.editData(req, { deletes: [1, 999] });
+      expect(result.deleteResults).to.have.lengthOf(2);
+      expect(result.deleteResults[0]).to.deep.include({ objectId: 1, success: true });
+      expect(result.deleteResults[1].success).to.be.false;
+      expect(result.deleteResults[1].objectId).to.equal(999);
+      expect(result.deleteResults[1].error.code).to.equal(1018);
     });
 
-    it("should rollback all operations when rollbackOnFailure is true and one fails", (done) => {
+    it("should rollback all operations when rollbackOnFailure is true and one fails", async () => {
       // Queue: BEGIN, INSERT succeeds, UPDATE fails (not found), ROLLBACK
       lakebaseQueryResult = [
         { rows: [] },                            // BEGIN
@@ -887,22 +893,19 @@ describe("model", () => {
         updates: [{ attributes: { id: 999, name: "Ghost" } }],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        // Both should be marked as failed due to rollback
-        expect(result.addResults[0].success).to.be.false;
-        expect(result.addResults[0].error.code).to.equal(1003);
-        expect(result.updateResults[0].success).to.be.false;
-        expect(result.updateResults[0].error.code).to.equal(1003);
-        // Should have BEGIN and ROLLBACK in the query log
-        const sqls = lakebaseQueryLog.map(q => q.sql);
-        expect(sqls[0]).to.equal("BEGIN");
-        expect(sqls[sqls.length - 1]).to.equal("ROLLBACK");
-        done();
-      });
+      const result = await model.editData(req, data);
+      // Both should be marked as failed due to rollback
+      expect(result.addResults[0].success).to.be.false;
+      expect(result.addResults[0].error.code).to.equal(1003);
+      expect(result.updateResults[0].success).to.be.false;
+      expect(result.updateResults[0].error.code).to.equal(1003);
+      // Should have BEGIN and ROLLBACK in the query log
+      const sqls = lakebaseQueryLog.map(q => q.sql);
+      expect(sqls[0]).to.equal("BEGIN");
+      expect(sqls[sqls.length - 1]).to.equal("ROLLBACK");
     });
 
-    it("should commit when rollbackOnFailure is true and all succeed", (done) => {
+    it("should commit when rollbackOnFailure is true and all succeed", async () => {
       lakebaseQueryResult = [
         { rows: [] },                           // BEGIN
         { rows: [{ id: 400 }], rowCount: 1 },   // INSERT succeeds
@@ -927,17 +930,14 @@ describe("model", () => {
         adds: [{ attributes: { name: "New" }, geometry: { x: -77, y: 38 } }],
       };
 
-      model.editData(req, data, (err, result) => {
-        expect(err).to.be.null;
-        expect(result.addResults[0].success).to.be.true;
-        const sqls = lakebaseQueryLog.map(q => q.sql);
-        expect(sqls[0]).to.equal("BEGIN");
-        expect(sqls[sqls.length - 1]).to.equal("COMMIT");
-        done();
-      });
+      const result = await model.editData(req, data);
+      expect(result.addResults[0].success).to.be.true;
+      const sqls = lakebaseQueryLog.map(q => q.sql);
+      expect(sqls[0]).to.equal("BEGIN");
+      expect(sqls[sqls.length - 1]).to.equal("COMMIT");
     });
 
-    it("should return a Promise when called without callback (CDF 12.0 pattern)", async () => {
+    it("should process adds via async/await", async () => {
       lakebaseQueryResult = { rows: [{ id: 500 }] };
 
       const model = new Model();
@@ -957,14 +957,13 @@ describe("model", () => {
         adds: [{ attributes: { name: "Async Tower" }, geometry: { x: -77, y: 38 } }],
       };
 
-      // Call without callback — should return a Promise
       const result = await model.editData(req, data);
       expect(result.addResults).to.have.lengthOf(1);
       expect(result.addResults[0].success).to.be.true;
       expect(result.addResults[0].objectId).to.equal(500);
     });
 
-    it("should reject the Promise on error when called without callback", async () => {
+    it("should throw on error", async () => {
       const model = new Model();
       const req = {
         params: {
@@ -984,7 +983,7 @@ describe("model", () => {
       }
     });
 
-    it("should return empty results when no edits are provided", (done) => {
+    it("should return empty results when no edits are provided", async () => {
       const model = new Model();
       const req = {
         params: {
@@ -998,11 +997,54 @@ describe("model", () => {
         ip: "127.0.0.1",
       };
 
-      model.editData(req, {}, (err, result) => {
+      const result = await model.editData(req, {});
+      expect(result.addResults).to.have.lengthOf(0);
+      expect(result.updateResults).to.have.lengthOf(0);
+      expect(result.deleteResults).to.have.lengthOf(0);
+    });
+
+    // 11.4 callback compatibility tests
+    it("should work with callback pattern (11.4 compat)", (done) => {
+      lakebaseQueryResult = { rows: [{ id: 600 }] };
+
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+          lakebaseSchema: "public",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, {
+        adds: [{ attributes: { name: "CB Tower" }, geometry: { x: -77, y: 38 } }],
+      }, (err, result) => {
         expect(err).to.be.null;
-        expect(result.addResults).to.have.lengthOf(0);
-        expect(result.updateResults).to.have.lengthOf(0);
-        expect(result.deleteResults).to.have.lengthOf(0);
+        expect(result.addResults).to.have.lengthOf(1);
+        expect(result.addResults[0].success).to.be.true;
+        expect(result.addResults[0].objectId).to.equal(600);
+        done();
+      });
+    });
+
+    it("should pass error to callback on failure (11.4 compat)", (done) => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.editData(req, { adds: [] }, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("lakebaseHost");
         done();
       });
     });

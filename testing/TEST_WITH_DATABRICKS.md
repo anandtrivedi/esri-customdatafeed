@@ -102,9 +102,9 @@ curl "http://localhost:3000/query?table=atrivedi.geospatial.vessel_tracking_h3&g
 ## Troubleshooting
 
 ### If you get "Invalid access token" error:
-1. Check if the token in `nodejs-provider/src/databricks-config.json` is current
-2. Generate new token in Databricks: User Settings → Access Tokens
-3. Update the config file
+1. Check if `DATABRICKS_ACCESS_TOKEN` in `nodejs-provider/.env` is current
+2. Generate a new PAT in Databricks: Settings → Developer → Access Tokens
+3. Update the `.env` file
 
 ### If table doesn't exist:
 Run the SQL in `check-and-create-data.sql` to create sample tables
