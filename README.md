@@ -443,6 +443,28 @@ npm test
 - Lakehouse: add Z-ordering: `OPTIMIZE table ZORDER BY (geometry_column)`
 - Lakebase: add a GIST index: `CREATE INDEX ON table USING GIST (geometry)`
 
+## Known Limitations
+
+### Lakebase Synced Tables: GEOMETRY/GEOGRAPHY types not supported
+
+Databricks [Synced Tables](https://docs.databricks.com/aws/en/oltp/instances/sync-data/sync-table) (reverse ETL from Unity Catalog to Lakebase) do not support GEOMETRY or GEOGRAPHY column types. The sync will fail if the source table contains these types.
+
+**Workaround:** Store geometry as WKT strings (type STRING) in your source Delta Lake table. STRING maps to TEXT in PostgreSQL and syncs without issues. Once in Lakebase, convert to native PostGIS geometry at query time or via a generated column:
+
+```sql
+-- Option A: Convert at query time
+SELECT *, ST_GeomFromText(geometry_wkt, 4326) AS geom FROM my_table;
+
+-- Option B: Add a generated column after sync (requires a separate editable table)
+ALTER TABLE my_table ADD COLUMN geom GEOMETRY(Point, 4326)
+  GENERATED ALWAYS AS (ST_GeomFromText(geometry_wkt, 4326)) STORED;
+CREATE INDEX ON my_table USING GIST (geom);
+```
+
+This limitation only affects Synced Tables (Databricks → Lakebase sync). Tables created directly in Lakebase with PostGIS geometry columns work fine — the provider's Lakebase backend uses native PostGIS geometry for all queries and editing.
+
+**Full supported type mapping:** [Lakebase Instances docs](https://docs.databricks.com/aws/en/oltp/instances/sync-data/sync-table) | [Lakebase Projects docs](https://docs.databricks.com/aws/en/oltp/projects/reverse-etl)
+
 ## License
 
 MIT
