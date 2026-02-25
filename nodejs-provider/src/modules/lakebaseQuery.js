@@ -92,12 +92,20 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   }
 
   if (objectIds) {
-    const ids = String(objectIds).split(',').map(id => Number(id.trim()));
-    const idPlaceholders = ids.map(id => {
-      params.push(id);
-      return `$${paramIndex++}`;
-    });
-    whereClauses.push(`${idField} IN (${idPlaceholders.join(', ')})`);
+    const ids = String(objectIds).split(',')
+      .map(id => Number(id.trim()))
+      .filter(n => Number.isFinite(n) && Number.isInteger(n));
+
+    if (ids.length > 0) {
+      const idPlaceholders = ids.map(id => {
+        params.push(id);
+        return `$${paramIndex++}`;
+      });
+      whereClauses.push(`${idField} IN (${idPlaceholders.join(', ')})`);
+    } else {
+      // All IDs were invalid — return empty result set
+      whereClauses.push('1 = 0');
+    }
   }
 
   if (geometry) {

@@ -7,7 +7,6 @@ const { getGeometryQuery } = require("./geometry");
 const { getGeometryToGeoJSON } = require("./geometryFormat");
 const {
   validateFieldName,
-  escapeSqlString,
   checkWhereClauseSafety,
   validateInteger,
 } = require("./sanitize");
@@ -132,19 +131,21 @@ function buildSqlWhere({
     sqlWhereComponents.push(where);
   }
 
-  // Add objectIds filter
+  // Add objectIds filter (IDs must be integers — used as ArcGIS OBJECTIDs)
   if (idField && objectIds) {
-    const objectIdsComponent = objectIds
+    const ids = objectIds
       .split(",")
-      .map((val) => {
-        const trimmed = val.trim();
-        return isNaN(trimmed) ? `'${escapeSqlString(trimmed)}'` : trimmed;
-      })
-      .join(",")
-      .replace(/^/, `${idField} IN (`)
-      .replace(/$/, ")");
+      .map((val) => val.trim())
+      .filter((val) => val !== "")
+      .map(Number)
+      .filter((n) => Number.isFinite(n) && Number.isInteger(n));
 
-    sqlWhereComponents.push(objectIdsComponent);
+    if (ids.length > 0) {
+      sqlWhereComponents.push(`${idField} IN (${ids.join(",")})`);
+    } else {
+      // All IDs were invalid — return empty result set
+      sqlWhereComponents.push("1 = 0");
+    }
   }
 
   // Add spatial filter
@@ -182,32 +183,22 @@ function buildSqlWhere({
 function buildOrderByClause(orderByFields) {
   if (!orderByFields) return "";
 
-  try {
-    // Split by comma for multiple fields
-    const fields = orderByFields.split(",").map((f) => f.trim());
+  const fields = orderByFields.split(",").map((f) => f.trim());
 
-    // Process each field
-    const sanitizedFields = fields.map((field) => {
-      // Split field and direction
-      const parts = field.split(/\s+/);
-      const fieldName = parts[0];
-      const direction = parts[1]?.toUpperCase();
+  const sanitizedFields = fields.map((field) => {
+    const parts = field.split(/\s+/);
+    const fieldName = parts[0];
+    const direction = parts[1]?.toUpperCase();
 
-      // Sanitize field name (allow alphanumeric and underscore)
-      const sanitizedField = fieldName.replace(/[^a-zA-Z0-9_]/g, "");
+    // Sanitize field name (allow alphanumeric and underscore)
+    const sanitizedField = fieldName.replace(/[^a-zA-Z0-9_]/g, "");
 
-      // Validate direction
-      const validDirection =
-        direction === "DESC" ? "DESC" : "ASC";
+    const validDirection = direction === "DESC" ? "DESC" : "ASC";
 
-      return `${sanitizedField} ${validDirection}`;
-    });
+    return `${sanitizedField} ${validDirection}`;
+  });
 
-    return ` ORDER BY ${sanitizedFields.join(", ")}`;
-  } catch (error) {
-    console.error("Error building ORDER BY clause:", error);
-    return "";
-  }
+  return ` ORDER BY ${sanitizedFields.join(", ")}`;
 }
 
 /**

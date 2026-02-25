@@ -145,13 +145,11 @@ describe("sql", () => {
       ).to.throw(/Invalid field name/);
     });
 
-    it("should escape single quotes in objectIds", () => {
+    it("should reject non-integer objectIds (injection attempt returns empty)", () => {
       const sql = build({ objectIds: "'; DROP TABLE x--" });
-      // The input single quote is doubled by escapeSqlString: ' -> ''
-      // Then wrapped in quotes: '''' ; DROP TABLE x--'
-      // This breaks the injection — the attacker's quote is neutralized.
-      expect(sql).to.include("'''");
-      expect(sql).to.include("OBJECTID IN (");
+      // Non-integer values are filtered out; with no valid IDs, 1=0 ensures empty result
+      expect(sql).to.include("1 = 0");
+      expect(sql).to.not.include("DROP");
     });
 
     it("should reject DDL in where clause", () => {
