@@ -42,7 +42,7 @@ nodejs-provider/
       lakebasePool.js         # PostgreSQL connection pooling (pg module)
       lakebaseQuery.js        # PostGIS SELECT query builder
       editSql.js              # INSERT/UPDATE/DELETE SQL builders
-  test/                       # 307 unit tests (mocha + chai)
+  test/                       # 309 unit tests (mocha + chai)
 ```
 
 ## Setup
@@ -56,6 +56,8 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 - **Optional**: Databricks Lakebase instance — needed for low-latency serving or feature editing
 
 ### 1. Install dependencies
+
+Run this **on the ArcGIS Server machine** — native modules (`@databricks/sql` uses Apache Arrow C++ bindings) must be compiled for the target OS. Installing on macOS and copying to Linux (or vice versa) will fail.
 
 ```bash
 cd nodejs-provider
@@ -107,8 +109,12 @@ cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOK
 **Option B: Admin REST API** (works with any ArcGIS Server)
 
 ```bash
-# 1. Export the .cdpk (via CDF CLI or copy from build)
-cdf export databricks-geospatial-provider
+# 1. Build the .cdpk — must include node_modules compiled on the target OS
+#    (zip the provider directory on the ArcGIS Server machine after running npm install there)
+cd nodejs-provider
+zip -r databricks-geospatial-provider.cdpk \
+  cdconfig.json package.json package-lock.json src/ node_modules/ \
+  -x '*.env*' 'test/*' '*.md'
 
 # 2. Upload the .cdpk
 curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
@@ -121,6 +127,8 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
   -H "Referer: https://your-server:6443" \
   --data-urlencode "id=ITEM_ID_FROM_STEP_2"
 ```
+
+> **After registration:** The `.cdpk` extraction replaces the provider directory contents. If you use a `.env` file for credentials, re-create it in the provider directory after registration.
 
 ---
 
@@ -163,7 +171,7 @@ Editing is enabled at the provider level (`editingEnabled: true` in `cdconfig.js
 
 Create services via the **Admin REST API** (`createService` endpoint). All service parameters from `cdconfig.json` must be included — use empty strings for parameters that don't apply.
 
-> **Note:** There is no `cdf create-service` CLI command. Services are created through the Admin REST API or the ArcGIS Server Admin Directory UI.
+> **Note:** There is no `cdf create-service` CLI command. Services are created through the Admin REST API or the ArcGIS Server Admin Directory UI. Services may be created in a STOPPED state — start them via the Admin API (`services/<name>.FeatureServer/start`) or the ArcGIS Server Manager UI.
 
 #### Lakehouse service (read-only)
 
@@ -396,7 +404,7 @@ WHERE latitude IS NOT NULL;
 ```bash
 cd nodejs-provider
 npm test
-# 307 passing
+# 309 passing
 ```
 
 ## Table Requirements
@@ -418,9 +426,10 @@ npm test
 
 ## Troubleshooting
 
-**Service won't start / "Provider not found"**
+**Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
 - Verify the `.cdpk` was registered: check ArcGIS Server Manager > Site > Extensions
 - Confirm `dataProviderName` matches the registered provider name exactly
+- **Native module mismatch**: if you built `node_modules` on a different OS (e.g., macOS) than the ArcGIS Server (e.g., Linux/Windows), the provider will fail to load. Run `npm install` on the ArcGIS Server machine itself.
 - Check ArcGIS Server logs: `<install>/server/usr/logs/`
 
 **No data returned (empty features array)**
