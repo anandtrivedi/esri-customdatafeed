@@ -78,3 +78,6 @@ docs/
 
 # Provider packages
 *.cdpk
+
+# Demo app (contains copied provider source and credentials)
+app/
