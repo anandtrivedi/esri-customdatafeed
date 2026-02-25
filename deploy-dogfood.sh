@@ -43,7 +43,8 @@ SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/nul
 SSH_CMD="ssh $SSH_OPTS ${SSH_USER}@${IP}"
 
 ADMIN_USER="siteadmin"
-ADMIN_PASS='***REDACTED***'
+ADMIN_PASS="${ADMIN_PASS:?Set ADMIN_PASS env var}"
+ADMIN_PASS_ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${ADMIN_PASS}'))")
 SERVER_URL="https://localhost:6443"
 
 # Databricks credentials
@@ -113,9 +114,9 @@ WAITEOF
 # ---------------------------------------------------------------------------
 get_remote_token() {
     local token
-    token=$($SSH_CMD 'bash -s' << 'TOKEOF'
+    token=$($SSH_CMD 'bash -s' << TOKEOF
 curl -sk 'https://localhost:6443/arcgis/admin/generateToken' \
-  -d 'username=siteadmin&password=***REDACTED***&client=referer&referer=https://localhost:6443&f=json' \
+  -d 'username=${ADMIN_USER}&password=${ADMIN_PASS_ENCODED}&client=referer&referer=https://localhost:6443&f=json' \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))"
 TOKEOF
     )
@@ -149,11 +150,11 @@ wait_for_server 120
 
 info "Creating new ArcGIS Server site..."
 # The cluster= empty parameter is critical to avoid "Index 0 out of bounds" error.
-SITE_RESULT=$($SSH_CMD 'bash -s' << 'SITEEOF'
+SITE_RESULT=$($SSH_CMD 'bash -s' << SITEEOF
 curl -sk 'https://localhost:6443/arcgis/admin/createNewSite' \
   --max-time 180 \
-  --data-urlencode 'username=siteadmin' \
-  --data-urlencode 'password=***REDACTED***' \
+  --data-urlencode 'username=${ADMIN_USER}' \
+  --data-urlencode 'password=${ADMIN_PASS}' \
   --data-urlencode 'configStoreConnection={"type":"FILESYSTEM","connectionString":"/opt/arcgis/server/usr/config-store"}' \
   --data-urlencode 'directories={"directories":[{"name":"arcgisoutput","physicalPath":"/opt/arcgis/server/usr/directories/arcgisoutput","dirType":"OUTPUT"},{"name":"arcgiscache","physicalPath":"/opt/arcgis/server/usr/directories/arcgiscache","dirType":"CACHE"},{"name":"arcgisjobs","physicalPath":"/opt/arcgis/server/usr/directories/arcgisjobs","dirType":"JOBS"},{"name":"arcgissystem","physicalPath":"/opt/arcgis/server/usr/directories/arcgissystem","dirType":"SYSTEM"}]}' \
   --data-urlencode 'cluster=' \
@@ -241,7 +242,7 @@ cat > /tmp/cdf-env << 'INNEREOF'
 # Databricks Connection
 DATABRICKS_SERVER_HOSTNAME=e2-demo-field-eng.cloud.databricks.com
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/0024da9c9e9a4dc2
-DATABRICKS_ACCESS_TOKEN=${DATABRICKS_TOKEN}
+DATABRICKS_ACCESS_TOKEN=${DB_TOKEN}
 
 # Lakebase — auto-generates OAuth tokens from PAT
 LAKEBASE_INSTANCE_NAME=cdf-geospatial
@@ -264,28 +265,28 @@ ENVEOF
 ok ".env created"
 
 info "Setting env vars in init_user_param.sh..."
-$SSH_CMD "bash -s" << 'INITEOF'
+$SSH_CMD "bash -s" << INITEOF
 INIT_FILE='/opt/arcgis/server/usr/init_user_param.sh'
-sudo touch "$INIT_FILE"
-sudo chown arcgis:arcgis "$INIT_FILE"
-sudo chmod 755 "$INIT_FILE"
+sudo touch "\$INIT_FILE"
+sudo chown arcgis:arcgis "\$INIT_FILE"
+sudo chmod 755 "\$INIT_FILE"
 
 # Remove any old Databricks/Lakebase exports
-sudo sed -i '/DATABRICKS_SERVER_HOSTNAME/d' "$INIT_FILE"
-sudo sed -i '/DATABRICKS_HTTP_PATH/d' "$INIT_FILE"
-sudo sed -i '/DATABRICKS_ACCESS_TOKEN/d' "$INIT_FILE"
-sudo sed -i '/LAKEBASE_INSTANCE_NAME/d' "$INIT_FILE"
-sudo sed -i '/# Databricks CDF Provider/d' "$INIT_FILE"
+sudo sed -i '/DATABRICKS_SERVER_HOSTNAME/d' "\$INIT_FILE"
+sudo sed -i '/DATABRICKS_HTTP_PATH/d' "\$INIT_FILE"
+sudo sed -i '/DATABRICKS_ACCESS_TOKEN/d' "\$INIT_FILE"
+sudo sed -i '/LAKEBASE_INSTANCE_NAME/d' "\$INIT_FILE"
+sudo sed -i '/# Databricks CDF Provider/d' "\$INIT_FILE"
 
 # Append the new exports
 {
     echo ''
     echo '# Databricks CDF Provider environment variables'
-    echo 'export DATABRICKS_SERVER_HOSTNAME=e2-demo-field-eng.cloud.databricks.com'
-    echo 'export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/0024da9c9e9a4dc2'
-    echo 'export DATABRICKS_ACCESS_TOKEN=${DATABRICKS_TOKEN}'
-    echo 'export LAKEBASE_INSTANCE_NAME=cdf-geospatial'
-} | sudo tee -a "$INIT_FILE" > /dev/null
+    echo 'export DATABRICKS_SERVER_HOSTNAME=${DB_HOSTNAME}'
+    echo 'export DATABRICKS_HTTP_PATH=${DB_HTTP_PATH}'
+    echo 'export DATABRICKS_ACCESS_TOKEN=${DB_TOKEN}'
+    echo 'export LAKEBASE_INSTANCE_NAME=${LAKEBASE_INSTANCE}'
+} | sudo tee -a "\$INIT_FILE" > /dev/null
 INITEOF
 ok "init_user_param.sh updated"
 
