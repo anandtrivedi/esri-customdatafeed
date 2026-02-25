@@ -51,9 +51,20 @@ const config = {
   }
 };
 
-// Validate required configuration
-if (!config.databricks.serverHostname || !config.databricks.httpPath || !config.databricks.accessToken) {
-  throw new Error('Missing required Databricks configuration. Set DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH, and DATABRICKS_ACCESS_TOKEN environment variables.');
+function hasLakehouseConfig() {
+  return Boolean(
+    config.databricks.serverHostname &&
+    config.databricks.httpPath &&
+    config.databricks.accessToken
+  );
+}
+
+function assertLakehouseConfig() {
+  if (!hasLakehouseConfig()) {
+    throw new Error(
+      'Lakehouse queries require DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH, and DATABRICKS_ACCESS_TOKEN environment variables.'
+    );
+  }
 }
 
 // Initialize audit logger
@@ -92,8 +103,9 @@ class Model {
     this.logger.info(`  Simple auth: ${process.env.ENABLE_SIMPLE_AUTH === 'true' ? 'ENABLED (testing only)' : 'disabled'}`);
     this.logger.info(`  Audit log: ${process.env.ENABLE_AUDIT_LOG === 'true' ? 'ENABLED' : 'disabled'}`);
 
-    // Initialize connection pool on first instantiation
-    if (!Model.poolInitialized) {
+    // Initialize Lakehouse pool only when Lakehouse env is configured.
+    // Lakebase-only deployments can start without DATABRICKS_HTTP_PATH.
+    if (!Model.poolInitialized && hasLakehouseConfig()) {
       initializePool(config.databricks, {
         min: parseInt(process.env.DATABRICKS_POOL_MIN) || 2,
         max: parseInt(process.env.DATABRICKS_POOL_MAX) || 10,
@@ -101,6 +113,8 @@ class Model {
         connectionTimeout: 30000
       });
       Model.poolInitialized = true;
+    } else if (!Model.poolInitialized) {
+      this.logger.info('  Lakehouse pool: deferred (missing Lakehouse env config)');
     }
   }
 
@@ -182,6 +196,22 @@ class Model {
     // Route to Lakebase if this is an editable service
     if (req.params.lakebaseHost) {
       return this.getDataFromLakebase(req, callback);
+    }
+
+    // Lakehouse path requires Databricks SQL warehouse connection details.
+    try {
+      assertLakehouseConfig();
+      if (!Model.poolInitialized) {
+        initializePool(config.databricks, {
+          min: parseInt(process.env.DATABRICKS_POOL_MIN) || 2,
+          max: parseInt(process.env.DATABRICKS_POOL_MAX) || 10,
+          idleTimeout: 60000,
+          connectionTimeout: 30000
+        });
+        Model.poolInitialized = true;
+      }
+    } catch (configError) {
+      return callback(configError);
     }
 
     // Convert boolean strings to actual booleans
@@ -539,6 +569,9 @@ class Model {
     if (!sourceConfig.lakebaseTable) {
       return callback(new Error('lakebaseTable service parameter is required for editable services'));
     }
+    if (!req.params.lakebaseDatabase) {
+      return callback(new Error('lakebaseDatabase service parameter is required for editable services'));
+    }
 
     const lakebaseConfig = {
       host: req.params.lakebaseHost,
@@ -556,7 +589,13 @@ class Model {
 
     this.logger.info(`Query ${requestCounter}: Executing Lakebase query...`);
 
-    const { sql, params } = buildLakebaseSelectSql(geoserviceParams, sourceConfig);
+    let sql, params;
+    try {
+      ({ sql, params } = buildLakebaseSelectSql(geoserviceParams, sourceConfig));
+    } catch (validationError) {
+      this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
+      return callback(validationError);
+    }
     this.logger.info(`Query ${requestCounter}: ${sql.substring(0, 150)}...`);
 
     pool.query(sql, params)
@@ -650,6 +689,9 @@ class Model {
       }
       if (!table) {
         throw new Error('Editing requires lakebaseTable service parameter');
+      }
+      if (!req.params.lakebaseDatabase) {
+        throw new Error('Editing requires lakebaseDatabase service parameter');
       }
 
       const lakebaseConfig = {

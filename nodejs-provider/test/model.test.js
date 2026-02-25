@@ -571,6 +571,25 @@ describe("model", () => {
       });
     });
 
+    it("should fail when lakebaseDatabase is missing", (done) => {
+      const model = new Model();
+      const req = {
+        query: {},
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseTable: "cell_towers",
+          // lakebaseDatabase missing
+        },
+        ip: "127.0.0.1",
+      };
+
+      model.getData(req, (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("lakebaseDatabase");
+        done();
+      });
+    });
+
     it("should reject invalid geometryColumn for Lakebase path", (done) => {
       const model = new Model();
       const req = {
@@ -785,6 +804,27 @@ describe("model", () => {
       } catch (err) {
         expect(err).to.be.an("error");
         expect(err.message).to.include("lakebaseTable");
+      }
+    });
+
+    it("should fail when lakebaseDatabase is missing", async () => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseTable: "cell_towers",
+          geometryColumn: "geometry",
+          idField: "id",
+        },
+        ip: "127.0.0.1",
+      };
+
+      try {
+        await model.editData(req, { adds: [] });
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("lakebaseDatabase");
       }
     });
 
