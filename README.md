@@ -11,6 +11,10 @@ Choose **Lakehouse** when you need to query large Delta Lake tables directly wit
 
 One provider is registered once. Each Feature Service chooses its backend via service parameters.
 
+## Overview
+
+![CDF Overview — Direct Integration with ArcGIS Enterprise](cdf-overview.png)
+
 ## Architecture
 
 ![CDF Architecture — Databricks + Lakebase](cdf-architecture.png)
