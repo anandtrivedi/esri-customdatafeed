@@ -276,6 +276,27 @@ describe("geometry", () => {
         );
         expect(result).to.include("ST_Transform");
       });
+
+      it("should parse inSR as JSON with top-level wkid (MapViewer format)", () => {
+        const envelope = JSON.stringify({
+          xmin: -7514065.628,
+          ymin: 5009377.085,
+          xmax: -5009377.085,
+          ymax: 7514065.628,
+        });
+        const result = getGeometryQuery(
+          envelope,
+          defaultField,
+          JSON.stringify({ wkid: 102100, latestWkid: 3857, xyTolerance: 0.001 }),
+          "esriSpatialRelIntersects",
+          4326,
+          "GEOMETRY"
+        );
+        expect(result).to.include("ST_Transform");
+        expect(result).to.include("ST_SetSRID");
+        expect(result).to.include("102100");
+        expect(result).to.not.include("NaN");
+      });
     });
   });
 

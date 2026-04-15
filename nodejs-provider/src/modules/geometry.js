@@ -141,7 +141,7 @@ function getSpatialReference(rawGeomFilter, inSR, dbSR) {
     if (typeof inSR === "string") {
       try {
         const parsed = JSON.parse(inSR);
-        return parsed.spatialReference?.wkid || parseInt(inSR);
+        return parsed.spatialReference?.wkid || parsed.wkid || parseInt(inSR, 10);
       } catch {
         return parseInt(inSR);
       }
