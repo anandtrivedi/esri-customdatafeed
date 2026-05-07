@@ -1,7 +1,7 @@
 # Multi-Workspace + Multi-Warehouse Support — Implementation Plan
 
 > Branch: `multi-workspace` (renamed from `multi-warehouse`)
-> Status: planning complete, no code yet
+> Status: **Steps 1–4 implemented and tested locally**; Step 5 (live two-workspace deploy) is the next thing to do
 > Last updated: 2026-05-07
 
 ## Goal
@@ -321,11 +321,135 @@ Larger than the original `multi-warehouse` estimate (~150 LOC) but covers both b
 
 Estimated time: 4-6 focused hours.
 
-## When resuming
+## Status checklist
 
-When picking this up cold:
+- [x] Step 1 — workspaceResolver.js + 20 unit tests
+- [x] Step 2 — connectionPool.js refactor (keyed map, drops initializePool, supports OAuth M2M) + 9 unit tests + model.js Lakehouse plumbing
+- [x] Step 3 — lakebasePool.js refactor (workspace-aware token minting, OAuth M2M support) + model.js Lakebase plumbing
+- [x] Step 4 — cdconfig.json service params, MULTI_WORKSPACE.md customer guide, .databrickscfg.example, .env.example, .gitignore
+- [ ] Step 5 — live two-workspace deploy on EC2 (see "Two-workspace test recipe" below)
+
+339 tests passing locally as of last commit.
+
+## Two-workspace test recipe (for Step 5)
+
+Goal: prove that one ArcGIS Server can expose `atrivedi` data from **aws-e2** and **dod-fe** workspaces concurrently via two Feature Services.
+
+### 1. Inventory data (do this first, in browser)
+
+In each workspace, find a geospatial table in the `atrivedi` catalog and note:
+- table name (`atrivedi.<schema>.<table>`)
+- geometry column + format (WKT/WKB/GeoJSON/native GEOMETRY)
+- id column
+- SRID
+- a sample query you know returns rows (for sanity-check after deploy)
+
+Write these into a quick scratch file before SSH'ing.
+
+### 2. Create credentials per workspace
+
+Choose one path per workspace:
+- **PAT (quickest):** Settings → Developer → Access tokens. Create one with reasonable lifetime.
+- **OAuth M2M (recommended):** Account console → Service principals → create SP, generate OAuth secret, assign SP to workspace, grant `CAN_USE` on the SQL warehouse.
+
+### 3. Build `.databrickscfg` for the ArcGIS Server box
+
+Copy `nodejs-provider/.databrickscfg.example` into the format below and fill in:
+
+```ini
+[DEFAULT]
+host  = <existing-default-workspace>.cloud.databricks.com
+token = <existing-pat>
+
+[AWS_E2]
+host  = <aws-e2-host>.cloud.databricks.com
+token = dapi...
+# OR for OAuth M2M:
+# client_id     = ...
+# client_secret = ...
+
+[DOD_FE]
+host  = <dod-fe-host>.cloud.databricks.com
+token = dapi...
+```
+
+### 4. Deploy the new .cdpk to the EC2 instance
+
+EC2: `i-099fa2d69b5a03312` at `18.234.193.124`. SSH per memory note.
+
+```bash
+# 1. Sync the branch to the box
+ssh -i ~/.ssh/AnandTrivediRSAPEM.pem ubuntu@18.234.193.124
+cd ~/esri-customdatafeed
+git fetch
+git checkout multi-workspace
+git pull
+
+# 2. Place .databrickscfg
+sudo cp /tmp/.databrickscfg /opt/arcgis/server/usr/.databrickscfg
+sudo chown arcgis:arcgis /opt/arcgis/server/usr/.databrickscfg
+sudo chmod 600 /opt/arcgis/server/usr/.databrickscfg
+
+# 3. Add DATABRICKS_CONFIG_FILE to init script
+sudo nano /opt/arcgis/server/usr/init_user_param.sh
+# Add: export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
+
+# 4. Build .cdpk on the server (Linux node_modules — see memory)
+cd nodejs-provider
+/opt/arcgis/server/framework/runtime/node/bin/node \
+  /opt/arcgis/server/framework/runtime/node/lib/node_modules/npm/bin/npm-cli.js install
+# package as .cdpk per existing build instructions
+
+# 5. Re-register the provider via Admin REST or CLI
+# 6. Restart ArcGIS Server
+sudo /opt/arcgis/server/startserver.sh   # or systemd equivalent
+
+# 7. Re-create .env in the registered provider directory (cdpk extraction wipes it)
+```
+
+### 5. Create two Feature Services
+
+Use the existing CDF service-creation pattern from memory. Key params:
+
+```json
+"serviceParameters": {
+  "workspace":         "AWS_E2",
+  "warehouseHttpPath": "/sql/1.0/warehouses/<aws-e2-warehouse-id>",
+  "tableName":         "atrivedi.<schema>.<table>",
+  "geometryColumn":    "geometry",
+  "idField":           "id",
+  "srid":              "4326"
+}
+```
+
+Same JSON for DOD_FE service with that workspace's warehouse path and table.
+
+### 6. Smoke test
+
+Hit each service:
+```bash
+curl -k 'https://18.234.193.124:6443/arcgis/rest/services/AwsE2_Layer/FeatureServer/0/query?where=1=1&outFields=*&returnCountOnly=true&f=json'
+curl -k 'https://18.234.193.124:6443/arcgis/rest/services/DodFe_Layer/FeatureServer/0/query?where=1=1&outFields=*&returnCountOnly=true&f=json'
+```
+
+Both should return non-zero counts. Tail logs and confirm two distinct pool init lines:
+```
+[Pool AWS_E2|/sql/1.0/warehouses/...] Initialized
+[Pool DOD_FE|/sql/1.0/warehouses/...] Initialized
+```
+
+### 7. Negative test
+
+Create a service with `workspace: "NONEXISTENT"`. Expect a clear error from the resolver.
+
+### 8. Regression check
+
+Confirm an existing service (no `workspace` param) still works — should fall back to env-default.
+
+## When resuming this branch
+
 1. Verify branch: `git branch --show-current` should be `multi-workspace`.
-2. Read this document end-to-end.
-3. Start with **Step 1 — `workspaceResolver.js` + tests**. That's a zero-impact starting point that builds confidence.
-4. Verify ArcGIS Server user / `.databrickscfg` location on the staging EC2 before doing manual tests in Step 5.
+2. Read this document end-to-end (especially Status + Test recipe).
+3. Run `cd nodejs-provider && npm test` — should be 339 passing.
+4. If implementing Step 5, follow the test recipe above.
 5. Don't push to GitHub until explicitly asked (per project memory).
