@@ -1,32 +1,29 @@
 # Sample .databrickscfg for multi-workspace CDF provider deployment.
 #
-# Copy to ~/.databrickscfg (or DATABRICKS_CONFIG_FILE), chmod 600, and
-# fill in your workspace hosts and credentials.
+# This file holds credentials for ADDITIONAL Databricks workspaces beyond
+# your default one. Your default workspace is configured via env vars in
+# .env (DATABRICKS_SERVER_HOSTNAME + DATABRICKS_ACCESS_TOKEN).
 #
-# Each profile defines ONE workspace. Reference profiles by name from
-# the `workspace` service parameter when creating Feature Services.
+# Copy to ~/.databrickscfg (or wherever DATABRICKS_CONFIG_FILE points),
+# chmod 600, fill in your hosts and credentials. Reference profiles by
+# name from each Feature Service's `workspace` service parameter.
 #
-# See README.md "Multiple Databricks Workspaces" section for full setup, including service principal
-# creation for OAuth M2M.
+# See README.md "Multiple Databricks Workspaces" section for full setup,
+# including service principal creation for OAuth M2M.
+#
+# Each profile picks ONE auth mode — either token (PAT) or
+# client_id + client_secret (OAuth M2M), not both. Different profiles
+# can use different modes; mix freely.
 
 # -----------------------------------------------------------------
-# Default profile — used by services that don't specify a `workspace`
-# service param. Optional: env vars (DATABRICKS_SERVER_HOSTNAME +
-# DATABRICKS_ACCESS_TOKEN) act as a synthesized default if omitted here.
-# -----------------------------------------------------------------
-[DEFAULT]
-host  = your-default-workspace.cloud.databricks.com
-token = dapiXXXXXXXXXXXXXXXXX
-
-# -----------------------------------------------------------------
-# Named workspace profile — PAT auth
+# Named workspace — PAT auth
 # -----------------------------------------------------------------
 [WORKSPACE_A]
 host  = workspace-a.cloud.databricks.com
 token = dapiAAAAAAAAAAAAAAAAA
 
 # -----------------------------------------------------------------
-# Named workspace profile — OAuth M2M (recommended for production)
+# Named workspace — OAuth M2M (recommended for production)
 #
 # Create a service principal in the workspace, generate an OAuth secret,
 # and grant the SP CAN_USE on the SQL warehouse + database access on
@@ -36,3 +33,17 @@ token = dapiAAAAAAAAAAAAAAAAA
 host          = workspace-b.cloud.databricks.com
 client_id     = <service-principal-client-id>
 client_secret = <service-principal-secret>
+
+# -----------------------------------------------------------------
+# OPTIONAL — [DEFAULT] profile
+# -----------------------------------------------------------------
+# You only need this if you want default-workspace credentials in this
+# file instead of env vars. The CDF provider checks .databrickscfg
+# [DEFAULT] before falling back to DATABRICKS_SERVER_HOSTNAME +
+# DATABRICKS_ACCESS_TOKEN env vars. Most setups leave this out and use
+# env vars for the default; uncomment if you'd rather everything live
+# in this one file.
+#
+# [DEFAULT]
+# host  = your-default-workspace.cloud.databricks.com
+# token = dapiXXXXXXXXXXXXXXXXX
