@@ -70,77 +70,33 @@ npm install    # Installs both @databricks/sql and pg drivers
 
 ### 2. Configure Databricks Connection
 
-Set three env vars in `.env`:
-
 ```bash
 cp .env.example .env
 ```
 
+**For a single workspace with a PAT (Personal Access Token)**, set three env vars in `.env`:
+
 ```bash
 DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here   # Personal Access Token (PAT)
+DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here
 ```
 
-That's it for a single-workspace setup. Other env vars in `.env.example` (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason to change them.
+Other env vars in `.env.example` (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
 
-> **Multiple Databricks workspaces, or want OAuth M2M / service-principal auth?** See [Multiple Databricks Workspaces](#multiple-databricks-workspaces) below — that section explains the `.databrickscfg`-based setup that complements the env vars above.
+**For multiple workspaces, or for service-principal OAuth M2M auth instead of a PAT**, skip these env vars (leave them empty or remove the lines) and use the `.databrickscfg`-based setup in the next section.
 
-### 3. Configure Lakebase (optional)
+### Multiple Databricks Workspaces
 
-Skip this step if you don't need editing or low-latency serving.
+Skip this if you have one workspace and a PAT — the env vars in Step 2 already cover you. Otherwise, this is where you set up `.databrickscfg`.
 
-For Lakebase services, you don't need any extra setup here. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
+> **OAuth M2M (Machine-to-Machine):** instead of a PAT tied to a user, the provider authenticates as a Databricks **service principal** — a machine identity. You give it a `client_id` + `client_secret` (one-time setup in the Databricks account console). Databricks exchanges those for short-lived access tokens that auto-refresh. Recommended pattern for production servers.
 
-To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in `.env.example`.
-
-### 4. Package and Register Provider
-
-**Option A: CDF CLI** (requires [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/))
-
-```bash
-# From the CDF app directory (created via `cdf createapp`)
-cdf export databricks-geospatial-provider
-cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOKEN
-```
-
-> **Self-signed certs:** If ArcGIS Server uses a self-signed certificate, set `export NODE_TLS_REJECT_UNAUTHORIZED=0` or `export NODE_EXTRA_CA_CERTS=/path/to/cert.pem` ([Esri docs](https://developers.arcgis.com/enterprise-sdk/guide/custom-data-feeds/custom-data-feeds-troubleshooting/)). If you still get "Invalid token, ClientID does not match", use Option B — the CDF CLI sends tokens as `Authorization: Bearer` which can conflict with ArcGIS referer-based token validation.
-
-**Option B: Admin REST API** (works with any ArcGIS Server)
-
-```bash
-# 1. Build the .cdpk — must include node_modules compiled on the target OS
-#    (zip the provider directory on the ArcGIS Server machine after running npm install there)
-cd nodejs-provider
-zip -r databricks-geospatial-provider.cdpk \
-  cdconfig.json package.json package-lock.json src/ node_modules/ \
-  -x '*.env*' 'test/*' '*.md'
-
-# 2. Upload the .cdpk
-curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
-  -H "Referer: https://your-server:6443" \
-  -F "itemFile=@databricks-geospatial-provider.cdpk"
-# Returns: {"status":"success","item":{"itemID":"i..."}}
-
-# 3. Register using the itemID from step 2
-curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=TOKEN&f=json" \
-  -H "Referer: https://your-server:6443" \
-  --data-urlencode "id=ITEM_ID_FROM_STEP_2"
-```
-
-> **After registration:** The `.cdpk` extraction replaces the provider directory contents. If you use a `.env` file for credentials, re-create it in the provider directory after registration.
-
----
-
-## Multiple Databricks Workspaces
-
-One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` service parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
+One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
 
 > Each Feature Service hits exactly one workspace. Cross-workspace data federation (joining tables across workspaces in a single layer) is a Databricks-side problem — solve it via Unity Catalog federation or Delta Sharing, then point the service at the resulting view.
 
-**You can skip this section** if you only have one Databricks workspace — env vars (`DATABRICKS_SERVER_HOSTNAME`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_ACCESS_TOKEN`) define an implicit default profile and existing services keep working unchanged.
-
-### `.databrickscfg` profiles
+#### `.databrickscfg` profiles
 
 The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`). Same format used by the Databricks CLI / Asset Bundles / dbt.
 
@@ -165,7 +121,7 @@ client_secret = <service-principal-secret>
 
 Add as many profiles as you have workspaces — three workspaces → three profiles, ten → ten. No upper bound.
 
-### Default profile resolution
+#### Default profile resolution
 
 When a service is created **without** a `workspace` parameter:
 
@@ -173,9 +129,9 @@ When a service is created **without** a `workspace` parameter:
 2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
 3. If neither is set, the service errors at request time.
 
-This keeps single-workspace deployments zero-config — env vars alone work, no `.databrickscfg` required.
+If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env vars in `.env` empty — the resolver picks `.databrickscfg` `[DEFAULT]` first, and empty env vars avoid any chance of mismatched credentials.
 
-### Example: three workspaces, mixed auth modes
+#### Example: three workspaces, mixed auth modes
 
 You can have any number of workspaces with any combination of auth modes. Here's a three-workspace setup mixing PAT, PAT, and OAuth M2M:
 
@@ -230,7 +186,7 @@ That's three Feature Services worth of credentials. Each service references the 
 
 For OAuth M2M Lakebase services, the provider exchanges `client_id`/`client_secret` at the workspace's `/oidc/v1/token` endpoint, then uses that token to call `/api/2.0/database/credentials` for the Lakebase OAuth token. Auto-refreshes ~5 minutes before expiry.
 
-### Service principal setup (OAuth M2M)
+#### Service principal setup (OAuth M2M)
 
 Per workspace, in the Databricks account console:
 
@@ -242,7 +198,7 @@ Per workspace, in the Databricks account console:
 
 Reference: [Authorize service principal access with OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
 
-### `.databrickscfg` location on ArcGIS Server
+#### `.databrickscfg` location on ArcGIS Server
 
 ArcGIS Server runs as the `arcgis` OS user — `~/.databrickscfg` resolves to its home directory, which may not be set up. **Set `DATABRICKS_CONFIG_FILE` explicitly** in the init script:
 
@@ -253,7 +209,7 @@ export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
 
 Then `chmod 600` and `chown arcgis:arcgis` the file. Restart ArcGIS Server.
 
-### Verifying it works
+#### Verifying it works
 
 Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/logs/*/server/server-*.log`) will show distinct connection pools per workspace:
 
@@ -262,7 +218,7 @@ Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/lo
 [Pool WORKSPACE_B|/sql/1.0/warehouses/xyz789] Initialized (min: 2, max: 10)
 ```
 
-### Multi-workspace troubleshooting
+#### Multi-workspace troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -273,7 +229,49 @@ Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/lo
 | `Source IP address X is blocked by Databricks IP ACL` | The ArcGIS Server's outbound IP isn't on that workspace's IP allowlist (workspace-level setting in Databricks, separate from CDF) |
 | Single-workspace deployment regressed after upgrade | Env vars `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` missing from init script |
 
----
+### 3. Configure Lakebase (optional)
+
+Skip this step if you don't need editing or low-latency serving.
+
+For Lakebase services, you don't need any extra setup here. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
+
+To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in `.env.example`.
+
+### 4. Package and Register Provider
+
+**Option A: CDF CLI** (requires [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/))
+
+```bash
+# From the CDF app directory (created via `cdf createapp`)
+cdf export databricks-geospatial-provider
+cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOKEN
+```
+
+> **Self-signed certs:** If ArcGIS Server uses a self-signed certificate, set `export NODE_TLS_REJECT_UNAUTHORIZED=0` or `export NODE_EXTRA_CA_CERTS=/path/to/cert.pem` ([Esri docs](https://developers.arcgis.com/enterprise-sdk/guide/custom-data-feeds/custom-data-feeds-troubleshooting/)). If you still get "Invalid token, ClientID does not match", use Option B — the CDF CLI sends tokens as `Authorization: Bearer` which can conflict with ArcGIS referer-based token validation.
+
+**Option B: Admin REST API** (works with any ArcGIS Server)
+
+```bash
+# 1. Build the .cdpk — must include node_modules compiled on the target OS
+#    (zip the provider directory on the ArcGIS Server machine after running npm install there)
+cd nodejs-provider
+zip -r databricks-geospatial-provider.cdpk \
+  cdconfig.json package.json package-lock.json src/ node_modules/ \
+  -x '*.env*' 'test/*' '*.md'
+
+# 2. Upload the .cdpk
+curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
+  -H "Referer: https://your-server:6443" \
+  -F "itemFile=@databricks-geospatial-provider.cdpk"
+# Returns: {"status":"success","item":{"itemID":"i..."}}
+
+# 3. Register using the itemID from step 2
+curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=TOKEN&f=json" \
+  -H "Referer: https://your-server:6443" \
+  --data-urlencode "id=ITEM_ID_FROM_STEP_2"
+```
+
+> **After registration:** The `.cdpk` extraction replaces the provider directory contents. If you use a `.env` file for credentials, re-create it in the provider directory after registration.
 
 ## Creating Feature Services
 
