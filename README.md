@@ -81,6 +81,9 @@ There are two config surfaces with different jobs. You'll always want `.env` for
 - **One workspace?** Use `.env` alone. Set the three `DATABRICKS_*` credential vars below — done. Skip `.databrickscfg` entirely.
 - **Multiple workspaces (or service-principal OAuth M2M)?** Put each workspace's credentials in `.databrickscfg`. Keep `.env` for operational tuning. The credential env vars in `.env` become the implicit "default" profile (used by services that don't set a `workspace` param). If all your services explicitly set `workspace`, you can leave the credential env vars empty.
 
+**How URLs map across config files:**
+`.env` carries exactly **one** Databricks URL (`DATABRICKS_SERVER_HOSTNAME`) — that's the default workspace. Every additional workspace lives as a named profile in `.databrickscfg`, and each profile has its own `host` line. When a Feature Service is created, its `workspace` parameter picks which profile to use, and the SQL or Lakebase connection uses that profile's host. So 5 workspaces = 5 profiles in `.databrickscfg`; the URL constraint in `.env` only applies to the implicit default.
+
 #### `.env` (always)
 
 ```bash
@@ -178,7 +181,11 @@ client_id     = <service-principal-client-id>
 client_secret = <service-principal-secret>
 ```
 
-A profile must use one auth mode per workspace, not both. Mixing PAT and OAuth fields in the same profile errors at request time.
+**Two rules per profile, total flexibility across profiles:**
+- Each profile uses **one** auth mode — either `token` (PAT) **or** `client_id` + `client_secret` (OAuth M2M). Mixing both in one profile errors at request time.
+- Different profiles can use different auth modes independently. All-PAT, all-OAuth M2M, or any mix all work — the provider picks per-profile.
+
+Add as many profiles as you have workspaces — three workspaces → three profiles, ten → ten. No upper bound.
 
 ### Default profile resolution
 
@@ -190,39 +197,54 @@ When a service is created **without** a `workspace` parameter:
 
 This keeps single-workspace deployments zero-config — env vars alone work, no `.databrickscfg` required.
 
-### Two-workspace example
+### Example: three workspaces, mixed auth modes
+
+You can have any number of workspaces with any combination of auth modes. Here's a three-workspace setup mixing PAT, PAT, and OAuth M2M:
 
 `.databrickscfg`:
 ```ini
 [WORKSPACE_A]
 host  = workspace-a.cloud.databricks.com
-token = dapiXXXXXX
+token = dapiAAAAAA
 
 [WORKSPACE_B]
-host          = workspace-b.cloud.databricks.com
+host  = workspace-b.cloud.databricks.com
+token = dapiBBBBBB
+
+[WORKSPACE_C]
+host          = workspace-c.cloud.databricks.com
 client_id     = <sp-client-id>
 client_secret = <sp-secret>
 ```
 
-Two Feature Services on the same ArcGIS Server, one pointing at each workspace — set the `workspace` (and `warehouseHttpPath` for Lakehouse) service parameters when calling `createService`. Full createService payload examples are in [Creating Feature Services](#creating-feature-services) below.
+That's three Feature Services worth of credentials. Each service references the right profile via its `workspace` parameter. Full createService payload examples are in [Creating Feature Services](#creating-feature-services) below.
 
 ```json
-// Service A → workspace A (Lakehouse)
+// Service 1 → workspace A (Lakehouse, PAT)
 "serviceParameters": {
   "workspace": "WORKSPACE_A",
-  "warehouseHttpPath": "/sql/1.0/warehouses/abc123",
+  "warehouseHttpPath": "/sql/1.0/warehouses/aaaa",
   "tableName": "catalog_a.geo.cells",
   "geometryColumn": "geometry",
   "idField": "id"
 }
 
-// Service B → workspace B (Lakebase)
+// Service 2 → workspace B (Lakehouse, PAT)
 "serviceParameters": {
   "workspace": "WORKSPACE_B",
-  "lakebaseHost": "instance-bbb.database.cloud.databricks.com",
+  "warehouseHttpPath": "/sql/1.0/warehouses/bbbb",
+  "tableName": "catalog_b.geo.parcels",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+
+// Service 3 → workspace C (Lakebase, OAuth M2M)
+"serviceParameters": {
+  "workspace": "WORKSPACE_C",
+  "lakebaseHost": "instance-cccc.database.cloud.databricks.com",
   "lakebasePort": "5432",
   "lakebaseDatabase": "geospatial",
-  "lakebaseTable": "parcels",
+  "lakebaseTable": "buildings",
   "geometryColumn": "geometry",
   "idField": "id"
 }
