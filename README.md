@@ -106,14 +106,21 @@ If you have more than one Databricks workspace, set up `.databrickscfg` with one
 
 ### 3. Configure Lakebase (optional)
 
-Lakebase connection details (host, port, database) are set per-service — see Service Parameters below.
+Skip this step if you don't need editable services. Lakebase config splits across three places, none of which is a single "Lakebase config file":
 
-Authentication is automatic: the provider generates short-lived OAuth tokens using your `DATABRICKS_ACCESS_TOKEN` (PAT) via the Databricks `/api/2.0/database/credentials` endpoint. No additional configuration needed.
+| Setting | Where | Notes |
+|---|---|---|
+| Connection details — `lakebaseHost`, `lakebasePort`, `lakebaseDatabase`, `lakebaseSchema`, `lakebaseTable` | **Service parameters** (per-service in `createService`) | Different services = different Lakebase tables. See [Service Parameters](#creating-feature-services). |
+| Authentication — who mints the Lakebase OAuth token | **The workspace profile** the service resolves to (`.env` default or `.databrickscfg` named profile, picked by the service's `workspace` param) | Provider calls `/api/2.0/database/credentials` on that workspace using the profile's PAT or OAuth M2M creds; tokens auto-refresh ~5 min before expiry. |
+| Tuning / overrides — `LAKEBASE_USER`, `LAKEBASE_INSTANCE_NAME`, `LAKEBASE_PASSWORD`, `LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY` | **`.env` (env vars)** | Optional. Override defaults or use a static password instead of auto-generated OAuth tokens. |
 
-To use a static password instead of auto-generated tokens:
+**Most setups need nothing here** beyond setting the connection details on each editable service — auth is automatic via the workspace profile.
+
+If you want to bypass automatic token minting and use a fixed credential (testing, CI):
 
 ```bash
-export LAKEBASE_PASSWORD="your-oauth-token-or-password"
+# .env
+LAKEBASE_PASSWORD=your-oauth-token-or-password
 ```
 
 ### 4. Package and Register Provider
