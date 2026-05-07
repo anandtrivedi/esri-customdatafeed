@@ -86,15 +86,13 @@ Other env vars in `.env.example` (pool sizes, query timeouts, audit log) are ope
 
 **For multiple workspaces, or for service-principal OAuth M2M auth instead of a PAT**, skip these env vars (leave them empty or remove the lines) and use the `.databrickscfg`-based setup in the next section.
 
-### Multiple Databricks Workspaces
+### Multiple Workspaces or OAuth M2M
 
 Skip this if you have one workspace and a PAT — the env vars in Step 2 already cover you. Otherwise, this is where you set up `.databrickscfg`.
 
 > **OAuth M2M (Machine-to-Machine):** instead of a PAT tied to a user, the provider authenticates as a Databricks **service principal** — a machine identity. You give it a `client_id` + `client_secret` (one-time setup in the Databricks account console). Databricks exchanges those for short-lived access tokens that auto-refresh. Recommended pattern for production servers.
 
 One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
-
-> Each Feature Service hits exactly one workspace. Cross-workspace data federation (joining tables across workspaces in a single layer) is a Databricks-side problem — solve it via Unity Catalog federation or Delta Sharing, then point the service at the resulting view.
 
 #### `.databrickscfg` profiles
 
@@ -119,7 +117,7 @@ client_secret = <service-principal-secret>
 - Each profile uses **one** auth mode — either `token` (PAT) **or** `client_id` + `client_secret` (OAuth M2M). Mixing both in one profile errors at request time.
 - Different profiles can use different auth modes independently. All-PAT, all-OAuth M2M, or any mix all work — the provider picks per-profile.
 
-Add as many profiles as you have workspaces — three workspaces → three profiles, ten → ten. No upper bound.
+Add a profile per workspace — no upper limit.
 
 #### Default profile resolution
 
@@ -129,32 +127,14 @@ When a service is created **without** a `workspace` parameter:
 2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
 3. If neither is set, the service errors at request time.
 
-If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env vars in `.env` empty — the resolver picks `.databrickscfg` `[DEFAULT]` first, and empty env vars avoid any chance of mismatched credentials.
+If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env vars in `.env` empty (or delete those lines) — the resolver picks `.databrickscfg` `[DEFAULT]` first, and empty/missing env vars avoid any chance of mismatched credentials.
 
-#### Example: three workspaces, mixed auth modes
+#### Example: services pointing at different workspaces
 
-You can have any number of workspaces with any combination of auth modes. Here's a three-workspace setup mixing PAT, PAT, and OAuth M2M:
-
-`.databrickscfg`:
-```ini
-[WORKSPACE_A]
-host  = workspace-a.cloud.databricks.com
-token = dapiAAAAAA
-
-[WORKSPACE_B]
-host  = workspace-b.cloud.databricks.com
-token = dapiBBBBBB
-
-[WORKSPACE_C]
-host          = workspace-c.cloud.databricks.com
-client_id     = <sp-client-id>
-client_secret = <sp-secret>
-```
-
-That's three Feature Services worth of credentials. Each service references the right profile via its `workspace` parameter. Full createService payload examples are in [Creating Feature Services](#creating-feature-services) below.
+Using the two profiles from the snippets above (`[WORKSPACE_A]` PAT and `[WORKSPACE_B]` OAuth M2M), here's how a Lakehouse service and a Lakebase service register against different workspaces — full createService payloads are in [Creating Feature Services](#creating-feature-services) below.
 
 ```json
-// Service 1 → workspace A (Lakehouse, PAT)
+// Lakehouse service → workspace A (PAT)
 "serviceParameters": {
   "workspace": "WORKSPACE_A",
   "warehouseHttpPath": "/sql/1.0/warehouses/aaaa",
@@ -163,19 +143,10 @@ That's three Feature Services worth of credentials. Each service references the 
   "idField": "id"
 }
 
-// Service 2 → workspace B (Lakehouse, PAT)
+// Lakebase service → workspace B (OAuth M2M)
 "serviceParameters": {
   "workspace": "WORKSPACE_B",
-  "warehouseHttpPath": "/sql/1.0/warehouses/bbbb",
-  "tableName": "catalog_b.geo.parcels",
-  "geometryColumn": "geometry",
-  "idField": "id"
-}
-
-// Service 3 → workspace C (Lakebase, OAuth M2M)
-"serviceParameters": {
-  "workspace": "WORKSPACE_C",
-  "lakebaseHost": "instance-cccc.database.cloud.databricks.com",
+  "lakebaseHost": "instance-bbbb.database.cloud.databricks.com",
   "lakebasePort": "5432",
   "lakebaseDatabase": "geospatial",
   "lakebaseTable": "buildings",
@@ -281,7 +252,7 @@ You register the provider once, then create individual Feature Services. Each se
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `workspace` | No | env-default | Profile name from `.databrickscfg` (see [Multiple Databricks Workspaces](#multiple-databricks-workspaces)). If empty, uses `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` env vars. |
+| `workspace` | No | env-default | Profile name from `.databrickscfg` (see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m)). If empty, uses `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` env vars. |
 | `warehouseHttpPath` | No | `DATABRICKS_HTTP_PATH` env | SQL warehouse HTTP path (e.g. `/sql/1.0/warehouses/abc123`). Override per-service if you have multiple warehouses. |
 | `tableName` | Yes | - | Fully qualified table name (`catalog.schema.table`) |
 | `geometryColumn` | No | `geometry` | Name of the geometry column |
@@ -297,7 +268,7 @@ Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `workspace` | No | env-default | Profile name from `.databrickscfg` — see [Multiple Databricks Workspaces](#multiple-databricks-workspaces). Determines which workspace mints Lakebase OAuth tokens. |
+| `workspace` | No | env-default | Profile name from `.databrickscfg` — see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m). Determines which workspace mints Lakebase OAuth tokens. |
 | `lakebaseHost` | Yes | - | Lakebase instance hostname |
 | `lakebasePort` | No | `5432` | PostgreSQL port |
 | `lakebaseDatabase` | Yes | - | Database name |

@@ -8,7 +8,7 @@
 # chmod 600, fill in your hosts and credentials. Reference profiles by
 # name from each Feature Service's `workspace` service parameter.
 #
-# See README.md "Multiple Databricks Workspaces" section for full setup,
+# See README.md "Multiple Workspaces or OAuth M2M" section for full setup,
 # including service principal creation for OAuth M2M.
 #
 # Each profile picks ONE auth mode — either token (PAT) or
