@@ -1,10 +1,11 @@
 const { expect } = require("chai");
 const proxyquire = require("proxyquire").noCallThru();
 
-// Stub connectionPool to avoid real Databricks connections
+// Stub connectionPool to avoid real Databricks connections.
+// New signature: getPool(workspaceConfig, httpPath, options) — args ignored by the stub.
 const connectionPoolStub = {
-  initializePool: () => {},
   getPool: () => ({
+    poolLabel: () => "test-pool",
     acquire: async () => ({
       id: "test-conn",
       session: {
@@ -17,6 +18,18 @@ const connectionPoolStub = {
     release: () => {},
   }),
   shutdownPool: async () => {},
+  getAllPoolStats: () => [],
+};
+
+// Stub workspaceResolver so tests don't depend on .databrickscfg or env-var nuances
+const workspaceResolverStub = {
+  resolveWorkspace: (alias) => ({
+    workspaceAlias: alias || "default",
+    hostname: "test-host.databricks.com",
+    authType: "pat",
+    token: "test-token",
+  }),
+  clearProfileCache: () => {},
 };
 
 // Configurable lakebase pool stub for edit/read tests
@@ -68,6 +81,7 @@ describe("model", () => {
     Model = proxyquire("../src/model", {
       "./modules/connectionPool": connectionPoolStub,
       "./modules/lakebasePool": lakebasePoolStub,
+      "./modules/workspaceResolver": workspaceResolverStub,
       dotenv: dotenvStub,
     });
   });

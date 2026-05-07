@@ -29,10 +29,11 @@ const {
   resolveGeometryFormat,
   validateIdentifier,
 } = require('./modules');
-const { initializePool, getPool, shutdownPool } = require('./modules/connectionPool');
+const { getPool, shutdownPool } = require('./modules/connectionPool');
 const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
 const { buildInsertSql, buildUpdateSql, buildDeleteSql } = require('./modules/editSql');
 const { buildLakebaseSelectSql } = require('./modules/lakebaseQuery');
+const { resolveWorkspace } = require('./modules/workspaceResolver');
 
 // Table name validation: must be catalog.schema.table or just a table name
 const TABLE_NAME_PATTERN = /^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+){0,2}$/;
@@ -51,20 +52,17 @@ const config = {
   }
 };
 
-function hasLakehouseConfig() {
-  return Boolean(
-    config.databricks.serverHostname &&
-    config.databricks.httpPath &&
-    config.databricks.accessToken
-  );
-}
-
-function assertLakehouseConfig() {
-  if (!hasLakehouseConfig()) {
+// Resolve the workspace + warehouse for a given service request.
+// Throws with a clear message if neither a profile nor env-default is configured.
+function resolveLakehouseTarget(req) {
+  const workspaceConfig = resolveWorkspace(req.params.workspace);
+  const httpPath = req.params.warehouseHttpPath || process.env.DATABRICKS_HTTP_PATH;
+  if (!httpPath) {
     throw new Error(
-      'Lakehouse queries require DATABRICKS_SERVER_HOSTNAME, DATABRICKS_HTTP_PATH, and DATABRICKS_ACCESS_TOKEN environment variables.'
+      'No SQL warehouse configured. Set req.params.warehouseHttpPath on the service or DATABRICKS_HTTP_PATH env var.'
     );
   }
+  return { workspaceConfig, httpPath };
 }
 
 // Initialize audit logger
@@ -92,30 +90,14 @@ try {
  * The logger routes to ArcGIS Server's log system when deployed.
  */
 class Model {
-  static poolInitialized = false;
-
   constructor({ logger } = {}) {
     this.logger = logger || console;
 
     this.logger.info('Databricks Custom Data Provider initialized');
-    this.logger.info(`  Server: ${config.databricks.serverHostname}`);
     this.logger.info(`  User auth: ${process.env.ENABLE_USER_AUTH === 'true' ? 'ENABLED' : 'disabled'}`);
     this.logger.info(`  Simple auth: ${process.env.ENABLE_SIMPLE_AUTH === 'true' ? 'ENABLED (testing only)' : 'disabled'}`);
     this.logger.info(`  Audit log: ${process.env.ENABLE_AUDIT_LOG === 'true' ? 'ENABLED' : 'disabled'}`);
-
-    // Initialize Lakehouse pool only when Lakehouse env is configured.
-    // Lakebase-only deployments can start without DATABRICKS_HTTP_PATH.
-    if (!Model.poolInitialized && hasLakehouseConfig()) {
-      initializePool(config.databricks, {
-        min: parseInt(process.env.DATABRICKS_POOL_MIN) || 2,
-        max: parseInt(process.env.DATABRICKS_POOL_MAX) || 10,
-        idleTimeout: 60000,
-        connectionTimeout: 30000
-      });
-      Model.poolInitialized = true;
-    } else if (!Model.poolInitialized) {
-      this.logger.info('  Lakehouse pool: deferred (missing Lakehouse env config)');
-    }
+    this.logger.info('  Lakehouse pools: lazily created per (workspace, warehouse) on first use');
   }
 
   /**
@@ -198,18 +180,11 @@ class Model {
       return this.getDataFromLakebase(req, callback);
     }
 
-    // Lakehouse path requires Databricks SQL warehouse connection details.
+    // Resolve the workspace + warehouse for this service request.
+    // Pool is created lazily on the first call per (workspace, warehouse) pair.
+    let lakehouseTarget;
     try {
-      assertLakehouseConfig();
-      if (!Model.poolInitialized) {
-        initializePool(config.databricks, {
-          min: parseInt(process.env.DATABRICKS_POOL_MIN) || 2,
-          max: parseInt(process.env.DATABRICKS_POOL_MAX) || 10,
-          idleTimeout: 60000,
-          connectionTimeout: 30000
-        });
-        Model.poolInitialized = true;
-      }
+      lakehouseTarget = resolveLakehouseTarget(req);
     } catch (configError) {
       return callback(configError);
     }
@@ -273,10 +248,15 @@ class Model {
         );
 
     // Use connection pool (works with serverless and classic SQL warehouses)
-    const pool = getPool();
+    const pool = getPool(lakehouseTarget.workspaceConfig, lakehouseTarget.httpPath, {
+      min: parseInt(process.env.DATABRICKS_POOL_MIN) || 2,
+      max: parseInt(process.env.DATABRICKS_POOL_MAX) || 10,
+      idleTimeout: 60000,
+      connectionTimeout: 30000,
+    });
     let connection = null;
 
-    this.logger.info(`Query ${requestCounter}: Acquiring connection from pool...`);
+    this.logger.info(`Query ${requestCounter}: Acquiring connection from pool ${pool.poolLabel()}...`);
 
     // Acquire connection and execute query
     pool.acquire()
