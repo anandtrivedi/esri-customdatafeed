@@ -2,58 +2,155 @@
  * lakebasePool.js
  * Manages PostgreSQL connection pools for Lakebase (Databricks managed PostgreSQL)
  *
- * Each editable service gets its own pool keyed by "host:port/database".
- * Uses the `pg` module's built-in Pool (connection pooling, health checks, etc.).
+ * Each editable service gets its own pool keyed by
+ *   "${workspaceAlias}|${host}:${port}/${database}"
  *
- * Auth: Automatically generates short-lived OAuth tokens via the Databricks
- * /api/2.0/database/credentials endpoint using DATABRICKS_ACCESS_TOKEN (PAT).
- * Falls back to LAKEBASE_PASSWORD env var if set explicitly.
+ * Auth: Mints short-lived Lakebase OAuth tokens via the Databricks
+ * /api/2.0/database/credentials endpoint. The credentials API itself is
+ * authenticated using the resolved workspace profile:
+ *   - PAT profiles:        Authorization: Bearer <pat>
+ *   - OAuth M2M profiles:  exchange client_id+client_secret at /oidc/v1/token
+ *                          for a workspace API token, then use as Bearer.
+ *
+ * Falls back to LAKEBASE_PASSWORD env var if set explicitly (skips token
+ * generation entirely; useful for static test creds).
  */
 
 const { Pool } = require('pg');
 const https = require('https');
 const pkg = require('../../package.json');
 
-// Map of serviceKey -> { pool, tokenExpiry }
+// Map of serviceKey -> { pool, tokenExpiry, workspaceConfig }
 const pools = {};
 
-// Cache of hostname -> instanceName (doesn't change, so cache permanently)
+// Cache of `${workspaceAlias}|${host}` -> instanceName (doesn't change per workspace)
 const instanceNameCache = {};
+
+// Cache of workspaceAlias -> { token, expiry } for OAuth M2M workspace API tokens
+const workspaceApiTokenCache = {};
 
 // Token buffer: refresh 5 minutes before expiry
 const TOKEN_BUFFER_MS = 5 * 60 * 1000;
 
 /**
- * Build a unique key for a Lakebase service configuration.
+ * Build a unique pool key. Includes workspace alias so two services
+ * pointing at the same Lakebase host but using different workspace
+ * profiles get distinct pools (extreme edge case but safe).
  */
 function serviceKey(config) {
-  return `${config.host}:${config.port || 5432}/${config.database}`;
+  const alias = config.workspaceConfig ? config.workspaceConfig.workspaceAlias : 'default';
+  return `${alias}|${config.host}:${config.port || 5432}/${config.database}`;
+}
+
+function instanceCacheKey(workspaceAlias, host) {
+  return `${workspaceAlias}|${host}`;
+}
+
+/**
+ * Mint an OAuth M2M workspace API token via /oidc/v1/token.
+ * Uses the Client Credentials grant. Tokens cached per workspaceAlias.
+ */
+function mintWorkspaceApiToken(workspaceConfig) {
+  return new Promise((resolve, reject) => {
+    const credentials = Buffer.from(
+      `${workspaceConfig.clientId}:${workspaceConfig.clientSecret}`
+    ).toString('base64');
+
+    const body = 'grant_type=client_credentials&scope=all-apis';
+
+    const options = {
+      hostname: workspaceConfig.hostname,
+      port: 443,
+      path: '/oidc/v1/token',
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${credentials}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      rejectUnauthorized: false,
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            const parsed = JSON.parse(data);
+            if (!parsed.access_token) {
+              reject(new Error(`OAuth M2M response missing access_token: ${data.substring(0, 200)}`));
+              return;
+            }
+            const expiresInMs = (parsed.expires_in || 3600) * 1000;
+            resolve({ token: parsed.access_token, expiry: Date.now() + expiresInMs });
+          } catch (e) {
+            reject(new Error(`Failed to parse OAuth M2M response: ${e.message}`));
+          }
+        } else {
+          reject(new Error(`OAuth M2M token endpoint returned ${res.statusCode}: ${data.substring(0, 300)}`));
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      reject(new Error(`OAuth M2M token request failed: ${err.message}`));
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Get a workspace API bearer token for the given workspace profile.
+ * For PAT profiles, returns the static token. For OAuth M2M profiles,
+ * mints (and caches) a short-lived workspace token.
+ */
+async function getWorkspaceApiToken(workspaceConfig) {
+  if (workspaceConfig.authType === 'pat') {
+    return workspaceConfig.token;
+  }
+
+  const alias = workspaceConfig.workspaceAlias;
+  const cached = workspaceApiTokenCache[alias];
+  if (cached && Date.now() < (cached.expiry - TOKEN_BUFFER_MS)) {
+    return cached.token;
+  }
+
+  console.log(`[LakebasePool] Minting OAuth M2M workspace token for "${alias}"...`);
+  const fresh = await mintWorkspaceApiToken(workspaceConfig);
+  workspaceApiTokenCache[alias] = fresh;
+  console.log(`[LakebasePool] Workspace token cached for "${alias}", expires in ${Math.round((fresh.expiry - Date.now()) / 60000)}m`);
+  return fresh.token;
 }
 
 /**
  * Make an HTTPS request to the Databricks workspace API.
+ *
+ * @param {string} method - HTTP method
+ * @param {string} path   - API path (e.g. /api/2.0/database/instances)
+ * @param {object|null} body - Optional JSON body
+ * @param {object} workspaceConfig - Resolved workspace profile (hostname + auth)
  * @returns {Promise<object>} Parsed JSON response
  */
-function databricksApiRequest(method, path, body) {
+async function databricksApiRequest(method, path, body, workspaceConfig) {
+  if (!workspaceConfig) {
+    throw new Error('databricksApiRequest requires a workspaceConfig');
+  }
+
+  const apiToken = await getWorkspaceApiToken(workspaceConfig);
+
   return new Promise((resolve, reject) => {
-    const workspaceHost = process.env.DATABRICKS_SERVER_HOSTNAME;
-    const pat = process.env.DATABRICKS_ACCESS_TOKEN;
-
-    if (!workspaceHost || !pat) {
-      return reject(new Error(
-        'DATABRICKS_SERVER_HOSTNAME and DATABRICKS_ACCESS_TOKEN are required for Lakebase token generation'
-      ));
-    }
-
     const bodyStr = body ? JSON.stringify(body) : null;
 
     const options = {
-      hostname: workspaceHost,
+      hostname: workspaceConfig.hostname,
       port: 443,
       path,
       method,
       headers: {
-        'Authorization': `Bearer ${pat}`,
+        'Authorization': `Bearer ${apiToken}`,
         'Content-Type': 'application/json',
       },
       rejectUnauthorized: false,
@@ -91,40 +188,43 @@ function databricksApiRequest(method, path, body) {
 /**
  * Look up the Lakebase instance name from its hostname.
  * The hostname format is: instance-{uuid}.database.cloud.databricks.com
- * We list all instances and match by read_write_dns.
+ * We list all instances visible to this workspace and match by read_write_dns.
  */
-async function resolveInstanceName(host) {
-  if (instanceNameCache[host]) {
-    return instanceNameCache[host];
+async function resolveInstanceName(host, workspaceConfig) {
+  const cacheKey = instanceCacheKey(workspaceConfig.workspaceAlias, host);
+  if (instanceNameCache[cacheKey]) {
+    return instanceNameCache[cacheKey];
   }
 
-  const response = await databricksApiRequest('GET', '/api/2.0/database/instances');
+  const response = await databricksApiRequest('GET', '/api/2.0/database/instances', null, workspaceConfig);
   const instances = response.database_instances || [];
 
   for (const inst of instances) {
     if (inst.read_write_dns === host || inst.read_only_dns === host) {
-      instanceNameCache[host] = inst.name;
+      instanceNameCache[cacheKey] = inst.name;
       return inst.name;
     }
   }
 
   throw new Error(
-    `No Lakebase instance found with hostname "${host}". ` +
+    `No Lakebase instance found with hostname "${host}" in workspace "${workspaceConfig.workspaceAlias}". ` +
     'Set LAKEBASE_PASSWORD env var for manual auth, or add LAKEBASE_INSTANCE_NAME.'
   );
 }
 
 /**
  * Generate a fresh Lakebase database credential via Databricks REST API.
- *
- * @param {string} instanceName - Lakebase instance name
- * @returns {Promise<{token: string, expiration_time: string}>}
  */
-async function generateDatabaseCredential(instanceName) {
-  const result = await databricksApiRequest('POST', '/api/2.0/database/credentials', {
-    request_id: `cdf-${Date.now()}`,
-    instance_names: [instanceName],
-  });
+async function generateDatabaseCredential(instanceName, workspaceConfig) {
+  const result = await databricksApiRequest(
+    'POST',
+    '/api/2.0/database/credentials',
+    {
+      request_id: `cdf-${Date.now()}`,
+      instance_names: [instanceName],
+    },
+    workspaceConfig
+  );
 
   if (!result.token) {
     throw new Error(`No token in credential response: ${JSON.stringify(result).substring(0, 200)}`);
@@ -135,35 +235,31 @@ async function generateDatabaseCredential(instanceName) {
 
 /**
  * Get a fresh Lakebase password. Tries auto-generation first, falls back to env var.
- *
- * @param {string} host - Lakebase hostname
- * @returns {Promise<{password: string, expiry: number|null}>}
  */
-async function getLakebasePassword(host) {
-  // If LAKEBASE_PASSWORD is explicitly set, use it (static token or native password)
+async function getLakebasePassword(host, workspaceConfig) {
   if (process.env.LAKEBASE_PASSWORD) {
     return { password: process.env.LAKEBASE_PASSWORD, expiry: null };
   }
 
-  // Resolve instance name from hostname (or use env var override)
-  const instanceName = process.env.LAKEBASE_INSTANCE_NAME || await resolveInstanceName(host);
+  if (!workspaceConfig) {
+    throw new Error('Cannot generate Lakebase token: workspaceConfig is required');
+  }
 
-  console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}"...`);
-  const cred = await generateDatabaseCredential(instanceName);
+  const instanceName = process.env.LAKEBASE_INSTANCE_NAME || await resolveInstanceName(host, workspaceConfig);
+
+  console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
+  const cred = await generateDatabaseCredential(instanceName, workspaceConfig);
   const expiry = cred.expiration_time
     ? new Date(cred.expiration_time).getTime()
-    : Date.now() + 55 * 60 * 1000; // Default 55 min if no expiry provided
+    : Date.now() + 55 * 60 * 1000;
 
   console.log(`[LakebasePool] Token generated, expires: ${cred.expiration_time || 'unknown'}`);
   return { password: cred.token, expiry };
 }
 
-/**
- * Check if a pool's token is expired or about to expire.
- */
 function isTokenExpired(key) {
   const entry = pools[key];
-  if (!entry || !entry.tokenExpiry) return false; // No expiry tracked = static password
+  if (!entry || !entry.tokenExpiry) return false;
   return Date.now() >= (entry.tokenExpiry - TOKEN_BUFFER_MS);
 }
 
@@ -172,6 +268,7 @@ function isTokenExpired(key) {
  * Automatically refreshes expired tokens by recreating the pool.
  *
  * @param {object} config
+ * @param {object} config.workspaceConfig - Resolved workspace profile (required unless LAKEBASE_PASSWORD is set)
  * @param {string} config.host     - Lakebase hostname
  * @param {number} [config.port=5432] - Lakebase port
  * @param {string} config.database - Database name
@@ -181,12 +278,10 @@ function isTokenExpired(key) {
 async function getLakebasePool(config) {
   const key = serviceKey(config);
 
-  // Return existing pool if token is still valid
   if (pools[key] && !isTokenExpired(key)) {
     return pools[key].pool;
   }
 
-  // Token expired — close old pool and create new one
   if (pools[key]) {
     console.log(`[LakebasePool] Token expired for ${key}, refreshing...`);
     try {
@@ -197,7 +292,7 @@ async function getLakebasePool(config) {
     delete pools[key];
   }
 
-  const { password, expiry } = await getLakebasePassword(config.host);
+  const { password, expiry } = await getLakebasePassword(config.host, config.workspaceConfig);
 
   const sslVerify = process.env.LAKEBASE_SSL_VERIFY === 'true';
   const poolMin = parseInt(process.env.LAKEBASE_POOL_MIN) || 2;
@@ -219,14 +314,13 @@ async function getLakebasePool(config) {
 
   pool.on('error', (err) => {
     console.error(`[LakebasePool] Unexpected error on idle client (${key}):`, err.message);
-    // If auth error, invalidate pool so next request triggers refresh
     if (err.message && err.message.includes('authorization')) {
       console.log(`[LakebasePool] Auth error detected, invalidating pool ${key}`);
       delete pools[key];
     }
   });
 
-  pools[key] = { pool, tokenExpiry: expiry };
+  pools[key] = { pool, tokenExpiry: expiry, workspaceConfig: config.workspaceConfig };
   console.log(`[LakebasePool] Pool created for ${key}`);
 
   return pool;

@@ -553,11 +553,18 @@ class Model {
       return callback(new Error('lakebaseDatabase service parameter is required for editable services'));
     }
 
-    const lakebaseConfig = {
-      host: req.params.lakebaseHost,
-      port: parseInt(req.params.lakebasePort) || 5432,
-      database: req.params.lakebaseDatabase,
-    };
+    let lakebaseConfig;
+    try {
+      lakebaseConfig = {
+        workspaceConfig: resolveWorkspace(req.params.workspace),
+        host: req.params.lakebaseHost,
+        port: parseInt(req.params.lakebasePort) || 5432,
+        database: req.params.lakebaseDatabase,
+      };
+    } catch (resolveError) {
+      this.logger.error(`Workspace resolution failed: ${resolveError.message}`);
+      return callback(resolveError);
+    }
 
     let pool;
     try {
@@ -675,6 +682,7 @@ class Model {
       }
 
       const lakebaseConfig = {
+        workspaceConfig: resolveWorkspace(req.params.workspace),
         host: req.params.lakebaseHost,
         port: parseInt(req.params.lakebasePort) || 5432,
         database: req.params.lakebaseDatabase,
