@@ -6,7 +6,7 @@
 # Each profile defines ONE workspace. Reference profiles by name from
 # the `workspace` service parameter when creating Feature Services.
 #
-# See MULTI_WORKSPACE.md for full setup, including service principal
+# See README.md "Multiple Databricks Workspaces" section for full setup, including service principal
 # creation for OAuth M2M.
 
 # -----------------------------------------------------------------
