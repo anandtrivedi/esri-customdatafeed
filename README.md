@@ -70,27 +70,11 @@ npm install    # Installs both @databricks/sql and pg drivers
 
 ### 2. Configure Databricks Connection
 
-There are two config surfaces with different jobs. You'll always want `.env` for operational settings; `.databrickscfg` is only needed if you have more than one workspace.
-
-| File | Job | Required? |
-|---|---|---|
-| **`.env`** | Operational tuning (pool sizes, query timeouts, audit log, Lakebase user) — **and** credentials for the default workspace if you only have one | Yes (always) |
-| **`.databrickscfg`** | Per-workspace credentials when you have multiple workspaces | Only if `>1` workspace |
-
-**Decision rule:**
-- **One workspace?** Use `.env` alone. Set the three `DATABRICKS_*` credential vars below — done. Skip `.databrickscfg` entirely.
-- **Multiple workspaces (or service-principal OAuth M2M)?** Put each workspace's credentials in `.databrickscfg`. Keep `.env` for operational tuning. The credential env vars in `.env` become the implicit "default" profile (used by services that don't set a `workspace` param). If all your services explicitly set `workspace`, you can leave the credential env vars empty.
-
-**How URLs map across config files:**
-`.env` carries exactly **one** Databricks URL (`DATABRICKS_SERVER_HOSTNAME`) — that's the default workspace. Every additional workspace lives as a named profile in `.databrickscfg`, and each profile has its own `host` line. When a Feature Service is created, its `workspace` parameter picks which profile to use, and the SQL or Lakebase connection uses that profile's host. So 5 workspaces = 5 profiles in `.databrickscfg`; the URL constraint in `.env` only applies to the implicit default.
-
-#### `.env` (always)
+Set three env vars in `.env`:
 
 ```bash
 cp .env.example .env
 ```
-
-Edit `.env`. For a single-workspace setup, these three are the only required values:
 
 ```bash
 DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
@@ -98,30 +82,17 @@ DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here   # Personal Access Token (PAT)
 ```
 
-Other env vars in `.env.example` (pool sizing, query timeouts, audit log, Lakebase tuning) apply regardless of single- or multi-workspace setup. Per-table settings (table name, geometry column, etc.) are configured per-service in the Admin REST API, not in `.env` — see [Service Parameters](#creating-feature-services) below.
+That's it for a single-workspace setup. Other env vars in `.env.example` (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason to change them.
 
-#### `.databrickscfg` (only for multiple workspaces)
-
-If you have more than one Databricks workspace, set up `.databrickscfg` with one named profile per workspace. **Full guide:** [Multiple Databricks Workspaces](#multiple-databricks-workspaces).
+> **Multiple Databricks workspaces, or want OAuth M2M / service-principal auth?** See [Multiple Databricks Workspaces](#multiple-databricks-workspaces) below — that section explains the `.databrickscfg`-based setup that complements the env vars above.
 
 ### 3. Configure Lakebase (optional)
 
-Skip this step if you don't need editable services. Lakebase config splits across three places, none of which is a single "Lakebase config file":
+Skip this step if you don't need editing or low-latency serving.
 
-| Setting | Where | Notes |
-|---|---|---|
-| Connection details — `lakebaseHost`, `lakebasePort`, `lakebaseDatabase`, `lakebaseSchema`, `lakebaseTable` | **Service parameters** (per-service in `createService`) | Different services = different Lakebase tables. See [Service Parameters](#creating-feature-services). |
-| Authentication — who mints the Lakebase OAuth token | **The workspace profile** the service resolves to (`.env` default or `.databrickscfg` named profile, picked by the service's `workspace` param) | Provider calls `/api/2.0/database/credentials` on that workspace using the profile's PAT or OAuth M2M creds; tokens auto-refresh ~5 min before expiry. |
-| Tuning / overrides — `LAKEBASE_USER`, `LAKEBASE_INSTANCE_NAME`, `LAKEBASE_PASSWORD`, `LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY` | **`.env` (env vars)** | Optional. Override defaults or use a static password instead of auto-generated OAuth tokens. |
+For Lakebase services, you don't need any extra setup here. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
 
-**Most setups need nothing here** beyond setting the connection details on each editable service — auth is automatic via the workspace profile.
-
-If you want to bypass automatic token minting and use a fixed credential (testing, CI):
-
-```bash
-# .env
-LAKEBASE_PASSWORD=your-oauth-token-or-password
-```
+To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in `.env.example`.
 
 ### 4. Package and Register Provider
 
