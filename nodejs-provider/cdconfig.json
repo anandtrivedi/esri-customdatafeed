@@ -8,6 +8,16 @@
   "properties": {
     "serviceParameters": [
       {
+        "key": "workspace",
+        "label": "Databricks Workspace Profile",
+        "description": "Profile name from .databrickscfg (e.g. 'WORKSPACE_A'). Optional — falls back to env-var-based default. Determines which Databricks workspace this service connects to."
+      },
+      {
+        "key": "warehouseHttpPath",
+        "label": "SQL Warehouse HTTP Path",
+        "description": "Databricks SQL Warehouse HTTP path (e.g. /sql/1.0/warehouses/abc123). Lakehouse services only. Optional — defaults to DATABRICKS_HTTP_PATH env var."
+      },
+      {
         "key": "tableName",
         "label": "Table Name",
         "description": "Fully qualified Databricks table name (catalog.schema.table). Used for read-only services."

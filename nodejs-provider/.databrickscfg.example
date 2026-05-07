@@ -1,0 +1,38 @@
+# Sample .databrickscfg for multi-workspace CDF provider deployment.
+#
+# Copy to ~/.databrickscfg (or DATABRICKS_CONFIG_FILE), chmod 600, and
+# fill in your workspace hosts and credentials.
+#
+# Each profile defines ONE workspace. Reference profiles by name from
+# the `workspace` service parameter when creating Feature Services.
+#
+# See MULTI_WORKSPACE.md for full setup, including service principal
+# creation for OAuth M2M.
+
+# -----------------------------------------------------------------
+# Default profile — used by services that don't specify a `workspace`
+# service param. Optional: env vars (DATABRICKS_SERVER_HOSTNAME +
+# DATABRICKS_ACCESS_TOKEN) act as a synthesized default if omitted here.
+# -----------------------------------------------------------------
+[DEFAULT]
+host  = your-default-workspace.cloud.databricks.com
+token = dapiXXXXXXXXXXXXXXXXX
+
+# -----------------------------------------------------------------
+# Named workspace profile — PAT auth
+# -----------------------------------------------------------------
+[WORKSPACE_A]
+host  = workspace-a.cloud.databricks.com
+token = dapiAAAAAAAAAAAAAAAAA
+
+# -----------------------------------------------------------------
+# Named workspace profile — OAuth M2M (recommended for production)
+#
+# Create a service principal in the workspace, generate an OAuth secret,
+# and grant the SP CAN_USE on the SQL warehouse + database access on
+# any Lakebase instances.
+# -----------------------------------------------------------------
+[WORKSPACE_B]
+host          = workspace-b.cloud.databricks.com
+client_id     = <service-principal-client-id>
+client_secret = <service-principal-secret>
