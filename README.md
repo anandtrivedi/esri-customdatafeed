@@ -113,11 +113,9 @@ client_id     = <service-principal-client-id>
 client_secret = <service-principal-secret>
 ```
 
-**Two rules per profile, total flexibility across profiles:**
 - Each profile uses **one** auth mode — either `token` (PAT) **or** `client_id` + `client_secret` (OAuth M2M). Mixing both in one profile errors at request time.
-- Different profiles can use different auth modes independently. All-PAT, all-OAuth M2M, or any mix all work — the provider picks per-profile.
-
-Add a profile per workspace — no upper limit.
+- Different profiles can use different auth modes independently — all-PAT, all-OAuth M2M, or any mix.
+- Add a profile per workspace — no upper limit.
 
 #### Default profile resolution
 
