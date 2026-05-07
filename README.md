@@ -70,13 +70,24 @@ npm install    # Installs both @databricks/sql and pg drivers
 
 ### 2. Configure Databricks Connection
 
-Create a `.env` file with your Databricks credentials — this is the only config file you need:
+There are two config surfaces with different jobs. You'll always want `.env` for operational settings; `.databrickscfg` is only needed if you have more than one workspace.
+
+| File | Job | Required? |
+|---|---|---|
+| **`.env`** | Operational tuning (pool sizes, query timeouts, audit log, Lakebase user) — **and** credentials for the default workspace if you only have one | Yes (always) |
+| **`.databrickscfg`** | Per-workspace credentials when you have multiple workspaces | Only if `>1` workspace |
+
+**Decision rule:**
+- **One workspace?** Use `.env` alone. Set the three `DATABRICKS_*` credential vars below — done. Skip `.databrickscfg` entirely.
+- **Multiple workspaces (or service-principal OAuth M2M)?** Put each workspace's credentials in `.databrickscfg`. Keep `.env` for operational tuning. The credential env vars in `.env` become the implicit "default" profile (used by services that don't set a `workspace` param). If all your services explicitly set `workspace`, you can leave the credential env vars empty.
+
+#### `.env` (always)
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` — only 3 values are required:
+Edit `.env`. For a single-workspace setup, these three are the only required values:
 
 ```bash
 DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
@@ -84,9 +95,11 @@ DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here   # Personal Access Token (PAT)
 ```
 
-Per-table settings (table name, geometry column, etc.) are configured per-service when you create each Feature Service — not in `.env`. See [Service Parameters](#creating-feature-services) below.
+Other env vars in `.env.example` (pool sizing, query timeouts, audit log, Lakebase tuning) apply regardless of single- or multi-workspace setup. Per-table settings (table name, geometry column, etc.) are configured per-service in the Admin REST API, not in `.env` — see [Service Parameters](#creating-feature-services) below.
 
-> **Have multiple Databricks workspaces?** Skip ahead to [Multiple Databricks Workspaces](#multiple-databricks-workspaces) for the `.databrickscfg`-based setup. The single env-var setup above defines an implicit default profile and is fine for one workspace.
+#### `.databrickscfg` (only for multiple workspaces)
+
+If you have more than one Databricks workspace, set up `.databrickscfg` with one named profile per workspace. **Full guide:** [Multiple Databricks Workspaces](#multiple-databricks-workspaces).
 
 ### 3. Configure Lakebase (optional)
 
