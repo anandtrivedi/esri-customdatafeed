@@ -82,7 +82,7 @@ DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here
 ```
 
-Other env vars in `.env.example` (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
+Other env vars in [`.env.example`](nodejs-provider/.env.example) (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
 
 **For multiple workspaces, or for service-principal OAuth M2M auth instead of a PAT**, skip these env vars (leave them empty or remove the lines) and use the `.databrickscfg`-based setup in the next section.
 
@@ -96,7 +96,7 @@ One CDF provider deployment can serve Feature Services from **multiple Databrick
 
 #### `.databrickscfg` profiles
 
-The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`). Same format used by the Databricks CLI / Asset Bundles / dbt.
+The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`) — same format used by the Databricks CLI / Asset Bundles / dbt. See [`.databrickscfg.example`](nodejs-provider/.databrickscfg.example) for a copy-paste template.
 
 **PAT (Personal Access Token):**
 ```ini
@@ -206,7 +206,7 @@ Skip this step if you don't need editing or low-latency serving.
 
 For Lakebase services, you don't need any extra setup here. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
 
-To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in `.env.example`.
+To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
 
 ### 4. Package and Register Provider
 
@@ -280,7 +280,7 @@ Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 | `srid` | No | `4326` | EPSG SRID of the geometry column |
 | `editingEnabled` | No | `false` | Set to `true` to enable applyEdits (also requires `capabilities: "Query,Editing"`) |
 
-Editing is enabled at the provider level (`editingEnabled: true` in `cdconfig.json`). To actually expose editing on a service, set `"capabilities": "Query,Editing"` and `"editingEnabled": "true"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
+Editing is enabled at the provider level (`editingEnabled: true` in [`cdconfig.json`](nodejs-provider/cdconfig.json)). To actually expose editing on a service, set `"capabilities": "Query,Editing"` and `"editingEnabled": "true"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
 
 ### Examples
 
@@ -449,7 +449,7 @@ Config: Lakebase CU_4 with GIST index, Lakehouse Large Serverless SQL Warehouse 
 | Overlaps | DE-9IM workaround (5 functions) | `ST_Overlaps` (native) |
 | Crosses | DE-9IM workaround (7 functions) | `ST_Crosses` (native) |
 
-Lakebase/PostGIS has all 6 spatial predicates natively with GIST index support. Databricks SQL lacks native `ST_Overlaps` and `ST_Crosses`, so the provider implements DE-9IM equivalents. See `geometry.js` for details.
+Lakebase/PostGIS has all 6 spatial predicates natively with GIST index support. Databricks SQL lacks native `ST_Overlaps` and `ST_Crosses`, so the provider implements DE-9IM equivalents. See [`geometry.js`](nodejs-provider/src/modules/geometry.js) for details.
 
 ---
 
