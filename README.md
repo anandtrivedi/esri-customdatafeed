@@ -86,6 +86,8 @@ DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here   # Personal Access Token (PAT)
 
 Per-table settings (table name, geometry column, etc.) are configured per-service when you create each Feature Service — not in `.env`. See [Service Parameters](#creating-feature-services) below.
 
+> **Have multiple Databricks workspaces?** Skip ahead to [Multiple Databricks Workspaces](#multiple-databricks-workspaces) for the `.databrickscfg`-based setup. The single env-var setup above defines an implicit default profile and is fine for one workspace.
+
 ### 3. Configure Lakebase (optional)
 
 Lakebase connection details (host, port, database) are set per-service — see Service Parameters below.
@@ -133,6 +135,130 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
 ```
 
 > **After registration:** The `.cdpk` extraction replaces the provider directory contents. If you use a `.env` file for credentials, re-create it in the provider directory after registration.
+
+---
+
+## Multiple Databricks Workspaces
+
+One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` service parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
+
+> Each Feature Service hits exactly one workspace. Cross-workspace data federation (joining tables across workspaces in a single layer) is a Databricks-side problem — solve it via Unity Catalog federation or Delta Sharing, then point the service at the resulting view.
+
+**You can skip this section** if you only have one Databricks workspace — env vars (`DATABRICKS_SERVER_HOSTNAME`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_ACCESS_TOKEN`) define an implicit default profile and existing services keep working unchanged.
+
+### `.databrickscfg` profiles
+
+The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`). Same format used by the Databricks CLI / Asset Bundles / dbt.
+
+**PAT (Personal Access Token):**
+```ini
+[WORKSPACE_A]
+host  = workspace-a.cloud.databricks.com
+token = dapiXXXXXXXXXXXXXXXXX
+```
+
+**OAuth M2M (Service Principal — recommended for production):**
+```ini
+[WORKSPACE_B]
+host          = workspace-b.cloud.databricks.com
+client_id     = <service-principal-client-id>
+client_secret = <service-principal-secret>
+```
+
+A profile must use one auth mode per workspace, not both. Mixing PAT and OAuth fields in the same profile errors at request time.
+
+### Default profile resolution
+
+When a service is created **without** a `workspace` parameter:
+
+1. If a `[DEFAULT]` profile exists in `.databrickscfg`, it's used.
+2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
+3. If neither is set, the service errors at request time.
+
+This keeps single-workspace deployments zero-config — env vars alone work, no `.databrickscfg` required.
+
+### Two-workspace example
+
+`.databrickscfg`:
+```ini
+[WORKSPACE_A]
+host  = workspace-a.cloud.databricks.com
+token = dapiXXXXXX
+
+[WORKSPACE_B]
+host          = workspace-b.cloud.databricks.com
+client_id     = <sp-client-id>
+client_secret = <sp-secret>
+```
+
+Two Feature Services on the same ArcGIS Server, one pointing at each workspace — set the `workspace` (and `warehouseHttpPath` for Lakehouse) service parameters when calling `createService`. Full createService payload examples are in [Creating Feature Services](#creating-feature-services) below.
+
+```json
+// Service A → workspace A (Lakehouse)
+"serviceParameters": {
+  "workspace": "WORKSPACE_A",
+  "warehouseHttpPath": "/sql/1.0/warehouses/abc123",
+  "tableName": "catalog_a.geo.cells",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+
+// Service B → workspace B (Lakebase)
+"serviceParameters": {
+  "workspace": "WORKSPACE_B",
+  "lakebaseHost": "instance-bbb.database.cloud.databricks.com",
+  "lakebasePort": "5432",
+  "lakebaseDatabase": "geospatial",
+  "lakebaseTable": "parcels",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+```
+
+For OAuth M2M Lakebase services, the provider exchanges `client_id`/`client_secret` at the workspace's `/oidc/v1/token` endpoint, then uses that token to call `/api/2.0/database/credentials` for the Lakebase OAuth token. Auto-refreshes ~5 minutes before expiry.
+
+### Service principal setup (OAuth M2M)
+
+Per workspace, in the Databricks account console:
+
+1. Create a service principal (or reuse an existing one).
+2. Assign the SP to the workspace.
+3. Generate an OAuth secret — save the `client_id` and `client_secret`.
+4. Grant the SP `CAN_USE` on the SQL warehouse.
+5. For Lakebase: grant the SP database-level access on the Lakebase instance.
+
+Reference: [Authorize service principal access with OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
+
+### `.databrickscfg` location on ArcGIS Server
+
+ArcGIS Server runs as the `arcgis` OS user — `~/.databrickscfg` resolves to its home directory, which may not be set up. **Set `DATABRICKS_CONFIG_FILE` explicitly** in the init script:
+
+```bash
+# /opt/arcgis/server/usr/init_user_param.sh
+export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
+```
+
+Then `chmod 600` and `chown arcgis:arcgis` the file. Restart ArcGIS Server.
+
+### Verifying it works
+
+Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/logs/*/server/server-*.log`) will show distinct connection pools per workspace:
+
+```
+[Pool WORKSPACE_A|/sql/1.0/warehouses/abc123] Initialized (min: 2, max: 10)
+[Pool WORKSPACE_B|/sql/1.0/warehouses/xyz789] Initialized (min: 2, max: 10)
+```
+
+### Multi-workspace troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `Databricks workspace profile "X" not found` | Profile name typo (case-sensitive), wrong `DATABRICKS_CONFIG_FILE`, or file isn't readable by the `arcgis` user |
+| `Profile [X] is ambiguous: defines both PAT and OAuth M2M` | Pick one — comment out either `token` OR `client_id`+`client_secret` |
+| `OAuth M2M token endpoint returned 401` | SP `client_id`/`client_secret` is wrong/revoked, or SP isn't assigned to the workspace |
+| `No Lakebase instance found with hostname X in workspace Y` | The `lakebaseHost` belongs to a different workspace than the `workspace` profile points at |
+| `Source IP address X is blocked by Databricks IP ACL` | The ArcGIS Server's outbound IP isn't on that workspace's IP allowlist (workspace-level setting in Databricks, separate from CDF) |
+| Single-workspace deployment regressed after upgrade | Env vars `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` missing from init script |
 
 ---
 
@@ -268,130 +394,6 @@ The provider routes automatically — no configuration needed beyond service par
 getData(req) → lakebaseHost set? → YES: PostgreSQL path / NO: Databricks SQL path
 editData(req) → Always Lakebase (Lakehouse is read-only)
 ```
-
----
-
-## Multiple Databricks Workspaces
-
-One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` service parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
-
-> Each Feature Service hits exactly one workspace. Cross-workspace data federation (joining tables across workspaces in a single layer) is a Databricks-side problem — solve it via Unity Catalog federation or Delta Sharing, then point the service at the resulting view.
-
-**You can skip this section** if you only have one Databricks workspace — env vars (`DATABRICKS_SERVER_HOSTNAME`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_ACCESS_TOKEN`) define an implicit default profile and existing services keep working unchanged.
-
-### `.databrickscfg` profiles
-
-The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`). Same format used by the Databricks CLI / Asset Bundles / dbt.
-
-**PAT (Personal Access Token):**
-```ini
-[WORKSPACE_A]
-host  = workspace-a.cloud.databricks.com
-token = dapiXXXXXXXXXXXXXXXXX
-```
-
-**OAuth M2M (Service Principal — recommended for production):**
-```ini
-[WORKSPACE_B]
-host          = workspace-b.cloud.databricks.com
-client_id     = <service-principal-client-id>
-client_secret = <service-principal-secret>
-```
-
-A profile must use one auth mode per workspace, not both. Mixing PAT and OAuth fields in the same profile errors at request time.
-
-### Default profile resolution
-
-When a service is created **without** a `workspace` parameter:
-
-1. If a `[DEFAULT]` profile exists in `.databrickscfg`, it's used.
-2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
-3. If neither is set, the service errors at request time.
-
-This keeps single-workspace deployments zero-config — env vars alone work, no `.databrickscfg` required.
-
-### Two-workspace example
-
-`.databrickscfg`:
-```ini
-[WORKSPACE_A]
-host  = workspace-a.cloud.databricks.com
-token = dapiXXXXXX
-
-[WORKSPACE_B]
-host          = workspace-b.cloud.databricks.com
-client_id     = <sp-client-id>
-client_secret = <sp-secret>
-```
-
-Two Feature Services on the same ArcGIS Server, one pointing at each workspace:
-
-```json
-// Service A → workspace A
-"serviceParameters": {
-  "workspace": "WORKSPACE_A",
-  "warehouseHttpPath": "/sql/1.0/warehouses/abc123",
-  "tableName": "catalog_a.geo.cells",
-  "geometryColumn": "geometry",
-  "idField": "id"
-}
-
-// Service B → workspace B (Lakebase)
-"serviceParameters": {
-  "workspace": "WORKSPACE_B",
-  "lakebaseHost": "instance-bbb.database.cloud.databricks.com",
-  "lakebasePort": "5432",
-  "lakebaseDatabase": "geospatial",
-  "lakebaseTable": "parcels",
-  "geometryColumn": "geometry",
-  "idField": "id"
-}
-```
-
-For OAuth M2M Lakebase services, the provider exchanges `client_id`/`client_secret` at the workspace's `/oidc/v1/token` endpoint, then uses that token to call `/api/2.0/database/credentials` for the Lakebase OAuth token. Auto-refreshes ~5 minutes before expiry.
-
-### Service principal setup (OAuth M2M)
-
-Per workspace, in the Databricks account console:
-
-1. Create a service principal (or reuse an existing one).
-2. Assign the SP to the workspace.
-3. Generate an OAuth secret — save the `client_id` and `client_secret`.
-4. Grant the SP `CAN_USE` on the SQL warehouse.
-5. For Lakebase: grant the SP database-level access on the Lakebase instance.
-
-Reference: [Authorize service principal access with OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
-
-### `.databrickscfg` location on ArcGIS Server
-
-ArcGIS Server runs as the `arcgis` OS user — `~/.databrickscfg` resolves to its home directory, which may not be set up. **Set `DATABRICKS_CONFIG_FILE` explicitly** in the init script:
-
-```bash
-# /opt/arcgis/server/usr/init_user_param.sh
-export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
-```
-
-Then `chmod 600` and `chown arcgis:arcgis` the file. Restart ArcGIS Server.
-
-### Verifying it works
-
-Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/logs/*/server/server-*.log`) will show distinct connection pools per workspace:
-
-```
-[Pool WORKSPACE_A|/sql/1.0/warehouses/abc123] Initialized (min: 2, max: 10)
-[Pool WORKSPACE_B|/sql/1.0/warehouses/xyz789] Initialized (min: 2, max: 10)
-```
-
-### Multi-workspace troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `Databricks workspace profile "X" not found` | Profile name typo (case-sensitive), wrong `DATABRICKS_CONFIG_FILE`, or file isn't readable by the `arcgis` user |
-| `Profile [X] is ambiguous: defines both PAT and OAuth M2M` | Pick one — comment out either `token` OR `client_id`+`client_secret` |
-| `OAuth M2M token endpoint returned 401` | SP `client_id`/`client_secret` is wrong/revoked, or SP isn't assigned to the workspace |
-| `No Lakebase instance found with hostname X in workspace Y` | The `lakebaseHost` belongs to a different workspace than the `workspace` profile points at |
-| `Source IP address X is blocked by Databricks IP ACL` | The ArcGIS Server's outbound IP isn't on that workspace's IP allowlist (workspace-level setting in Databricks, separate from CDF) |
-| Single-workspace deployment regressed after upgrade | Env vars `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` missing from init script |
 
 ---
 
