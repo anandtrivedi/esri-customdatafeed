@@ -98,15 +98,13 @@ One CDF provider deployment can serve Feature Services from **multiple Databrick
 
 The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`) — same format used by the Databricks CLI / Asset Bundles / dbt. See [`.databrickscfg.example`](nodejs-provider/.databrickscfg.example) for a copy-paste template.
 
-**PAT (Personal Access Token):**
 ```ini
+# PAT (Personal Access Token)
 [WORKSPACE_A]
 host  = workspace-a.cloud.databricks.com
 token = dapiXXXXXXXXXXXXXXXXX
-```
 
-**OAuth M2M (Service Principal — recommended for production):**
-```ini
+# OAuth M2M (service principal — recommended for production)
 [WORKSPACE_B]
 host          = workspace-b.cloud.databricks.com
 client_id     = <service-principal-client-id>
