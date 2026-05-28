@@ -28,25 +28,27 @@ nodejs-provider/
   cdconfig.json               # CDF provider manifest (registered with ArcGIS Server)
   package.json
   .env.example                # Environment config template
+  .databrickscfg.example      # Multi-workspace profile template
   src/
     index.js                  # Provider entry point
     model.js                  # getData/editData/authorize — routes between backends
     modules/
       # --- Shared ---
+      workspaceResolver.js    # Resolves .databrickscfg profile → workspace + auth config
       sanitize.js             # SQL injection prevention
       translate.js            # Row-to-GeoJSON conversion
       filters.js              # filtersApplied metadata
       auditLog.js             # Query audit logging
       # --- Lakehouse backend ---
-      connectionPool.js       # Databricks SQL connection pooling
+      connectionPool.js       # Databricks SQL connection pooling (keyed per workspace+warehouse)
       sql.js                  # Databricks SQL query builder
       geometry.js             # Spatial filter construction (with DE-9IM workarounds)
       geometryFormat.js       # WKT/WKB/GeoJSON format handling
       # --- Lakebase backend ---
-      lakebasePool.js         # PostgreSQL connection pooling (pg module)
+      lakebasePool.js         # PostgreSQL connection pooling (pg module, workspace-aware)
       lakebaseQuery.js        # PostGIS SELECT query builder
       editSql.js              # INSERT/UPDATE/DELETE SQL builders
-  test/                       # 309 unit tests (mocha + chai)
+  test/                       # 339 unit tests (mocha + chai)
 ```
 
 ## Setup
@@ -578,7 +580,7 @@ WHERE latitude IS NOT NULL;
 ```bash
 cd nodejs-provider
 npm test
-# 309 passing
+# 339 passing
 ```
 
 ## Table Requirements
