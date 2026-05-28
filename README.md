@@ -62,12 +62,15 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 - **Network access from the ArcGIS Server box to your Databricks workspace.** If your workspace has [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list) enabled, allowlist the server's outbound IP — otherwise the first query returns `HTTP 403` with no clear error in the ArcGIS Server UI. Apply this **per workspace** if you're connecting to more than one.
 - **Optional:** A Databricks Lakebase instance — only needed for low-latency serving or feature editing.
 
-### 1. Install dependencies
+### 1. Get the code and install dependencies
 
-Run these commands **on the ArcGIS Server box itself** (the Linux or Windows machine where ArcGIS Server is installed), not on your laptop. The provider includes native modules that must be compiled for the server's OS — building on macOS and copying to a Linux server will fail to load.
+Do this **on the ArcGIS Server box itself** (the Linux or Windows machine where ArcGIS Server is installed), not on your laptop — the provider includes native modules that must compile for the server's OS, otherwise they fail to load at runtime.
+
+The provider's source lives in the **`nodejs-provider/` subdirectory at the root of this repo** (see [Project Structure](#project-structure) above). Clone the repo on the server and `cd` into that subdirectory before running `npm install`:
 
 ```bash
-cd nodejs-provider
+git clone <this-repo-url>                # clones into ./esri-customdatafeed/
+cd esri-customdatafeed/nodejs-provider   # provider source + cdconfig.json + package.json live here
 npm install
 ```
 
@@ -207,8 +210,8 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
 ```bash
-# 1. Build the .cdpk — run this on the ArcGIS Server box (so node_modules is OS-compatible)
-cd nodejs-provider
+# 1. Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
+cd esri-customdatafeed/nodejs-provider   # if not already there
 zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '*.env*' 'test/*' '*.md'
