@@ -11,6 +11,16 @@ Choose **Lakehouse** when you need to query large Delta Lake tables directly wit
 
 One provider is registered once. Each Feature Service chooses its backend via service parameters.
 
+> **How to read this README**
+>
+> The install path is short:
+>
+> 1. **[Setup](#setup)** — steps 1–4 to install and configure the provider on your ArcGIS Server box
+> 2. **[Production deployment notes](#production-deployment-notes)** — recommended hardening (env vars, admin-token quirks)
+> 3. **[Creating Feature Services](#creating-feature-services)** — make a service per table you want to expose
+>
+> Once you hit the **"Installation complete"** marker further down, you're done. Everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
+
 ## Overview
 
 ![CDF Overview — Direct Integration with ArcGIS Enterprise](cdf-overview.png)
@@ -432,6 +442,12 @@ editData(req) → Always Lakebase (Lakehouse is read-only)
 
 ---
 
+> ### Installation complete
+>
+> With the provider registered and at least one Feature Service created, you have a working deployment. **Everything below this point is reference material** — supported query parameters, performance benchmarks, geometry format details, environment-variable reference, and troubleshooting. Skim or skip ahead as needed.
+
+---
+
 ## Supported Operations
 
 ### Query (both backends)
@@ -646,6 +662,28 @@ CREATE INDEX ON my_table USING GIST (geom);
 This limitation only affects Synced Tables (Databricks → Lakebase sync). Tables created directly in Lakebase with PostGIS geometry columns work fine — the provider's Lakebase backend uses native PostGIS geometry for all queries and editing.
 
 **Full supported type mapping:** [Lakebase Instances docs](https://docs.databricks.com/aws/en/oltp/instances/sync-data/sync-table) | [Lakebase Projects docs](https://docs.databricks.com/aws/en/oltp/projects/reverse-etl)
+
+## Appendix: Why three config files?
+
+*Not required reading for installation — skip unless you're curious about the design or troubleshooting where credentials should live.*
+
+The provider can read credentials from three places. Each fits a different stage of a deployment's life:
+
+| File | Best used for | Why |
+|---|---|---|
+| `.env` in the provider directory | Local dev / quick setup | Easy to edit and reload. Loaded from an explicit path by the provider's own dotenv call — always finds it. |
+| `~/.databrickscfg` (or path in `DATABRICKS_CONFIG_FILE`) | Multi-workspace and/or OAuth M2M | Standard Databricks config file (same one the CLI, dbt, Asset Bundles use). INI sections naturally represent multiple workspaces — something `.env`'s flat key=value can't do. |
+| `init_user_param.sh` | Production | Set once at ArcGIS Server startup; survives provider re-registration and avoids collisions if more than one CDF provider runs on the same server. |
+
+**Why both `.env` and `.databrickscfg`?** `.env` is flat key=value, so it can't represent multiple workspaces (no way to have two `DATABRICKS_SERVER_HOSTNAME` values). `.databrickscfg` has named sections, which solves that. Single-workspace installs can use either; multi-workspace installs need `.databrickscfg`.
+
+**Why does `.env` "just work" but `.databrickscfg` needs `DATABRICKS_CONFIG_FILE` set explicitly?** The provider loads `.env` from a known path relative to its own source directory (`<provider>/../.env`), so it always finds it. `.databrickscfg` defaults to `~/.databrickscfg` to match the Databricks ecosystem convention — but on ArcGIS Server, `~` is the home directory of the `arcgis` OS user, which usually isn't set up. The `DATABRICKS_CONFIG_FILE` env var is the standard escape hatch (the Databricks CLI uses the same one).
+
+**Why prefer `init_user_param.sh` over `.env` for production?** Three reasons:
+
+1. `.env` lives *inside* the provider directory. The `.cdpk` extraction overwrites the directory on every re-registration, taking `.env` with it. `init_user_param.sh` lives outside the provider tree and survives.
+2. If you ever run a second CDF provider on the same ArcGIS Server, both share `process.env`. Each provider's dotenv call into its own `.env` can collide. Vars set in `init_user_param.sh` are set once at JVM startup — no collisions.
+3. `.env` is only read by the provider's startup code via dotenv. Anything that needs env vars before the provider boots won't see them. `init_user_param.sh` sets vars at the JVM level, so they're universally visible.
 
 ## License
 
