@@ -63,7 +63,7 @@ nodejs-provider/
 
 ## Setup
 
-Everything below runs on the **ArcGIS Server machine** (the provider is a Node.js plugin that runs inside ArcGIS Server's CDF runtime).
+All commands below run on the ArcGIS Server host.
 
 ### Prerequisites
 
@@ -592,14 +592,6 @@ Then create your Feature Service with `tableName` (or `lakebaseTable`) set to `m
 
 ---
 
-## Tests
-
-```bash
-cd nodejs-provider
-npm test
-# 339 passing
-```
-
 ## Troubleshooting
 
 **Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
@@ -684,6 +676,16 @@ The provider can read credentials from three places. Each fits a different stage
 1. `.env` lives *inside* the provider directory. The `.cdpk` extraction overwrites the directory on every re-registration, taking `.env` with it. `init_user_param.sh` lives outside the provider tree and survives.
 2. If you ever run a second CDF provider on the same ArcGIS Server, both share `process.env`. Each provider's dotenv call into its own `.env` can collide. Vars set in `init_user_param.sh` are set once at JVM startup — no collisions.
 3. `.env` is only read by the provider's startup code via dotenv. Anything that needs env vars before the provider boots won't see them. `init_user_param.sh` sets vars at the JVM level, so they're universally visible.
+
+## Running the unit tests
+
+These are the provider's own unit tests (mocha + chai) — they exercise the SQL builders, geometry handling, sanitization, and workspace resolver in isolation, **not** your live deployment. Useful if you're modifying the source or want to verify nothing's broken before packaging a `.cdpk`.
+
+```bash
+cd nodejs-provider
+npm test
+# 339 passing
+```
 
 ## License
 
