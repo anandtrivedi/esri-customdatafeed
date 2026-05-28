@@ -57,18 +57,18 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 
 ### Prerequisites
 
-- ArcGIS Server 11.4+ with Custom Data Feeds (11.4 added editing via `applyEdits`, 12.0 added `editingEnabled` property) — includes Node.js
-- Databricks SQL Warehouse with geospatial functions enabled
-- **Network**: if your Databricks workspace has IP access lists, allowlist the ArcGIS Server's outbound IP before continuing. The provider authenticates from the server's IP — a missing allowlist returns `HTTP 403` on the first query with no actionable error in the ArcGIS Server UI. Apply this **per workspace** if you're configuring multiple. ([Databricks docs](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list))
-- **Optional**: Databricks Lakebase instance — needed for low-latency serving or feature editing
+- **ArcGIS Server 11.4 or later** with Custom Data Feeds enabled. ArcGIS Server includes a Node.js runtime — you do not need to install Node separately. ArcGIS Server 12.0+ is recommended if you want feature editing.
+- **A Databricks SQL Warehouse** with geospatial functions enabled.
+- **Network access from the ArcGIS Server box to your Databricks workspace.** If your workspace has [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list) enabled, allowlist the server's outbound IP — otherwise the first query returns `HTTP 403` with no clear error in the ArcGIS Server UI. Apply this **per workspace** if you're connecting to more than one.
+- **Optional:** A Databricks Lakebase instance — only needed for low-latency serving or feature editing.
 
 ### 1. Install dependencies
 
-Run this **on the ArcGIS Server machine** — native modules (`@databricks/sql` uses Apache Arrow C++ bindings) must be compiled for the target OS. Installing on macOS and copying to Linux (or vice versa) will fail.
+Run these commands **on the ArcGIS Server box itself** (the Linux or Windows machine where ArcGIS Server is installed), not on your laptop. The provider includes native modules that must be compiled for the server's OS — building on macOS and copying to a Linux server will fail to load.
 
 ```bash
 cd nodejs-provider
-npm install    # Installs both @databricks/sql and pg drivers
+npm install
 ```
 
 ### 2. Configure Databricks Connection
@@ -91,11 +91,13 @@ Other env vars in [`.env.example`](nodejs-provider/.env.example) (pool sizes, qu
 
 ### Multiple Workspaces or OAuth M2M
 
-Skip this if you have one workspace and a PAT — the env vars in Step 2 already cover you. Otherwise, this is where you set up `.databrickscfg`.
+*Optional — skip this whole section if you only need one workspace and you're happy using a PAT.* The env vars in Step 2 already cover you; jump ahead to [Step 3](#3-configure-lakebase-optional).
 
-> **OAuth M2M (Machine-to-Machine):** instead of a PAT tied to a user, the provider authenticates as a Databricks **service principal** — a machine identity. You give it a `client_id` + `client_secret` (one-time setup in the Databricks account console). Databricks exchanges those for short-lived access tokens that auto-refresh. Recommended pattern for production servers.
+Use this section if you need either of:
+- **Multiple Databricks workspaces** served by the same ArcGIS Server (one Feature Service per workspace, with isolated connection pools per workspace), OR
+- **Service-principal OAuth M2M auth** (recommended for production — a machine identity with `client_id`+`client_secret` that auto-refreshes tokens, instead of a long-lived PAT tied to a user).
 
-One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
+Both modes work for Lakehouse and Lakebase. You configure them through a `.databrickscfg` file — the same one the Databricks CLI uses.
 
 #### `.databrickscfg` profiles
 
@@ -209,27 +211,16 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 
 ### 4. Package and Register Provider
 
-**Option A: CDF CLI** (requires [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/))
+You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
 ```bash
-# From the CDF app directory (created via `cdf createapp`)
-cdf export databricks-geospatial-provider
-cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOKEN
-```
-
-> **Self-signed certs:** If ArcGIS Server uses a self-signed certificate, set `export NODE_TLS_REJECT_UNAUTHORIZED=0` or `export NODE_EXTRA_CA_CERTS=/path/to/cert.pem` ([Esri docs](https://developers.arcgis.com/enterprise-sdk/guide/custom-data-feeds/custom-data-feeds-troubleshooting/)). If you still get "Invalid token, ClientID does not match", use Option B — the CDF CLI sends tokens as `Authorization: Bearer` which can conflict with ArcGIS referer-based token validation.
-
-**Option B: Admin REST API** (works with any ArcGIS Server)
-
-```bash
-# 1. Build the .cdpk — must include node_modules compiled on the target OS
-#    (zip the provider directory on the ArcGIS Server machine after running npm install there)
+# 1. Build the .cdpk — run this on the ArcGIS Server box (so node_modules is OS-compatible)
 cd nodejs-provider
 zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '*.env*' 'test/*' '*.md'
 
-# 2. Upload the .cdpk
+# 2. Upload it
 curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
   -F "itemFile=@databricks-geospatial-provider.cdpk"
@@ -242,8 +233,21 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
 ```
 
 > **After registration — two things to do every time:**
-> 1. **Recreate `.env`** in the provider directory. The `.cdpk` extraction overwrites the directory contents, including any local `.env` you had.
-> 2. **Restart ArcGIS Server** so the new provider code loads and `workspaceResolver` rereads `.databrickscfg` (the provider caches profiles on first read).
+> 1. **Recreate `.env`** in the provider directory if you use one. The `.cdpk` extraction overwrites the directory contents.
+> 2. **Restart ArcGIS Server** so the new code loads and any `.databrickscfg` changes are picked up (the provider caches profiles on first read).
+
+<details>
+<summary>Alternative: CDF CLI from the ArcGIS Enterprise SDK</summary>
+
+If you have the [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/) installed and prefer its CLI:
+
+```bash
+cdf export databricks-geospatial-provider
+cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOKEN
+```
+
+For self-signed certs, set `NODE_TLS_REJECT_UNAUTHORIZED=0` or `NODE_EXTRA_CA_CERTS=/path/to/cert.pem`. If you hit "Invalid token, ClientID does not match", fall back to the REST API above — the CDF CLI uses `Authorization: Bearer` which conflicts with ArcGIS's referer-based tokens.
+</details>
 
 ## Production deployment notes
 
@@ -499,29 +503,16 @@ Lakebase/PostGIS has all 6 spatial predicates natively with GIST index support. 
 
 All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon.
 
-**Lakehouse** supports multiple storage formats via `geometryFormat`:
+**Lakehouse** supports four storage formats. Pick based on what your table already has — if you're designing a new table, prefer native `GEOMETRY`.
 
-| Format | Storage | Example | Notes |
-|--------|---------|---------|-------|
-| `WKT` | STRING column | `POINT(-77.03 38.90)` | Human-readable; common in demo data |
-| `WKB` | BINARY column | hex bytes | Compact, fast to parse |
-| `GEOJSON` | STRING column | `{"type":"Point",...}` | Useful when JSON tooling already produces it |
-| `GEOMETRY` | GEOMETRY column | (native) | Best performance — no string parsing |
+| Format | Storage | Example | When to use |
+|--------|---------|---------|-------------|
+| `GEOMETRY` *(recommended for new tables)* | Native GEOMETRY column | (native) | Fastest at scale — no string parsing. Use this if your Databricks runtime supports native geometry. |
+| `WKB` | BINARY column | hex bytes | Good production choice when native `GEOMETRY` isn't available. Compact and fast. |
+| `WKT` | STRING column | `POINT(-77.03 38.90)` | Human-readable, easy to debug. Common in demo data and required for Lakebase Synced Tables. Has measurable parse overhead at large scale. |
+| `GEOJSON` | STRING column | `{"type":"Point",...}` | Useful when JSON tooling already produces it. |
 
-### Which format to use
-
-| Situation | Recommended | Why |
-|---|---|---|
-| New table you control on Databricks | `GEOMETRY` (native) | No string parsing; geometry type detected from column type. Fastest at scale. |
-| Existing column with binary geometry | `WKB` | Compact storage, fast parse. Good production choice when native `GEOMETRY` isn't available. |
-| Existing column with text geometry | `WKT` | Works fine; human-readable for debugging. Has measurable parse overhead at large scale. |
-| Lakebase Synced Tables (Databricks → Lakebase reverse-ETL) | `WKT` | Forced — synced tables can't carry GEOMETRY/GEOGRAPHY types (see [Known Limitations](#known-limitations)). |
-
-Rule of thumb: **prefer `GEOMETRY` for production**, fall back to `WKB` if your table uses a binary column, and `WKT` is perfectly fine for demos, testing, or smaller datasets where human-readable storage is convenient.
-
-### When you must set `geometryFormat` explicitly
-
-The provider auto-detects the format from the column name (e.g. a column named `geometry_wkt` → WKT). If your column is named generically (e.g. `geometry`) but stores text WKT, **set `geometryFormat` explicitly** on the service to `WKT`, otherwise the provider will assume native `GEOMETRY` and fail to parse the rows. Set it explicitly any time the column name doesn't clearly identify the format.
+**Auto-detection caveat — when you must set `geometryFormat` explicitly:** the provider tries to infer the format from the column name (e.g. `geometry_wkt` → WKT). If your column is named generically (like `geometry`) but actually stores text WKT, set `geometryFormat: "WKT"` on the service explicitly — otherwise the provider assumes native GEOMETRY and fails to parse the rows. Same applies to a generic `geometry` column holding WKB or GeoJSON.
 
 **Lakebase** uses native PostGIS geometry only — no `geometryFormat` configuration needed.
 
@@ -585,55 +576,53 @@ npm test
 
 ## Table Requirements
 
-**Lakehouse:**
-- `idField` must be INT or BIGINT — ArcGIS uses it as OBJECTID
-- Table name must be fully qualified: `catalog.schema.table`
-- SQL Warehouse must be running (serverless adds 5–15s cold-start)
-- Geometry must use `lon lat` order for WKT
+Whichever backend you use, your source table must satisfy:
 
-**Lakebase:**
-- `idField` must be an integer type with unique values
-- Table must have a PostGIS geometry column
-- Authentication: auto-generated from `DATABRICKS_ACCESS_TOKEN` (PAT), or set `LAKEBASE_PASSWORD` manually
-
-**Both:**
-- `idField` values must be unique and in range 0–2,147,483,647
-- See [Prerequisites](#prerequisites) for the IP allowlist requirement when a workspace has IP access lists enabled.
+- **`idField` is an integer column with unique values in the range 0 – 2,147,483,647.** ArcGIS uses this as OBJECTID. Both INT and BIGINT work (Databricks BIGINT is read back as a string and cast to a number).
+- **Geometry uses `lon lat` order** (the GIS standard). If you store WKT, write `POINT(lon lat)`, not `POINT(lat lon)`.
+- **Lakehouse only**: table name must be fully qualified (`catalog.schema.table`), and the SQL warehouse must be running (serverless adds a ~5–15s cold-start to the first query).
+- **Lakebase only**: the geometry column is native PostGIS geometry.
 
 ## Troubleshooting
 
 **Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
-- Verify the `.cdpk` was registered: check ArcGIS Server Manager > Site > Extensions
-- Confirm `dataProviderName` matches the registered provider name exactly
-- **Native module mismatch**: if you built `node_modules` on a different OS (e.g., macOS) than the ArcGIS Server (e.g., Linux/Windows), the provider will fail to load. Run `npm install` on the ArcGIS Server machine itself.
-- Check ArcGIS Server logs (typically `/opt/arcgis/server/usr/logs/<machine>/server/server-*.log` on Linux)
+- Verify the `.cdpk` was registered (check ArcGIS Server Manager → Site → Extensions).
+- Confirm `dataProviderName` in the service JSON matches the registered provider name exactly.
+- **Native module mismatch**: if you built `node_modules` on a different OS than the ArcGIS Server (e.g., macOS → Linux), the provider will fail to load. Run `npm install` on the ArcGIS Server box itself.
+- Check ArcGIS Server logs (typically `/opt/arcgis/server/usr/logs/<machine>/server/server-*.log` on Linux).
+
+**Service shows STARTED in admin but `HTTP 404 — Service not found` from REST**
+- Provider initialization failed silently after the admin layer started the service. Tail the server log and look for `Custom_data_feeds` lines — common culprits are a missing/expired credential, a `.databrickscfg` profile name that doesn't match, or an unreachable warehouse.
 
 **`HTTP 498 — "Invalid token, ClientID does not match"` on admin REST calls**
-- Missing or mismatched `Referer` header. The token issued by `generateToken` is bound to the `referer=` value you passed. Every follow-up admin call must send `-H "Referer: https://your-server:6443"` matching that value. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound).
+- Missing or mismatched `Referer` header. Tokens minted with `client=referer` are bound to the exact `referer=` value you passed. Every subsequent admin call must send `-H "Referer: https://your-server:6443"` matching that value. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound).
 
-**`HTTP 403` on first query / `Source IP address X is blocked by Databricks IP ACL`**
-- The Databricks workspace has IP access lists enabled and the ArcGIS Server's outbound IP isn't on the allowlist. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
+**`HTTP 403` on first query — telling the two flavors apart**
+- `Source IP address X is blocked by Databricks IP ACL` → the workspace's IP access list doesn't include the ArcGIS Server's outbound IP. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
+- `Invalid access token` → the PAT (or service-principal credentials) is expired, revoked, or wrong. Generate a fresh one in Databricks and update the `.env` or `.databrickscfg` entry. Restart ArcGIS Server so the cached value is replaced.
+
+**Updated `.databrickscfg` but the new profile or token isn't being used**
+- The provider caches `.databrickscfg` at first read. **Restart ArcGIS Server** any time you edit the file. (Same applies to changes in `init_user_param.sh`.)
 
 **No data returned (empty features array)**
-- Lakehouse: test the SQL Warehouse connection independently
-- Lakebase: verify authentication works (auto-generated token via PAT, or check `LAKEBASE_PASSWORD` if set manually)
-- Verify table name and schema are correct
+- Lakehouse: test the SQL warehouse connection independently (e.g. via the Databricks UI or `databricks sql`).
+- Lakebase: verify auto-generated token minting works, or check `LAKEBASE_PASSWORD` if you set it manually.
+- Confirm the fully-qualified table name and the geometry column name are correct.
 
-**OBJECTID issues**
-- The `idField` column must be an integer type
-- Databricks BIGINT returns as string — provider casts via `Number()`
+**OBJECTID issues / features missing**
+- The `idField` column must be an integer type. Databricks BIGINT comes back as a string and is cast to a number — values must fit in a 32-bit signed integer (≤ 2,147,483,647).
 
 **Editing fails (Lakebase)**
-- Verify `capabilities: "Query,Editing"` on the service (set during `createService`)
-- Verify `lakebaseHost` is set in service parameters (editing only works via Lakebase)
-- Check Lakebase auth: if using manual token, ensure `LAKEBASE_PASSWORD` is not expired
-- ArcGIS Server 12.0+ required for `editData()` support
-- **Authorization**: on **standalone ArcGIS Server**, users with the built-in `ADMINISTER` privilege (e.g. `siteadmin`) or `PUBLISH` privilege have implicit access to all operations including edits — no extra setup. On **federated ArcGIS Enterprise (Portal)** sites, the user's Portal role must include the "Edit features" privilege; assigning the Publisher or Administrator role grants this. If a service has been secured with role-based permissions (`/admin/services/<svc>/permissions`), only members of the allowed roles can call `applyEdits` regardless of privilege.
+- Confirm `capabilities: "Query,Editing"` AND `editingEnabled: "true"` were both set during `createService`.
+- Confirm `lakebaseHost` is in the service parameters (editing only works via Lakebase, not Lakehouse).
+- Check Lakebase auth: token may have expired (auto-refresh fails if the underlying PAT is dead).
+- ArcGIS Server 12.0+ is required for the `editData()` interface.
+- **Authorization**: on standalone ArcGIS Server, the built-in `ADMINISTER` and `PUBLISH` privileges both allow editing (no extra setup). On federated ArcGIS Enterprise (Portal), the user's Portal role needs the "Edit features" privilege.
 
 **Query is slow**
-- Lakehouse: first query is slow due to warehouse cold-start
-- Lakehouse: add Z-ordering: `OPTIMIZE table ZORDER BY (geometry_column)`
-- Lakebase: add a GIST index: `CREATE INDEX ON table USING GIST (geometry)`
+- Lakehouse: the first query after warehouse idle is slow due to cold-start (5–15s for serverless).
+- Lakehouse: add Z-ordering on the geometry column: `OPTIMIZE table ZORDER BY (geometry_column)`.
+- Lakebase: add a GIST index: `CREATE INDEX ON table USING GIST (geometry_column)`.
 
 ## Known Limitations
 
