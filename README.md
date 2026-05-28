@@ -172,14 +172,7 @@ Reference: [Authorize service principal access with OAuth M2M](https://docs.data
 
 #### `.databrickscfg` location on ArcGIS Server
 
-ArcGIS Server runs as the `arcgis` OS user — `~/.databrickscfg` resolves to its home directory, which may not be set up. **Set `DATABRICKS_CONFIG_FILE` explicitly** in the init script:
-
-```bash
-# /opt/arcgis/server/usr/init_user_param.sh
-export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
-```
-
-Then `chmod 600` and `chown arcgis:arcgis` the file. Restart ArcGIS Server.
+ArcGIS Server runs as the `arcgis` OS user, whose home directory may not be set up — so don't rely on the default `~/.databrickscfg` lookup. Put the file at an explicit path (e.g. `/opt/arcgis/server/usr/.databrickscfg`) and point `DATABRICKS_CONFIG_FILE` at it. The init-script setup and file permissions are covered in [Production deployment notes](#production-deployment-notes) below.
 
 #### Verifying it works
 
@@ -234,7 +227,7 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
 
 > **After registration — two things to do every time:**
 > 1. **Recreate `.env`** in the provider directory if you use one. The `.cdpk` extraction overwrites the directory contents.
-> 2. **Restart ArcGIS Server** so the new code loads and any `.databrickscfg` changes are picked up (the provider caches profiles on first read).
+> 2. **Restart ArcGIS Server** so the new code loads.
 
 <details>
 <summary>Alternative: CDF CLI from the ArcGIS Enterprise SDK</summary>
@@ -290,6 +283,17 @@ curl -sk -H "Referer: https://your-server:6443" \
   "https://your-server:6443/arcgis/admin/services?token=$TOKEN&f=json"
 ```
 
+## Table Requirements
+
+Before you create a Feature Service, make sure your source table satisfies these:
+
+- **`idField` is an integer column with unique values in the range 0 – 2,147,483,647.** ArcGIS uses this as OBJECTID. Both INT and BIGINT work (Databricks BIGINT is read back as a string and cast to a number).
+- **Geometry uses `lon lat` order** (the GIS standard). If you store WKT, write `POINT(lon lat)`, not `POINT(lat lon)`.
+- **Lakehouse only**: table name must be fully qualified (`catalog.schema.table`), and the SQL warehouse must be running (serverless adds a ~5–15s cold-start to the first query).
+- **Lakebase only**: the geometry column is native PostGIS geometry.
+
+If your source table has lat/lon columns instead of a geometry column, see [Working with Existing Tables](#working-with-existing-tables) for the view pattern.
+
 ## Creating Feature Services
 
 You register the provider once, then create individual Feature Services. Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend is used.
@@ -303,7 +307,7 @@ You register the provider once, then create individual Feature Services. Each se
 | `tableName` | Yes | - | Fully qualified table name (`catalog.schema.table`) |
 | `geometryColumn` | No | `geometry` | Name of the geometry column |
 | `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
-| `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native). Leave empty for auto-detect — set explicitly if the column is named `geometry` but stores WKT strings |
+| `geometryFormat` | No | auto-detect | `WKT`, `WKB`, `GEOJSON`, or `GEOMETRY` (native). See [Geometry Support](#geometry-support) for when you need to set this explicitly. |
 | `timeColumn` | No | - | Timestamp column for time-aware queries |
 | `maxRecordCount` | No | `2000` | Max features returned per page (clients can request fewer) |
 | `srid` | No | `4326` | EPSG SRID of the geometry column |
@@ -573,15 +577,6 @@ cd nodejs-provider
 npm test
 # 339 passing
 ```
-
-## Table Requirements
-
-Whichever backend you use, your source table must satisfy:
-
-- **`idField` is an integer column with unique values in the range 0 – 2,147,483,647.** ArcGIS uses this as OBJECTID. Both INT and BIGINT work (Databricks BIGINT is read back as a string and cast to a number).
-- **Geometry uses `lon lat` order** (the GIS standard). If you store WKT, write `POINT(lon lat)`, not `POINT(lat lon)`.
-- **Lakehouse only**: table name must be fully qualified (`catalog.schema.table`), and the SQL warehouse must be running (serverless adds a ~5–15s cold-start to the first query).
-- **Lakebase only**: the geometry column is native PostGIS geometry.
 
 ## Troubleshooting
 
