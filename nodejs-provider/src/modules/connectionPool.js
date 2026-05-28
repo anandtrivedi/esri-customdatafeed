@@ -1,63 +1,81 @@
 /**
  * connectionPool.js
- * Manages a pool of reusable Databricks SQL connections
+ * Manages reusable Databricks SQL connection pools, keyed per
+ * (workspace, warehouse) pair.
  *
- * Benefits:
- * - Eliminates connection overhead (100-200ms per request)
- * - Reuses established connections
- * - Handles connection lifecycle (creation, validation, cleanup)
- * - Improves throughput by ~10x for real-time workloads
+ * One DatabricksConnectionPool instance per unique
+ *   `${workspaceAlias}|${httpPath}`
+ * combination. Pools are created lazily on the first getPool() call
+ * for a given key, and pre-warm `min` connections on construction.
+ *
+ * Auth modes (resolved per workspace profile):
+ *   - PAT:        token in workspaceConfig
+ *   - OAuth M2M:  client_id + client_secret in workspaceConfig
+ *                 (the Node SQL driver handles token refresh internally)
  */
 
 const { DBSQLClient } = require('@databricks/sql');
 const pkg = require('../../package.json');
 
 class DatabricksConnectionPool {
-  constructor(config, options = {}) {
-    this.config = config;
-    this.minConnections = options.min || 2;
-    this.maxConnections = options.max || 10;
-    this.idleTimeout = options.idleTimeout || 60000; // 60 seconds
-    this.connectionTimeout = options.connectionTimeout || 30000; // 30 seconds
+  constructor(workspaceConfig, httpPath, options = {}) {
+    this.workspaceConfig = workspaceConfig;
+    this.httpPath = httpPath;
+    this.minConnections = options.min ?? 2;
+    this.maxConnections = options.max ?? 10;
+    this.idleTimeout = options.idleTimeout ?? 60000;
+    this.connectionTimeout = options.connectionTimeout ?? 30000;
 
     this.pool = [];
     this.activeConnections = 0;
     this.waitQueue = [];
     this.shuttingDown = false;
 
-    console.log(`[Pool] Initialized (min: ${this.minConnections}, max: ${this.maxConnections})`);
+    console.log(`[Pool ${this.poolLabel()}] Initialized (min: ${this.minConnections}, max: ${this.maxConnections})`);
 
-    // Pre-warm pool with minimum connections
     this.warmUp();
   }
 
-  /**
-   * Pre-create minimum connections for faster first requests
-   */
+  poolLabel() {
+    return `${this.workspaceConfig.workspaceAlias}|${this.httpPath}`;
+  }
+
   async warmUp() {
+    if (this.minConnections === 0) return;
     try {
-      const warmUpPromises = [];
+      const promises = [];
       for (let i = 0; i < this.minConnections; i++) {
-        warmUpPromises.push(this.createConnection());
+        promises.push(this.createConnection());
       }
-      await Promise.all(warmUpPromises);
-      console.log(`[Pool] Warmed up with ${this.minConnections} connections`);
+      await Promise.all(promises);
+      console.log(`[Pool ${this.poolLabel()}] Warmed up with ${this.minConnections} connections`);
     } catch (error) {
-      console.error('[Pool] Failed to warm up connection pool:', error.message);
+      console.error(`[Pool ${this.poolLabel()}] Failed to warm up:`, error.message);
     }
   }
 
-  /**
-   * Create a new connection
-   */
   async createConnection() {
     const client = new DBSQLClient();
-    const connectOptions = {
-      token: this.config.accessToken,
-      host: this.config.serverHostname,
-      path: this.config.httpPath,
-      userAgentEntry: `esri_databricks-customdatafeed/${pkg.version}`
+    const baseOptions = {
+      host: this.workspaceConfig.hostname,
+      path: this.httpPath,
+      userAgentEntry: `esri_databricks-customdatafeed/${pkg.version}`,
     };
+
+    let connectOptions;
+    if (this.workspaceConfig.authType === 'oauth-m2m') {
+      connectOptions = {
+        ...baseOptions,
+        authType: 'databricks-oauth',
+        oauthClientId: this.workspaceConfig.clientId,
+        oauthClientSecret: this.workspaceConfig.clientSecret,
+      };
+    } else {
+      connectOptions = {
+        ...baseOptions,
+        token: this.workspaceConfig.token,
+      };
+    }
 
     try {
       await client.connect(connectOptions);
@@ -69,38 +87,31 @@ class DatabricksConnectionPool {
         inUse: false,
         createdAt: Date.now(),
         lastUsed: Date.now(),
-        id: Math.random().toString(36).substr(2, 9)
+        id: Math.random().toString(36).substr(2, 9),
       };
 
       this.pool.push(connection);
-      console.log(`[Pool] Connection ${connection.id} created (pool size: ${this.pool.length})`);
-
+      console.log(`[Pool ${this.poolLabel()}] Connection ${connection.id} created (pool size: ${this.pool.length})`);
       return connection;
     } catch (error) {
-      console.error('[Pool] Failed to create connection:', error.message);
+      console.error(`[Pool ${this.poolLabel()}] Failed to create connection:`, error.message);
       throw error;
     }
   }
 
-  /**
-   * Acquire a connection from the pool
-   */
   async acquire() {
     if (this.shuttingDown) {
       throw new Error('Connection pool is shutting down');
     }
 
-    // Try to find an available connection
-    const availableConnection = this.pool.find(conn => !conn.inUse);
-
-    if (availableConnection) {
-      availableConnection.inUse = true;
-      availableConnection.lastUsed = Date.now();
+    const available = this.pool.find((conn) => !conn.inUse);
+    if (available) {
+      available.inUse = true;
+      available.lastUsed = Date.now();
       this.activeConnections++;
-      return availableConnection;
+      return available;
     }
 
-    // If pool not at max size, create new connection
     if (this.pool.length < this.maxConnections) {
       const newConnection = await this.createConnection();
       newConnection.inUse = true;
@@ -108,14 +119,11 @@ class DatabricksConnectionPool {
       return newConnection;
     }
 
-    // Wait for a connection to become available
-    console.log(`[Pool] Waiting for available connection (active: ${this.activeConnections}/${this.maxConnections})`);
+    console.log(`[Pool ${this.poolLabel()}] Waiting for available connection (active: ${this.activeConnections}/${this.maxConnections})`);
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
-        const index = this.waitQueue.findIndex(item => item.resolve === resolve);
-        if (index !== -1) {
-          this.waitQueue.splice(index, 1);
-        }
+        const idx = this.waitQueue.findIndex((item) => item.resolve === resolve);
+        if (idx !== -1) this.waitQueue.splice(idx, 1);
         reject(new Error('Connection acquisition timeout'));
       }, this.connectionTimeout);
 
@@ -123,9 +131,6 @@ class DatabricksConnectionPool {
     });
   }
 
-  /**
-   * Release a connection back to the pool
-   */
   release(connection) {
     if (!connection) return;
 
@@ -133,7 +138,6 @@ class DatabricksConnectionPool {
     connection.lastUsed = Date.now();
     this.activeConnections--;
 
-    // If there's a waiting request, give it this connection
     if (this.waitQueue.length > 0) {
       const { resolve, timeoutId } = this.waitQueue.shift();
       clearTimeout(timeoutId);
@@ -142,129 +146,104 @@ class DatabricksConnectionPool {
       resolve(connection);
     }
 
-    // Clean up idle connections (keep minimum)
     this.cleanupIdleConnections();
   }
 
-  /**
-   * Clean up idle connections beyond minimum
-   */
   async cleanupIdleConnections() {
     if (this.pool.length <= this.minConnections) return;
 
     const now = Date.now();
-    const connectionsToRemove = this.pool.filter(conn =>
-      !conn.inUse &&
-      (now - conn.lastUsed) > this.idleTimeout
+    const toRemove = this.pool.filter(
+      (conn) => !conn.inUse && (now - conn.lastUsed) > this.idleTimeout
     );
 
-    if (connectionsToRemove.length > 0 &&
-        (this.pool.length - connectionsToRemove.length) >= this.minConnections) {
-
-      for (const conn of connectionsToRemove) {
+    if (toRemove.length > 0 && (this.pool.length - toRemove.length) >= this.minConnections) {
+      for (const conn of toRemove) {
         await this.destroyConnection(conn);
       }
     }
   }
 
-  /**
-   * Destroy a connection
-   */
   async destroyConnection(connection) {
     try {
-      const index = this.pool.indexOf(connection);
-      if (index > -1) {
-        this.pool.splice(index, 1);
-      }
+      const idx = this.pool.indexOf(connection);
+      if (idx > -1) this.pool.splice(idx, 1);
 
-      if (connection.session) {
-        await connection.session.close();
-      }
-      if (connection.client) {
-        await connection.client.close();
-      }
+      if (connection.session) await connection.session.close();
+      if (connection.client) await connection.client.close();
 
-      console.log(`[Pool] Connection ${connection.id} destroyed (pool size: ${this.pool.length})`);
+      console.log(`[Pool ${this.poolLabel()}] Connection ${connection.id} destroyed (pool size: ${this.pool.length})`);
     } catch (error) {
-      console.error(`[Pool] Error destroying connection ${connection.id}:`, error.message);
+      console.error(`[Pool ${this.poolLabel()}] Error destroying connection ${connection.id}:`, error.message);
     }
   }
 
-  /**
-   * Get pool statistics
-   */
   getStats() {
     return {
+      poolKey: this.poolLabel(),
       totalConnections: this.pool.length,
       activeConnections: this.activeConnections,
       idleConnections: this.pool.length - this.activeConnections,
       waitingRequests: this.waitQueue.length,
       minConnections: this.minConnections,
-      maxConnections: this.maxConnections
+      maxConnections: this.maxConnections,
     };
   }
 
-  /**
-   * Shutdown the pool gracefully
-   */
   async shutdown() {
-    console.log('[Pool] Shutting down connection pool...');
+    console.log(`[Pool ${this.poolLabel()}] Shutting down...`);
     this.shuttingDown = true;
 
-    // Reject all waiting requests
     for (const { reject, timeoutId } of this.waitQueue) {
       clearTimeout(timeoutId);
       reject(new Error('Connection pool shutting down'));
     }
     this.waitQueue = [];
 
-    // Close all connections
-    const closePromises = this.pool.map(conn => this.destroyConnection(conn));
+    const closePromises = this.pool.map((conn) => this.destroyConnection(conn));
     await Promise.all(closePromises);
 
-    console.log('[Pool] Connection pool shut down');
+    console.log(`[Pool ${this.poolLabel()}] Shut down`);
   }
 }
 
-// Singleton instance
-let poolInstance = null;
+// Map of `${workspaceAlias}|${httpPath}` -> DatabricksConnectionPool
+const pools = {};
 
-/**
- * Initialize the connection pool (call once at startup)
- */
-function initializePool(config, options) {
-  if (poolInstance) {
-    console.log('[Pool] Connection pool already initialized');
-    return poolInstance;
-  }
-
-  poolInstance = new DatabricksConnectionPool(config, options);
-  return poolInstance;
+function poolKey(workspaceConfig, httpPath) {
+  return `${workspaceConfig.workspaceAlias}|${httpPath}`;
 }
 
 /**
- * Get the singleton pool instance
+ * Get or create a connection pool for the given workspace + warehouse.
+ * Pools are cached by `${workspaceAlias}|${httpPath}`.
+ *
+ * @param {object} workspaceConfig - resolved profile from workspaceResolver
+ * @param {string} httpPath        - SQL warehouse HTTP path
+ * @param {object} [options]       - { min, max, idleTimeout, connectionTimeout }
  */
-function getPool() {
-  if (!poolInstance) {
-    throw new Error('Connection pool not initialized. Call initializePool() first.');
-  }
-  return poolInstance;
+function getPool(workspaceConfig, httpPath, options) {
+  const key = poolKey(workspaceConfig, httpPath);
+  if (pools[key]) return pools[key];
+  pools[key] = new DatabricksConnectionPool(workspaceConfig, httpPath, options);
+  return pools[key];
 }
 
-/**
- * Shutdown the pool (call on server shutdown)
- */
 async function shutdownPool() {
-  if (poolInstance) {
-    await poolInstance.shutdown();
-    poolInstance = null;
-  }
+  const keys = Object.keys(pools);
+  await Promise.all(keys.map((k) => pools[k].shutdown()));
+  for (const k of keys) delete pools[k];
+}
+
+function getAllPoolStats() {
+  return Object.values(pools).map((p) => p.getStats());
 }
 
 module.exports = {
-  initializePool,
   getPool,
   shutdownPool,
-  DatabricksConnectionPool
+  getAllPoolStats,
+  DatabricksConnectionPool,
+  // Internal helpers — exposed for tests
+  _internal: { poolKey, pools },
 };

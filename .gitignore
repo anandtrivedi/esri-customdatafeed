@@ -1,6 +1,10 @@
 # Environment variables
 .env
 
+# Databricks workspace credentials (.databrickscfg) — never commit real ones
+.databrickscfg
+!.databrickscfg.example
+
 # Python
 __pycache__/
 *.py[cod]

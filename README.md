@@ -57,6 +57,7 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 
 - ArcGIS Server 11.4+ with Custom Data Feeds (11.4 added editing via `applyEdits`, 12.0 added `editingEnabled` property) — includes Node.js
 - Databricks SQL Warehouse with geospatial functions enabled
+- **Network**: if your Databricks workspace has IP access lists, allowlist the ArcGIS Server's outbound IP before continuing. The provider authenticates from the server's IP — a missing allowlist returns `HTTP 403` on the first query with no actionable error in the ArcGIS Server UI. Apply this **per workspace** if you're configuring multiple. ([Databricks docs](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list))
 - **Optional**: Databricks Lakebase instance — needed for low-latency serving or feature editing
 
 ### 1. Install dependencies
@@ -70,33 +71,139 @@ npm install    # Installs both @databricks/sql and pg drivers
 
 ### 2. Configure Databricks Connection
 
-Create a `.env` file with your Databricks credentials — this is the only config file you need:
-
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` — only 3 values are required:
+**For a single workspace with a PAT (Personal Access Token)**, set three env vars in `.env`:
 
 ```bash
 DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here   # Personal Access Token (PAT)
+DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here
 ```
 
-Per-table settings (table name, geometry column, etc.) are configured per-service when you create each Feature Service — not in `.env`. See [Service Parameters](#creating-feature-services) below.
+Other env vars in [`.env.example`](nodejs-provider/.env.example) (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
+
+**For multiple workspaces, or for service-principal OAuth M2M auth instead of a PAT**, skip these env vars (leave them empty or remove the lines) and use the `.databrickscfg`-based setup in the next section.
+
+### Multiple Workspaces or OAuth M2M
+
+Skip this if you have one workspace and a PAT — the env vars in Step 2 already cover you. Otherwise, this is where you set up `.databrickscfg`.
+
+> **OAuth M2M (Machine-to-Machine):** instead of a PAT tied to a user, the provider authenticates as a Databricks **service principal** — a machine identity. You give it a `client_id` + `client_secret` (one-time setup in the Databricks account console). Databricks exchanges those for short-lived access tokens that auto-refresh. Recommended pattern for production servers.
+
+One CDF provider deployment can serve Feature Services from **multiple Databricks workspaces concurrently**. Each Feature Service registers a `workspace` parameter naming a profile in `.databrickscfg`; the provider creates an independent connection pool per workspace and routes each request accordingly. Works for both Lakehouse and Lakebase.
+
+#### `.databrickscfg` profiles
+
+The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`) — same format used by the Databricks CLI / Asset Bundles / dbt. See [`.databrickscfg.example`](nodejs-provider/.databrickscfg.example) for a copy-paste template.
+
+```ini
+# PAT (Personal Access Token)
+[WORKSPACE_A]
+host  = workspace-a.cloud.databricks.com
+token = dapiXXXXXXXXXXXXXXXXX
+
+# OAuth M2M (service principal — recommended for production)
+[WORKSPACE_B]
+host          = workspace-b.cloud.databricks.com
+client_id     = <service-principal-client-id>
+client_secret = <service-principal-secret>
+```
+
+- Each profile uses **one** auth mode — either `token` (PAT) **or** `client_id` + `client_secret` (OAuth M2M). Mixing both in one profile errors at request time.
+- Different profiles can use different auth modes independently — all-PAT, all-OAuth M2M, or any mix.
+- Add a profile per workspace.
+
+#### Default profile resolution
+
+When a service is created **without** a `workspace` parameter:
+
+1. If a `[DEFAULT]` profile exists in `.databrickscfg`, it's used.
+2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
+3. If neither is set, the service errors at request time.
+
+If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env vars in `.env` empty (or delete those lines) — the resolver picks `.databrickscfg` `[DEFAULT]` first, and empty/missing env vars avoid any chance of mismatched credentials.
+
+#### Example: services pointing at different workspaces
+
+Using the two profiles from the snippets above (`[WORKSPACE_A]` PAT and `[WORKSPACE_B]` OAuth M2M), here's how a Lakehouse service and a Lakebase service register against different workspaces — full createService payloads are in [Creating Feature Services](#creating-feature-services) below.
+
+```json
+// Lakehouse service → workspace A (PAT)
+"serviceParameters": {
+  "workspace": "WORKSPACE_A",
+  "warehouseHttpPath": "/sql/1.0/warehouses/aaaa",
+  "tableName": "catalog_a.geo.cells",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+
+// Lakebase service → workspace B (OAuth M2M)
+"serviceParameters": {
+  "workspace": "WORKSPACE_B",
+  "lakebaseHost": "instance-bbbb.database.cloud.databricks.com",
+  "lakebasePort": "5432",
+  "lakebaseDatabase": "geospatial",
+  "lakebaseTable": "buildings",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+```
+
+For OAuth M2M Lakebase services, the provider exchanges `client_id`/`client_secret` at the workspace's `/oidc/v1/token` endpoint, then uses that token to call `/api/2.0/database/credentials` for the Lakebase OAuth token. Auto-refreshes ~5 minutes before expiry.
+
+#### Service principal setup (OAuth M2M)
+
+Per workspace, in the Databricks account console:
+
+1. Create a service principal (or reuse an existing one).
+2. Assign the SP to the workspace.
+3. Generate an OAuth secret — save the `client_id` and `client_secret`.
+4. Grant the SP `CAN_USE` on the SQL warehouse.
+5. For Lakebase: grant the SP database-level access on the Lakebase instance.
+
+Reference: [Authorize service principal access with OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
+
+#### `.databrickscfg` location on ArcGIS Server
+
+ArcGIS Server runs as the `arcgis` OS user — `~/.databrickscfg` resolves to its home directory, which may not be set up. **Set `DATABRICKS_CONFIG_FILE` explicitly** in the init script:
+
+```bash
+# /opt/arcgis/server/usr/init_user_param.sh
+export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
+```
+
+Then `chmod 600` and `chown arcgis:arcgis` the file. Restart ArcGIS Server.
+
+#### Verifying it works
+
+Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/logs/*/server/server-*.log`) will show distinct connection pools per workspace:
+
+```
+[Pool WORKSPACE_A|/sql/1.0/warehouses/abc123] Initialized (min: 2, max: 10)
+[Pool WORKSPACE_B|/sql/1.0/warehouses/xyz789] Initialized (min: 2, max: 10)
+```
+
+#### Multi-workspace troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `Databricks workspace profile "X" not found` | Profile name typo (case-sensitive), wrong `DATABRICKS_CONFIG_FILE`, or file isn't readable by the `arcgis` user |
+| `Profile [X] is ambiguous: defines both PAT and OAuth M2M` | Pick one — comment out either `token` OR `client_id`+`client_secret` |
+| `OAuth M2M token endpoint returned 401` | SP `client_id`/`client_secret` is wrong/revoked, or SP isn't assigned to the workspace |
+| `No Lakebase instance found with hostname X in workspace Y` | The `lakebaseHost` belongs to a different workspace than the `workspace` profile points at |
+| `Source IP address X is blocked by Databricks IP ACL` | The ArcGIS Server's outbound IP isn't on that workspace's IP allowlist (workspace-level setting in Databricks, separate from CDF) |
+| Single-workspace deployment regressed after upgrade | Env vars `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` missing from init script |
 
 ### 3. Configure Lakebase (optional)
 
-Lakebase connection details (host, port, database) are set per-service — see Service Parameters below.
+Skip this step if you don't need editing or low-latency serving.
 
-Authentication is automatic: the provider generates short-lived OAuth tokens using your `DATABRICKS_ACCESS_TOKEN` (PAT) via the Databricks `/api/2.0/database/credentials` endpoint. No additional configuration needed.
+For Lakebase services, you don't need any extra setup here. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
 
-To use a static password instead of auto-generated tokens:
-
-```bash
-export LAKEBASE_PASSWORD="your-oauth-token-or-password"
-```
+To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
 
 ### 4. Package and Register Provider
 
@@ -132,9 +239,50 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
   --data-urlencode "id=ITEM_ID_FROM_STEP_2"
 ```
 
-> **After registration:** The `.cdpk` extraction replaces the provider directory contents. If you use a `.env` file for credentials, re-create it in the provider directory after registration.
+> **After registration — two things to do every time:**
+> 1. **Recreate `.env`** in the provider directory. The `.cdpk` extraction overwrites the directory contents, including any local `.env` you had.
+> 2. **Restart ArcGIS Server** so the new provider code loads and `workspaceResolver` rereads `.databrickscfg` (the provider caches profiles on first read).
 
----
+## Production deployment notes
+
+These apply whether you have one workspace or many. Skip if you're just trying the provider locally.
+
+> **Where are these files on the ArcGIS Server box?** A Linux install of ArcGIS Server lands under `/opt/arcgis/server/` by default — paths below assume that. On Windows, the equivalent is typically `C:\Program Files\ArcGIS\Server\`. Substitute your install root if it's elsewhere. Edits to these files require a server restart (`/opt/arcgis/server/stopserver.sh` then `startserver.sh`, run as the `arcgis` OS user).
+
+### Set environment variables in `init_user_param.sh`
+
+ArcGIS Server reads a startup script (typically at `/opt/arcgis/server/usr/init_user_param.sh` on Linux) and exports anything in it as environment variables for the embedded Node.js runtime. Put Databricks credentials and `DATABRICKS_CONFIG_FILE` here for production rather than only in the provider's `.env` — `init_user_param.sh` is the most reliable channel into the JVM-hosted runtime.
+
+```bash
+# /opt/arcgis/server/usr/init_user_param.sh
+export DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
+export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+export DATABRICKS_ACCESS_TOKEN=dapi...
+# For multi-workspace setups, point the resolver at the shared config file:
+export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
+```
+
+The `.databrickscfg` itself (when used) should live at the path you set above with `chmod 600` and `chown arcgis:arcgis` so only the `arcgis` OS user (the one ArcGIS Server runs as) can read it. Restart ArcGIS Server after editing `init_user_param.sh`.
+
+### Admin REST tokens are referer-bound
+
+Every call to `/arcgis/admin/...` after `generateToken` must include a matching `Referer` header. Forgetting it returns `HTTP 498 — "Invalid token, ClientID does not match"`. This is an ArcGIS Server quirk, not a CDF behavior.
+
+```bash
+# Generate token — the referer= form value AND the Referer header must agree
+TOKEN=$(curl -sk 'https://your-server:6443/arcgis/admin/generateToken' \
+  -H 'Referer: https://your-server:6443' \
+  --data-urlencode 'username=siteadmin' \
+  --data-urlencode 'password=...' \
+  --data-urlencode 'client=referer' \
+  --data-urlencode 'referer=https://your-server:6443' \
+  --data-urlencode 'f=json' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# EVERY subsequent admin call needs the same Referer header
+curl -sk -H "Referer: https://your-server:6443" \
+  "https://your-server:6443/arcgis/admin/services?token=$TOKEN&f=json"
+```
 
 ## Creating Feature Services
 
@@ -144,6 +292,8 @@ You register the provider once, then create individual Feature Services. Each se
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
+| `workspace` | No | env-default | Profile name from `.databrickscfg` (see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m)). If empty, uses `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` env vars. |
+| `warehouseHttpPath` | No | `DATABRICKS_HTTP_PATH` env | SQL warehouse HTTP path (e.g. `/sql/1.0/warehouses/abc123`). Override per-service if you have multiple warehouses. |
 | `tableName` | Yes | - | Fully qualified table name (`catalog.schema.table`) |
 | `geometryColumn` | No | `geometry` | Name of the geometry column |
 | `idField` | No | `id` | Integer primary key column (used as OBJECTID) |
@@ -158,6 +308,7 @@ Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
+| `workspace` | No | env-default | Profile name from `.databrickscfg` — see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m). Determines which workspace mints Lakebase OAuth tokens. |
 | `lakebaseHost` | Yes | - | Lakebase instance hostname |
 | `lakebasePort` | No | `5432` | PostgreSQL port |
 | `lakebaseDatabase` | Yes | - | Database name |
@@ -169,7 +320,7 @@ Setting `lakebaseHost` routes a service to Lakebase instead of Lakehouse.
 | `srid` | No | `4326` | EPSG SRID of the geometry column |
 | `editingEnabled` | No | `false` | Set to `true` to enable applyEdits (also requires `capabilities: "Query,Editing"`) |
 
-Editing is enabled at the provider level (`editingEnabled: true` in `cdconfig.json`). To actually expose editing on a service, set `"capabilities": "Query,Editing"` and `"editingEnabled": "true"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
+Editing is enabled at the provider level (`editingEnabled: true` in [`cdconfig.json`](nodejs-provider/cdconfig.json)). To actually expose editing on a service, set `"capabilities": "Query,Editing"` and `"editingEnabled": "true"` in the `createService` call. Lakebase services work for read-only use cases too — just set `"capabilities": "Query"`.
 
 ### Examples
 
@@ -196,6 +347,8 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
       "customDataProviderInfo": {
         "dataProviderName": "databricks-geospatial-provider",
         "serviceParameters": {
+          "workspace": "",
+          "warehouseHttpPath": "",
           "tableName": "catalog.schema.us_cell_towers",
           "geometryColumn": "geometry",
           "idField": "id",
@@ -234,6 +387,8 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
       "customDataProviderInfo": {
         "dataProviderName": "databricks-geospatial-provider",
         "serviceParameters": {
+          "workspace": "",
+          "warehouseHttpPath": "",
           "tableName": "",
           "geometryColumn": "geometry",
           "idField": "id",
@@ -334,7 +489,7 @@ Config: Lakebase CU_4 with GIST index, Lakehouse Large Serverless SQL Warehouse 
 | Overlaps | DE-9IM workaround (5 functions) | `ST_Overlaps` (native) |
 | Crosses | DE-9IM workaround (7 functions) | `ST_Crosses` (native) |
 
-Lakebase/PostGIS has all 6 spatial predicates natively with GIST index support. Databricks SQL lacks native `ST_Overlaps` and `ST_Crosses`, so the provider implements DE-9IM equivalents. See `geometry.js` for details.
+Lakebase/PostGIS has all 6 spatial predicates natively with GIST index support. Databricks SQL lacks native `ST_Overlaps` and `ST_Crosses`, so the provider implements DE-9IM equivalents. See [`geometry.js`](nodejs-provider/src/modules/geometry.js) for details.
 
 ---
 
@@ -344,14 +499,29 @@ All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon
 
 **Lakehouse** supports multiple storage formats via `geometryFormat`:
 
-| Format | Storage | Notes |
-|--------|---------|-------|
-| `WKT` | STRING column | `POINT(-77.03 38.90)` |
-| `WKB` | BINARY column | Compact binary |
-| `GEOJSON` | STRING column | JSON geometry objects |
-| `GEOMETRY` | GEOMETRY column | Native Databricks type, best performance |
+| Format | Storage | Example | Notes |
+|--------|---------|---------|-------|
+| `WKT` | STRING column | `POINT(-77.03 38.90)` | Human-readable; common in demo data |
+| `WKB` | BINARY column | hex bytes | Compact, fast to parse |
+| `GEOJSON` | STRING column | `{"type":"Point",...}` | Useful when JSON tooling already produces it |
+| `GEOMETRY` | GEOMETRY column | (native) | Best performance — no string parsing |
 
-**Lakebase** uses native PostGIS geometry only — no format configuration needed.
+### Which format to use
+
+| Situation | Recommended | Why |
+|---|---|---|
+| New table you control on Databricks | `GEOMETRY` (native) | No string parsing; geometry type detected from column type. Fastest at scale. |
+| Existing column with binary geometry | `WKB` | Compact storage, fast parse. Good production choice when native `GEOMETRY` isn't available. |
+| Existing column with text geometry | `WKT` | Works fine; human-readable for debugging. Has measurable parse overhead at large scale. |
+| Lakebase Synced Tables (Databricks → Lakebase reverse-ETL) | `WKT` | Forced — synced tables can't carry GEOMETRY/GEOGRAPHY types (see [Known Limitations](#known-limitations)). |
+
+Rule of thumb: **prefer `GEOMETRY` for production**, fall back to `WKB` if your table uses a binary column, and `WKT` is perfectly fine for demos, testing, or smaller datasets where human-readable storage is convenient.
+
+### When you must set `geometryFormat` explicitly
+
+The provider auto-detects the format from the column name (e.g. a column named `geometry_wkt` → WKT). If your column is named generically (e.g. `geometry`) but stores text WKT, **set `geometryFormat` explicitly** on the service to `WKT`, otherwise the provider will assume native `GEOMETRY` and fail to parse the rows. Set it explicitly any time the column name doesn't clearly identify the format.
+
+**Lakebase** uses native PostGIS geometry only — no `geometryFormat` configuration needed.
 
 ---
 
@@ -426,7 +596,7 @@ npm test
 
 **Both:**
 - `idField` values must be unique and in range 0–2,147,483,647
-- Network: if workspace has IP ACLs, ArcGIS Server IP must be allowlisted
+- See [Prerequisites](#prerequisites) for the IP allowlist requirement when a workspace has IP access lists enabled.
 
 ## Troubleshooting
 
@@ -434,7 +604,13 @@ npm test
 - Verify the `.cdpk` was registered: check ArcGIS Server Manager > Site > Extensions
 - Confirm `dataProviderName` matches the registered provider name exactly
 - **Native module mismatch**: if you built `node_modules` on a different OS (e.g., macOS) than the ArcGIS Server (e.g., Linux/Windows), the provider will fail to load. Run `npm install` on the ArcGIS Server machine itself.
-- Check ArcGIS Server logs: `<install>/server/usr/logs/`
+- Check ArcGIS Server logs (typically `/opt/arcgis/server/usr/logs/<machine>/server/server-*.log` on Linux)
+
+**`HTTP 498 — "Invalid token, ClientID does not match"` on admin REST calls**
+- Missing or mismatched `Referer` header. The token issued by `generateToken` is bound to the `referer=` value you passed. Every follow-up admin call must send `-H "Referer: https://your-server:6443"` matching that value. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound).
+
+**`HTTP 403` on first query / `Source IP address X is blocked by Databricks IP ACL`**
+- The Databricks workspace has IP access lists enabled and the ArcGIS Server's outbound IP isn't on the allowlist. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
 
 **No data returned (empty features array)**
 - Lakehouse: test the SQL Warehouse connection independently
@@ -450,6 +626,7 @@ npm test
 - Verify `lakebaseHost` is set in service parameters (editing only works via Lakebase)
 - Check Lakebase auth: if using manual token, ensure `LAKEBASE_PASSWORD` is not expired
 - ArcGIS Server 12.0+ required for `editData()` support
+- **Authorization**: on **standalone ArcGIS Server**, users with the built-in `ADMINISTER` privilege (e.g. `siteadmin`) or `PUBLISH` privilege have implicit access to all operations including edits — no extra setup. On **federated ArcGIS Enterprise (Portal)** sites, the user's Portal role must include the "Edit features" privilege; assigning the Publisher or Administrator role grants this. If a service has been secured with role-based permissions (`/admin/services/<svc>/permissions`), only members of the allowed roles can call `applyEdits` regardless of privilege.
 
 **Query is slow**
 - Lakehouse: first query is slow due to warehouse cold-start
