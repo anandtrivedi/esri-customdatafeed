@@ -554,7 +554,7 @@ Set these in your `.env` file, or in `init_user_param.sh` on ArcGIS Server. Per-
 
 ## Working with Existing Tables
 
-**Your table already has geometry data in some column** — use it directly. Point the service's `geometryColumn` at that column. Any of the supported formats work: native `GEOMETRY`, a STRING column holding WKT or GeoJSON, or a BINARY column holding WKB. If the column name doesn't make the format obvious (e.g. it's just called `geometry` but actually stores WKT text), set `geometryFormat` explicitly on the service. See [Geometry Support](#geometry-support) for the format options.
+**Your table already has geometry data in some column** — use it directly. Point the service's `geometryColumn` at that column. Any of the supported formats work: native `GEOMETRY`, WKT or GeoJSON in a STRING column, or WKB in a BINARY column. If the column name doesn't make the format obvious, also set `geometryFormat` — see [Geometry Support](#geometry-support).
 
 **Your table has only `latitude` / `longitude` columns** (no geometry column at all) — create a view that builds one from the coordinates, then point your Feature Service at the view:
 
