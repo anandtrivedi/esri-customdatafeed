@@ -57,6 +57,7 @@ Everything below runs on the **ArcGIS Server machine** (the provider is a Node.j
 
 - ArcGIS Server 11.4+ with Custom Data Feeds (11.4 added editing via `applyEdits`, 12.0 added `editingEnabled` property) — includes Node.js
 - Databricks SQL Warehouse with geospatial functions enabled
+- **Network**: if your Databricks workspace has IP access lists, allowlist the ArcGIS Server's outbound IP before continuing. The provider authenticates from the server's IP — a missing allowlist returns `HTTP 403` on the first query with no actionable error in the ArcGIS Server UI. Apply this **per workspace** if you're configuring multiple. ([Databricks docs](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list))
 - **Optional**: Databricks Lakebase instance — needed for low-latency serving or feature editing
 
 ### 1. Install dependencies
@@ -238,7 +239,50 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
   --data-urlencode "id=ITEM_ID_FROM_STEP_2"
 ```
 
-> **After registration:** The `.cdpk` extraction replaces the provider directory contents. If you use a `.env` file for credentials, re-create it in the provider directory after registration.
+> **After registration — two things to do every time:**
+> 1. **Recreate `.env`** in the provider directory. The `.cdpk` extraction overwrites the directory contents, including any local `.env` you had.
+> 2. **Restart ArcGIS Server** so the new provider code loads and `workspaceResolver` rereads `.databrickscfg` (the provider caches profiles on first read).
+
+## Production deployment notes
+
+These apply whether you have one workspace or many. Skip if you're just trying the provider locally.
+
+> **Where are these files on the ArcGIS Server box?** A Linux install of ArcGIS Server lands under `/opt/arcgis/server/` by default — paths below assume that. On Windows, the equivalent is typically `C:\Program Files\ArcGIS\Server\`. Substitute your install root if it's elsewhere. Edits to these files require a server restart (`/opt/arcgis/server/stopserver.sh` then `startserver.sh`, run as the `arcgis` OS user).
+
+### Set environment variables in `init_user_param.sh`
+
+ArcGIS Server reads a startup script (typically at `/opt/arcgis/server/usr/init_user_param.sh` on Linux) and exports anything in it as environment variables for the embedded Node.js runtime. Put Databricks credentials and `DATABRICKS_CONFIG_FILE` here for production rather than only in the provider's `.env` — `init_user_param.sh` is the most reliable channel into the JVM-hosted runtime.
+
+```bash
+# /opt/arcgis/server/usr/init_user_param.sh
+export DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
+export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+export DATABRICKS_ACCESS_TOKEN=dapi...
+# For multi-workspace setups, point the resolver at the shared config file:
+export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
+```
+
+The `.databrickscfg` itself (when used) should live at the path you set above with `chmod 600` and `chown arcgis:arcgis` so only the `arcgis` OS user (the one ArcGIS Server runs as) can read it. Restart ArcGIS Server after editing `init_user_param.sh`.
+
+### Admin REST tokens are referer-bound
+
+Every call to `/arcgis/admin/...` after `generateToken` must include a matching `Referer` header. Forgetting it returns `HTTP 498 — "Invalid token, ClientID does not match"`. This is an ArcGIS Server quirk, not a CDF behavior.
+
+```bash
+# Generate token — the referer= form value AND the Referer header must agree
+TOKEN=$(curl -sk 'https://your-server:6443/arcgis/admin/generateToken' \
+  -H 'Referer: https://your-server:6443' \
+  --data-urlencode 'username=siteadmin' \
+  --data-urlencode 'password=...' \
+  --data-urlencode 'client=referer' \
+  --data-urlencode 'referer=https://your-server:6443' \
+  --data-urlencode 'f=json' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# EVERY subsequent admin call needs the same Referer header
+curl -sk -H "Referer: https://your-server:6443" \
+  "https://your-server:6443/arcgis/admin/services?token=$TOKEN&f=json"
+```
 
 ## Creating Feature Services
 
@@ -455,14 +499,29 @@ All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon
 
 **Lakehouse** supports multiple storage formats via `geometryFormat`:
 
-| Format | Storage | Notes |
-|--------|---------|-------|
-| `WKT` | STRING column | `POINT(-77.03 38.90)` |
-| `WKB` | BINARY column | Compact binary |
-| `GEOJSON` | STRING column | JSON geometry objects |
-| `GEOMETRY` | GEOMETRY column | Native Databricks type, best performance |
+| Format | Storage | Example | Notes |
+|--------|---------|---------|-------|
+| `WKT` | STRING column | `POINT(-77.03 38.90)` | Human-readable; common in demo data |
+| `WKB` | BINARY column | hex bytes | Compact, fast to parse |
+| `GEOJSON` | STRING column | `{"type":"Point",...}` | Useful when JSON tooling already produces it |
+| `GEOMETRY` | GEOMETRY column | (native) | Best performance — no string parsing |
 
-**Lakebase** uses native PostGIS geometry only — no format configuration needed.
+### Which format to use
+
+| Situation | Recommended | Why |
+|---|---|---|
+| New table you control on Databricks | `GEOMETRY` (native) | No string parsing; geometry type detected from column type. Fastest at scale. |
+| Existing column with binary geometry | `WKB` | Compact storage, fast parse. Good production choice when native `GEOMETRY` isn't available. |
+| Existing column with text geometry | `WKT` | Works fine; human-readable for debugging. Has measurable parse overhead at large scale. |
+| Lakebase Synced Tables (Databricks → Lakebase reverse-ETL) | `WKT` | Forced — synced tables can't carry GEOMETRY/GEOGRAPHY types (see [Known Limitations](#known-limitations)). |
+
+Rule of thumb: **prefer `GEOMETRY` for production**, fall back to `WKB` if your table uses a binary column, and `WKT` is perfectly fine for demos, testing, or smaller datasets where human-readable storage is convenient.
+
+### When you must set `geometryFormat` explicitly
+
+The provider auto-detects the format from the column name (e.g. a column named `geometry_wkt` → WKT). If your column is named generically (e.g. `geometry`) but stores text WKT, **set `geometryFormat` explicitly** on the service to `WKT`, otherwise the provider will assume native `GEOMETRY` and fail to parse the rows. Set it explicitly any time the column name doesn't clearly identify the format.
+
+**Lakebase** uses native PostGIS geometry only — no `geometryFormat` configuration needed.
 
 ---
 
@@ -537,7 +596,7 @@ npm test
 
 **Both:**
 - `idField` values must be unique and in range 0–2,147,483,647
-- Network: if workspace has IP ACLs, ArcGIS Server IP must be allowlisted
+- See [Prerequisites](#prerequisites) for the IP allowlist requirement when a workspace has IP access lists enabled.
 
 ## Troubleshooting
 
@@ -545,7 +604,13 @@ npm test
 - Verify the `.cdpk` was registered: check ArcGIS Server Manager > Site > Extensions
 - Confirm `dataProviderName` matches the registered provider name exactly
 - **Native module mismatch**: if you built `node_modules` on a different OS (e.g., macOS) than the ArcGIS Server (e.g., Linux/Windows), the provider will fail to load. Run `npm install` on the ArcGIS Server machine itself.
-- Check ArcGIS Server logs: `<install>/server/usr/logs/`
+- Check ArcGIS Server logs (typically `/opt/arcgis/server/usr/logs/<machine>/server/server-*.log` on Linux)
+
+**`HTTP 498 — "Invalid token, ClientID does not match"` on admin REST calls**
+- Missing or mismatched `Referer` header. The token issued by `generateToken` is bound to the `referer=` value you passed. Every follow-up admin call must send `-H "Referer: https://your-server:6443"` matching that value. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound).
+
+**`HTTP 403` on first query / `Source IP address X is blocked by Databricks IP ACL`**
+- The Databricks workspace has IP access lists enabled and the ArcGIS Server's outbound IP isn't on the allowlist. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
 
 **No data returned (empty features array)**
 - Lakehouse: test the SQL Warehouse connection independently
@@ -561,6 +626,7 @@ npm test
 - Verify `lakebaseHost` is set in service parameters (editing only works via Lakebase)
 - Check Lakebase auth: if using manual token, ensure `LAKEBASE_PASSWORD` is not expired
 - ArcGIS Server 12.0+ required for `editData()` support
+- **Authorization**: on **standalone ArcGIS Server**, users with the built-in `ADMINISTER` privilege (e.g. `siteadmin`) or `PUBLISH` privilege have implicit access to all operations including edits — no extra setup. On **federated ArcGIS Enterprise (Portal)** sites, the user's Portal role must include the "Edit features" privilege; assigning the Publisher or Administrator role grants this. If a service has been secured with role-based permissions (`/admin/services/<svc>/permissions`), only members of the allowed roles can call `applyEdits` regardless of privilege.
 
 **Query is slow**
 - Lakehouse: first query is slow due to warehouse cold-start
