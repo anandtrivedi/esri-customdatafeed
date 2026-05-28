@@ -69,7 +69,14 @@ All commands below run on the ArcGIS Server host.
 
 - **ArcGIS Server 11.4 or later** with Custom Data Feeds enabled. ArcGIS Server includes a Node.js runtime — you do not need to install Node separately. ArcGIS Server 12.0+ is recommended if you want feature editing.
 - **A Databricks SQL Warehouse** with geospatial functions enabled.
-- **Network access from the ArcGIS Server box to your Databricks workspace.** If your workspace has [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list) enabled, allowlist the server's outbound IP — otherwise the first query returns `HTTP 403` with no clear error in the ArcGIS Server UI. Apply this **per workspace** if you're connecting to more than one.
+- **Network access from the ArcGIS Server box to your Databricks workspace.** Open these outbound ports from the ArcGIS Server's network (firewall / VPC security group / on-prem ACL):
+
+  | Destination | Port | Protocol | Used for |
+  |---|---|---|---|
+  | `<workspace>.cloud.databricks.com` | 443 | HTTPS | SQL Warehouse queries + all Databricks REST API calls (token mint, Lakebase credential mint, etc.) |
+  | `<lakebase-instance>.database.cloud.databricks.com` | 5432 | PostgreSQL over TLS | Lakebase queries and edits (only if you use the Lakebase backend) |
+
+  Nothing needs to be opened *inbound* on the Databricks side — Databricks already listens on these ports and gates access via IP allowlists. If your workspace has [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list) enabled, allowlist the ArcGIS Server's outbound IP — otherwise the first query returns `HTTP 403` with no clear error in the ArcGIS Server UI. Apply this **per workspace** if you're connecting to more than one.
 - **Optional:** A Databricks Lakebase instance — only needed for low-latency serving or feature editing.
 
 ### 1. Get the code and install dependencies
@@ -609,6 +616,9 @@ Then create your Feature Service with `tableName` (or `lakebaseTable`) set to `m
 **`HTTP 403` on first query — telling the two flavors apart**
 - `Source IP address X is blocked by Databricks IP ACL` → the workspace's IP access list doesn't include the ArcGIS Server's outbound IP. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
 - `Invalid access token` → the PAT (or service-principal credentials) is expired, revoked, or wrong. Generate a fresh one in Databricks and update the `.env` or `.databrickscfg` entry. Restart ArcGIS Server so the cached value is replaced.
+
+**Connection times out or "no route to host" / `ECONNREFUSED` / `ETIMEDOUT`**
+- A firewall is blocking the outbound port to Databricks (not the same as an IP allowlist 403). Confirm the ArcGIS Server's network can reach Databricks on `443` (SQL warehouse + REST API) and, if you're using Lakebase, also on `5432` (PostgreSQL). See [Prerequisites](#prerequisites) for the port table.
 
 **Updated `.databrickscfg` but the new profile or token isn't being used**
 - The provider caches `.databrickscfg` at first read. **Restart ArcGIS Server** any time you edit the file. (Same applies to changes in `init_user_param.sh`.)
