@@ -554,22 +554,25 @@ Set these in your `.env` file, or in `init_user_param.sh` on ArcGIS Server. Per-
 
 ## Working with Existing Tables
 
-**Table already has a geometry column** — use it directly.
+**Your table already has geometry data in some column** — use it directly. Point the service's `geometryColumn` at that column. Any of the supported formats work: native `GEOMETRY`, a STRING column holding WKT or GeoJSON, or a BINARY column holding WKB. If the column name doesn't make the format obvious (e.g. it's just called `geometry` but actually stores WKT text), set `geometryFormat` explicitly on the service. See [Geometry Support](#geometry-support) for the format options.
 
-**Table has lat/lon columns** — create a view:
+**Your table has only `latitude` / `longitude` columns** (no geometry column at all) — create a view that builds one from the coordinates, then point your Feature Service at the view:
+
 ```sql
--- Lakehouse
+-- Lakehouse (Databricks SQL)
 CREATE VIEW catalog.schema.my_table_geo AS
 SELECT *, ST_Point(longitude, latitude) AS geometry
 FROM catalog.schema.my_table
 WHERE latitude IS NOT NULL;
 
--- Lakebase
+-- Lakebase (PostGIS)
 CREATE VIEW public.my_table_geo AS
 SELECT *, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326) AS geometry
 FROM public.my_table
 WHERE latitude IS NOT NULL;
 ```
+
+Then create your Feature Service with `tableName` (or `lakebaseTable`) set to `my_table_geo` instead of the source table.
 
 ---
 
