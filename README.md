@@ -229,6 +229,8 @@ Skip this step if you don't need editing or low-latency serving.
 
 **One-time Lakebase database setup:** enable PostGIS on each database the provider will use — `CREATE EXTENSION IF NOT EXISTS postgis;`. The provider's Lakebase queries and edits rely on PostGIS geometry types and ST_* functions; without it the first query fails with `function st_intersects does not exist`.
 
+> **Heads-up if your Lakebase table is populated via Databricks Synced Tables** (the reverse-ETL feature that copies a Unity Catalog table into Lakebase): Databricks Sync **does not carry GEOMETRY or GEOGRAPHY columns** — the sync will fail if your source Delta table has them. The fix is to store geometry as WKT in a STRING column on the Databricks side, sync that, and either convert at query time or via a generated column on the Lakebase side. Full details and the workaround SQL are in [Known Limitations → Lakebase Synced Tables](#lakebase-synced-tables-geometrygeography-types-not-supported). If you're creating your Lakebase table directly (not via sync), ignore this — native PostGIS geometry works fine.
+
 For Lakebase services, no extra provider-side config is needed. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Step 6: Create your first Feature Service](#6-create-your-first-feature-service)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
 
 To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
@@ -260,8 +262,13 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
 
 > **What just happened.** The `register` call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
 >
+> **Before re-registering (skip on first install):** if you've already done a register once and added a `.env` to the live provider directory, **back it up first** — the `.cdpk` extraction wipes the directory:
+> ```bash
+> sudo cp /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env /tmp/cdf.env.bak
+> ```
+>
 > **After registration — two things to do every time:**
-> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one. The `.cdpk` extraction overwrites whatever was there, so any local `.env` you had under `/opt/arcgis/...` is gone. (The `.env` in your home-dir clone is not used at runtime.) This is one of the cases where you need `sudo` — see the [user-context callout](#setup) at the top of Setup.
+> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one. The `.cdpk` extraction overwrites whatever was there, so any local `.env` you had under `/opt/arcgis/...` is gone. (The `.env` in your home-dir clone is not used at runtime.) Restore from your backup if you made one. This is one of the cases where you need `sudo` — see the [user-context callout](#setup) at the top of Setup.
 > 2. **Restart ArcGIS Server** (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`) so the new code loads.
 
 <details>
