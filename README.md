@@ -13,13 +13,16 @@ One provider is registered once. Each Feature Service chooses its backend via se
 
 > **How to read this README**
 >
-> The install path is short:
+> The install path is **6 steps**:
 >
-> 1. **[Setup](#setup)** — steps 1–4 to install and configure the provider on your ArcGIS Server box
-> 2. **[Production deployment notes](#production-deployment-notes)** — recommended hardening (env vars, admin-token quirks)
-> 3. **[Creating Feature Services](#creating-feature-services)** — make a service per table you want to expose
+> 1. Get the code and install dependencies *(Setup)*
+> 2. Configure Databricks connection *(Setup)*
+> 3. Configure Lakebase *(Setup, optional)*
+> 4. Package and register the provider *(Setup)*
+> 5. Apply [production hardening](#5-production-hardening-recommended) *(recommended)*
+> 6. [Create your first Feature Service](#6-create-your-first-feature-service)
 >
-> Once you hit the **"Installation complete"** marker further down, you're done. Everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
+> Once you hit the **"Installation complete"** marker after step 6, you're done. Everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
 
 ## Overview
 
@@ -64,6 +67,12 @@ nodejs-provider/
 ## Setup
 
 All commands below run on the ArcGIS Server host.
+
+> **Which user runs what:**
+> - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build, package, and upload work — `git clone`, `npm install`, `zip`, and the `curl` calls to the Admin REST API.
+> - **`sudo` is required** for anything that reads or writes under `/opt/arcgis/` (the ArcGIS Server install tree). Editing `init_user_param.sh`, placing `.databrickscfg`, recreating `.env` after a `.cdpk` re-extraction, and tailing logs all need `sudo`.
+> - **`sudo -u arcgis`** is used to start, stop, or restart ArcGIS Server itself, because the server processes run as the `arcgis` OS user. Example: `sudo -u arcgis /opt/arcgis/server/startserver.sh`.
+> - Files you create under `/opt/arcgis/...` should be `chown arcgis:arcgis` so the server can read them.
 
 ### Prerequisites
 
@@ -152,7 +161,7 @@ If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env va
 
 #### Example: services pointing at different workspaces
 
-Using the two profiles from the snippets above (`[WORKSPACE_A]` PAT and `[WORKSPACE_B]` OAuth M2M), here's how a Lakehouse service and a Lakebase service register against different workspaces — full createService payloads are in [Creating Feature Services](#creating-feature-services) below.
+Using the two profiles from the snippets above (`[WORKSPACE_A]` PAT and `[WORKSPACE_B]` OAuth M2M), here's how a Lakehouse service and a Lakebase service register against different workspaces — full createService payloads are in [Step 6: Create your first Feature Service](#6-create-your-first-feature-service) below.
 
 ```json
 // Lakehouse service → workspace A (PAT)
@@ -192,7 +201,7 @@ Reference: [Authorize service principal access with OAuth M2M](https://docs.data
 
 #### `.databrickscfg` location on ArcGIS Server
 
-ArcGIS Server runs as the `arcgis` OS user, whose home directory may not be set up — so don't rely on the default `~/.databrickscfg` lookup. Put the file at an explicit path (e.g. `/opt/arcgis/server/usr/.databrickscfg`) and point `DATABRICKS_CONFIG_FILE` at it. The init-script setup and file permissions are covered in [Production deployment notes](#production-deployment-notes) below.
+ArcGIS Server runs as the `arcgis` OS user, whose home directory may not be set up — so don't rely on the default `~/.databrickscfg` lookup. Put the file at an explicit path (e.g. `/opt/arcgis/server/usr/.databrickscfg`) and point `DATABRICKS_CONFIG_FILE` at it. The init-script setup and file permissions are covered in [Step 5: Production hardening](#5-production-hardening-recommended) below.
 
 #### Verifying it works
 
@@ -220,13 +229,13 @@ Skip this step if you don't need editing or low-latency serving.
 
 **One-time Lakebase database setup:** enable PostGIS on each database the provider will use — `CREATE EXTENSION IF NOT EXISTS postgis;`. The provider's Lakebase queries and edits rely on PostGIS geometry types and ST_* functions; without it the first query fails with `function st_intersects does not exist`.
 
-For Lakebase services, no extra provider-side config is needed. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
+For Lakebase services, no extra provider-side config is needed. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Step 6: Create your first Feature Service](#6-create-your-first-feature-service)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
 
 To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
 
 ### 4. Package and Register Provider
 
-This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is a [separate, later step](#creating-feature-services).
+This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is the next step: [Step 6](#6-create-your-first-feature-service).
 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
@@ -266,11 +275,11 @@ cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOK
 For self-signed certs, set `NODE_TLS_REJECT_UNAUTHORIZED=0` or `NODE_EXTRA_CA_CERTS=/path/to/cert.pem`. If you hit "Invalid token, ClientID does not match", fall back to the REST API above — the CDF CLI uses `Authorization: Bearer` which conflicts with ArcGIS's referer-based tokens.
 </details>
 
-## Production deployment notes
+## 5. Production hardening (recommended)
 
-These apply whether you have one workspace or many. Skip if you're just trying the provider locally.
+These steps harden the deployment for production. Skip if you're just trying the provider locally — Steps 1-4 alone will work.
 
-> **Where are these files on the ArcGIS Server box?** A Linux install of ArcGIS Server lands under `/opt/arcgis/server/` by default — paths below assume that. On Windows, the equivalent is typically `C:\Program Files\ArcGIS\Server\`. Substitute your install root if it's elsewhere. Edits to these files require a server restart (`/opt/arcgis/server/stopserver.sh` then `startserver.sh`, run as the `arcgis` OS user).
+> **Where things live on the ArcGIS Server box.** A Linux install lands under `/opt/arcgis/server/` by default; on Windows the equivalent is typically `C:\Program Files\ArcGIS\Server\`. Substitute your install root if it's elsewhere. The paths in the rest of this section assume the Linux default. Edits to files under `/opt/arcgis/` need `sudo`, and any change requires a server restart (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`). If you want to verify the install state before/after changes, jump to the [sanity-check block](#troubleshooting) at the top of Troubleshooting.
 
 ### Set environment variables in `init_user_param.sh`
 
@@ -307,20 +316,18 @@ curl -sk -H "Referer: https://your-server:6443" \
   "https://your-server:6443/arcgis/admin/services?token=$TOKEN&f=json"
 ```
 
-## Table Requirements
+## 6. Create your first Feature Service
 
-Before you create a Feature Service, make sure your source table satisfies these:
+In [Step 4](#4-package-and-register-provider) you registered the provider — that was a one-time install. **This step is what you do every time you want to expose a new Databricks table as a Feature Service**: a separate REST call per table, against a different admin endpoint (`/createService` instead of `/customdataproviders/register`). Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend (Lakehouse or Lakebase) is used.
 
-- **`idField` is an integer column with unique values in the range 0 – 2,147,483,647.** ArcGIS uses this as OBJECTID. Both INT and BIGINT work (Databricks BIGINT is read back as a string and cast to a number).
-- **Geometry uses `lon lat` order** (the GIS standard). If you store WKT, write `POINT(lon lat)`, not `POINT(lat lon)`.
-- **Lakehouse only**: table name must be fully qualified (`catalog.schema.table`), and the SQL warehouse must be running (serverless adds a ~5–15s cold-start to the first query).
-- **Lakebase only**: the geometry column is native PostGIS geometry.
-
-If your source table has lat/lon columns instead of a geometry column, see [Working with Existing Tables](#working-with-existing-tables) for the view pattern.
-
-## Creating Feature Services
-
-In [Step 4](#4-package-and-register-provider) you registered the provider — that was a one-time install. **This section is for what you do every time you want to expose a new Databricks table as a Feature Service**: a separate REST call per table, against a different admin endpoint (`/createService` instead of `/customdataproviders/register`). Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend (Lakehouse or Lakebase) is used.
+> **Before you start — your source table must satisfy:**
+>
+> - **`idField` is an integer column with unique values in the range 0 – 2,147,483,647.** ArcGIS uses this as OBJECTID. Both INT and BIGINT work (Databricks BIGINT is read back as a string and cast to a number).
+> - **Geometry uses `lon lat` order** (the GIS standard). If you store WKT, write `POINT(lon lat)`, not `POINT(lat lon)`.
+> - **Lakehouse only**: table name must be fully qualified (`catalog.schema.table`), and the SQL warehouse must be running (serverless adds a ~5–15s cold-start to the first query).
+> - **Lakebase only**: the geometry column is native PostGIS geometry.
+>
+> If your source table has only `latitude` / `longitude` columns instead of a geometry column, see [Working with Existing Tables](#working-with-existing-tables) for the view pattern.
 
 ### Lakehouse Service Parameters
 
