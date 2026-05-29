@@ -226,6 +226,8 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 
 ### 4. Package and Register Provider
 
+This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is a [separate, later step](#creating-feature-services).
+
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
 ```bash
@@ -318,7 +320,7 @@ If your source table has lat/lon columns instead of a geometry column, see [Work
 
 ## Creating Feature Services
 
-You register the provider once, then create individual Feature Services. Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend is used.
+In [Step 4](#4-package-and-register-provider) you registered the provider — that was a one-time install. **This section is for what you do every time you want to expose a new Databricks table as a Feature Service**: a separate REST call per table, against a different admin endpoint (`/createService` instead of `/customdataproviders/register`). Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend (Lakehouse or Lakebase) is used.
 
 ### Lakehouse Service Parameters
 
@@ -602,6 +604,42 @@ Then create your Feature Service with `tableName` (or `lakebaseTable`) set to `m
 ---
 
 ## Troubleshooting
+
+<details>
+<summary><b>First, sanity-check the install state on the ArcGIS Server box</b></summary>
+
+Before debugging a specific symptom, confirm the registered provider, env vars, and `.databrickscfg` look right. Most issues fall out from one of these being misconfigured. The provider files are owned by the `arcgis` OS user, so SSH in and run with `sudo`:
+
+```bash
+sudo bash -c '
+echo "=== Provider dir (this is what ArcGIS Server actually runs) ==="
+ls -la /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/
+
+echo ""
+echo "=== Provider .env (redacted) ==="
+[ -f /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env ] \
+  && sed -E "s/(TOKEN|PASSWORD|SECRET) *= *.+/\1=<REDACTED>/g" \
+       /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env \
+  || echo "(no .env file)"
+
+echo ""
+echo "=== init_user_param.sh (redacted) ==="
+sed -E "s/(TOKEN|PASSWORD|SECRET) *= *.+/\1=<REDACTED>/g" /opt/arcgis/server/usr/init_user_param.sh 2>/dev/null
+
+echo ""
+echo "=== .databrickscfg profiles (redacted) ==="
+sed -E "s/(token|client_secret) *= *.+/\1 = <REDACTED>/g" /opt/arcgis/server/usr/.databrickscfg 2>/dev/null
+
+echo ""
+echo "=== Most recent server log lines mentioning Custom_data_feeds ==="
+ls -t /opt/arcgis/server/usr/logs/*/server/server-*.log 2>/dev/null | head -1 \
+  | xargs grep -E "Custom_data_feeds|Pool " 2>/dev/null | tail -10
+'
+```
+
+This dumps everything that matters — provider directory contents, env vars, multi-workspace profiles, and the last few Custom_data_feeds log lines — with secrets redacted, in one command.
+
+</details>
 
 **Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
 - Verify the `.cdpk` was registered (check ArcGIS Server Manager → Site → Extensions).
