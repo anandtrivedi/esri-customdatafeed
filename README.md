@@ -258,9 +258,11 @@ curl -k "https://your-server:6443/arcgis/admin/services/types/customdataprovider
   --data-urlencode "id=ITEM_ID_FROM_STEP_2"
 ```
 
+> **What just happened.** The `register` call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
+>
 > **After registration — two things to do every time:**
-> 1. **Recreate `.env`** in the provider directory if you use one. The `.cdpk` extraction overwrites the directory contents.
-> 2. **Restart ArcGIS Server** so the new code loads.
+> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one. The `.cdpk` extraction overwrites whatever was there, so any local `.env` you had under `/opt/arcgis/...` is gone. (The `.env` in your home-dir clone is not used at runtime.) This is one of the cases where you need `sudo` — see the [user-context callout](#setup) at the top of Setup.
+> 2. **Restart ArcGIS Server** (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`) so the new code loads.
 
 <details>
 <summary>Alternative: CDF CLI from the ArcGIS Enterprise SDK</summary>
