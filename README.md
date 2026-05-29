@@ -218,7 +218,9 @@ Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/lo
 
 Skip this step if you don't need editing or low-latency serving.
 
-For Lakebase services, you don't need any extra setup here. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
+**One-time Lakebase database setup:** enable PostGIS on each database the provider will use — `CREATE EXTENSION IF NOT EXISTS postgis;`. The provider's Lakebase queries and edits rely on PostGIS geometry types and ST_* functions; without it the first query fails with `function st_intersects does not exist`.
+
+For Lakebase services, no extra provider-side config is needed. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Creating Feature Services](#creating-feature-services)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
 
 To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
 
