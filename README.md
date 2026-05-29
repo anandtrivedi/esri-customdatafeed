@@ -15,11 +15,11 @@ One provider is registered once. Each Feature Service chooses its backend via se
 >
 > The install path is **6 steps**:
 >
-> 1. Get the code and install dependencies *(Setup)*
-> 2. Configure Databricks connection *(Setup)*
-> 3. Configure Lakebase *(Setup, optional)*
-> 4. Package and register the provider *(Setup)*
-> 5. Apply [production hardening](#5-production-hardening-recommended) *(recommended)*
+> 1. [Get the code and install dependencies](#1-get-the-code-and-install-dependencies) *(Setup)*
+> 2. [Configure Databricks connection](#2-configure-databricks-connection) *(Setup)*
+> 3. [Configure Lakebase](#3-configure-lakebase-optional) *(Setup, optional)*
+> 4. [Package and register the provider](#4-package-and-register-provider) *(Setup)*
+> 5. [Apply production hardening](#5-production-hardening-recommended) *(recommended)*
 > 6. [Create your first Feature Service](#6-create-your-first-feature-service)
 >
 > Once you hit the **"Installation complete"** marker after step 6, you're done. Everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
@@ -748,7 +748,7 @@ The provider can read credentials from three places. Each fits a different stage
 These are the provider's own unit tests (mocha + chai) — they exercise the SQL builders, geometry handling, sanitization, and workspace resolver in isolation, **not** your live deployment. Useful if you're modifying the source or want to verify nothing's broken before packaging a `.cdpk`.
 
 ```bash
-cd nodejs-provider
+cd esri-customdatafeed/nodejs-provider
 npm test
 # 339 passing
 ```
