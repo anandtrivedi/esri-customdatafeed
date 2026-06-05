@@ -241,7 +241,7 @@ This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provi
 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
-> **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound) for the full explanation of why the `Referer` header must match.
+> **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer) for the difference between the two binding modes and when to use each.
 
 ```bash
 # 1. Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
@@ -250,25 +250,22 @@ zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '*.env*' 'test/*' '*.md'
 
-# 2. Get an ArcGIS admin token (siteadmin login). The Referer header and referer= value must agree.
-TOKEN=$(curl -sk 'https://your-server:6443/arcgis/admin/generateToken' \
-  -H 'Referer: https://your-server:6443' \
+# 2. Get an ArcGIS admin token (siteadmin login). client=requestip binds the
+#    token to your IP — no Referer header to keep in sync. Run this on the box
+#    (or replace localhost with the server host) and use your real password.
+TOKEN=$(curl -sk -X POST 'https://localhost:6443/arcgis/admin/generateToken?f=json' \
   --data-urlencode 'username=siteadmin' \
   --data-urlencode 'password=...' \
-  --data-urlencode 'client=referer' \
-  --data-urlencode 'referer=https://your-server:6443' \
-  --data-urlencode 'f=json' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  --data-urlencode 'client=requestip' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 
-# 3. Upload the .cdpk ($TOKEN expands from step 2)
-curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
-  -H "Referer: https://your-server:6443" \
+# 3. Upload the .cdpk ($TOKEN expands from step 2; requestip token needs no Referer header)
+curl -k "https://localhost:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
   -F "itemFile=@databricks-geospatial-provider.cdpk"
 # Returns: {"status":"success","item":{"itemID":"i..."}}
 
 # 4. Register using the itemID from step 3
-curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
-  -H "Referer: https://your-server:6443" \
+curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
   --data-urlencode "id=ITEM_ID_FROM_STEP_3"
 ```
 
@@ -317,22 +314,36 @@ export DATABRICKS_CONFIG_FILE=/opt/arcgis/server/usr/.databrickscfg
 
 The `.databrickscfg` itself (when used) should live at the path you set above with `chmod 600` and `chown arcgis:arcgis` so only the `arcgis` OS user (the one ArcGIS Server runs as) can read it. Restart ArcGIS Server after editing `init_user_param.sh`.
 
-### Admin REST tokens are referer-bound
+### Admin token binding: `requestip` vs `referer`
 
-Every call to `/arcgis/admin/...` after `generateToken` must include a matching `Referer` header. Forgetting it returns `HTTP 498 — "Invalid token, ClientID does not match"`. This is an ArcGIS Server quirk, not a CDF behavior.
+When you call `generateToken`, the `client` parameter decides what the token is bound to. The two practical options:
+
+- **`client=requestip` (recommended).** The token is tied to the IP that requested it. No `Referer` header to manage on any subsequent call — simplest and least error-prone, especially when running curl on the box against `localhost`. This is what [Step 4](#4-package-and-register-provider) uses.
+- **`client=referer`.** The token is tied to a referer URL, and *every* subsequent `/arcgis/admin/...` call must send a `Referer` header that matches the `referer=` value you passed at generation time. Any mismatch returns `HTTP 498 — "Invalid token, ClientID does not match"`, or a JSON error object with no `token` key (which breaks `json.load(...)["token"]` parsing). Use this only if your environment can't rely on a stable request IP.
 
 ```bash
-# Generate token — the referer= form value AND the Referer header must agree
-TOKEN=$(curl -sk 'https://your-server:6443/arcgis/admin/generateToken' \
+# requestip — token bound to your IP, no Referer header needed anywhere
+TOKEN=$(curl -sk -X POST 'https://localhost:6443/arcgis/admin/generateToken?f=json' \
+  --data-urlencode 'username=siteadmin' \
+  --data-urlencode 'password=...' \
+  --data-urlencode 'client=requestip' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+
+# subsequent calls just pass the token — no Referer required
+curl -sk "https://localhost:6443/arcgis/admin/services?token=$TOKEN&f=json"
+```
+
+```bash
+# referer alternative — the referer= value AND the Referer header on every call must agree
+TOKEN=$(curl -sk -X POST 'https://your-server:6443/arcgis/admin/generateToken?f=json' \
   -H 'Referer: https://your-server:6443' \
   --data-urlencode 'username=siteadmin' \
   --data-urlencode 'password=...' \
   --data-urlencode 'client=referer' \
   --data-urlencode 'referer=https://your-server:6443' \
-  --data-urlencode 'f=json' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 
-# EVERY subsequent admin call needs the same Referer header
+# EVERY subsequent admin call must then repeat the matching Referer header
 curl -sk -H "Referer: https://your-server:6443" \
   "https://your-server:6443/arcgis/admin/services?token=$TOKEN&f=json"
 ```
@@ -393,8 +404,7 @@ Create services via the **Admin REST API** (`createService` endpoint). All servi
 #### Lakehouse service (read-only)
 
 ```bash
-curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
-  -H "Referer: https://your-server:6443" \
+curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN&f=json" \
   --data-urlencode 'service={
     "serviceName": "MyCellTowers",
     "type": "FeatureServer",
@@ -433,8 +443,7 @@ curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKE
 #### Lakebase service (read + write)
 
 ```bash
-curl -k "https://your-server:6443/arcgis/admin/services/createService?token=TOKEN&f=json" \
-  -H "Referer: https://your-server:6443" \
+curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN&f=json" \
   --data-urlencode 'service={
     "serviceName": "CellTowersEditable",
     "type": "FeatureServer",
@@ -679,7 +688,7 @@ This dumps everything that matters — provider directory contents, env vars, mu
 - Provider initialization failed silently after the admin layer started the service. Tail the server log and look for `Custom_data_feeds` lines — common culprits are a missing/expired credential, a `.databrickscfg` profile name that doesn't match, or an unreachable warehouse.
 
 **`HTTP 498 — "Invalid token, ClientID does not match"` on admin REST calls**
-- Missing or mismatched `Referer` header. Tokens minted with `client=referer` are bound to the exact `referer=` value you passed. Every subsequent admin call must send `-H "Referer: https://your-server:6443"` matching that value. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound).
+- You minted the token with `client=referer` but a subsequent admin call sent a missing or mismatched `Referer` header — every call must repeat `-H "Referer: https://your-server:6443"` matching the `referer=` value you passed at generation time. The simplest fix is to mint the token with `client=requestip` instead, which has no `Referer` requirement at all. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer).
 
 **`HTTP 403` on first query — telling the two flavors apart**
 - `Source IP address X is blocked by Databricks IP ACL` → the workspace's IP access list doesn't include the ArcGIS Server's outbound IP. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
