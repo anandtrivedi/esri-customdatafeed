@@ -66,7 +66,7 @@ nodejs-provider/
 
 ## Setup
 
-All commands below run on the ArcGIS Server host.
+**Every command in this guide runs on the ArcGIS Server host itself — not on your laptop.** SSH into the box first and stay there for the whole install. That's why the `curl` examples target `https://localhost:6443/...`: `localhost` *is* the ArcGIS Server, because you're already logged into it. (The only exceptions are the two collapsed "alternative" blocks — the CDF CLI and the `referer` token flow — which use `your-server` as a placeholder for the box's external hostname, for the rare case you run them from elsewhere.)
 
 > **Which user runs what:**
 > - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build, package, and upload work — `git clone`, `npm install`, `zip`, and the `curl` calls to the Admin REST API.
@@ -240,6 +240,14 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is the next step: [Step 6](#6-create-your-first-feature-service).
 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
+
+> **Fresh server vs. reused server.** The smoothest path is a server with **no CDF provider registered yet** — the steps below just work. If you're deploying onto a box that *already* has a Databricks CDF provider registered (e.g. a pre-baked or reused AMI), ArcGIS Server will refuse a second registration under a **different** provider name — you'll see something like *"a provider with this name already exists"* / *"can't load another one."* Two ways out:
+> - **Keep the same name** (recommended) — build your `.cdpk` from this repo's unchanged `cdconfig.json` (provider name `databricks-geospatial-provider`). Re-registering the same name updates the existing provider in place, which is exactly what you want when upgrading the provider code. No need to remove anything first.
+> - **Remove the old one first** if you genuinely need a different name. List what's registered, then unregister the stale one — via the Admin Directory UI (`https://localhost:6443/arcgis/admin` → Services → Types → Custom Data Providers) or the matching REST operation:
+>   ```bash
+>   curl -sk "https://localhost:6443/arcgis/admin/services/types/customdataproviders?token=$TOKEN&f=json"
+>   ```
+> If registration "worked anyway" despite the warning, the existing same-named provider was updated in place — that's fine. Either way, restart the server (below) so the new code actually loads.
 
 > **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer) for the difference between the two binding modes and when to use each.
 
