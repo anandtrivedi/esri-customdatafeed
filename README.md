@@ -241,6 +241,8 @@ This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provi
 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
+> **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin REST tokens are referer-bound](#admin-rest-tokens-are-referer-bound) for the full explanation of why the `Referer` header must match.
+
 ```bash
 # 1. Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
 cd esri-customdatafeed/nodejs-provider   # if not already there
@@ -248,16 +250,26 @@ zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '*.env*' 'test/*' '*.md'
 
-# 2. Upload it
-curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=TOKEN&f=json" \
+# 2. Get an ArcGIS admin token (siteadmin login). The Referer header and referer= value must agree.
+TOKEN=$(curl -sk 'https://your-server:6443/arcgis/admin/generateToken' \
+  -H 'Referer: https://your-server:6443' \
+  --data-urlencode 'username=siteadmin' \
+  --data-urlencode 'password=...' \
+  --data-urlencode 'client=referer' \
+  --data-urlencode 'referer=https://your-server:6443' \
+  --data-urlencode 'f=json' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# 3. Upload the .cdpk ($TOKEN expands from step 2)
+curl -k "https://your-server:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
   -F "itemFile=@databricks-geospatial-provider.cdpk"
 # Returns: {"status":"success","item":{"itemID":"i..."}}
 
-# 3. Register using the itemID from step 2
-curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=TOKEN&f=json" \
+# 4. Register using the itemID from step 3
+curl -k "https://your-server:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
   -H "Referer: https://your-server:6443" \
-  --data-urlencode "id=ITEM_ID_FROM_STEP_2"
+  --data-urlencode "id=ITEM_ID_FROM_STEP_3"
 ```
 
 > **What just happened.** The `register` call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
