@@ -28,7 +28,9 @@ const {
  * @param {string} sourceConfig.idField        - ID column name
  * @param {number} [sourceConfig.dbWKID=4326]  - SRID
  * @param {number} [sourceConfig.maxRecordCountPerPage=2000] - Max records
- * @returns {{ sql: string, params: any[] }}
+ * @returns {{ sql: string, params: any[], fetchSize: number }} fetchSize is the
+ *   effective page size (LIMIT is fetchSize + 1 so the caller can detect
+ *   exceededTransferLimit and pop the extra row)
  */
 function buildLakebaseSelectSql(geoParams, sourceConfig) {
   const {
@@ -149,7 +151,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   }
 
   const sql = `SELECT ${selectClause} FROM ${schema}.${table}${whereStr}${orderByStr}${limitStr}${offsetStr}`;
-  return { sql, params };
+  return { sql, params, fetchSize };
 }
 
 /**

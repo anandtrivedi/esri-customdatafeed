@@ -32,6 +32,14 @@ const workspaceApiTokenCache = {};
 // Token buffer: refresh 5 minutes before expiry
 const TOKEN_BUFFER_MS = 5 * 60 * 1000;
 
+// TLS verification for Databricks REST API calls (/oidc/v1/token, /api/2.0/database/*).
+// These target *.cloud.databricks.com with publicly-trusted certs, so verification
+// is on by default. Set DATABRICKS_API_SSL_VERIFY=false only behind a
+// TLS-intercepting proxy with an untrusted CA.
+function apiTlsVerify() {
+  return process.env.DATABRICKS_API_SSL_VERIFY !== 'false';
+}
+
 /**
  * Build a unique pool key. Includes workspace alias so two services
  * pointing at the same Lakebase host but using different workspace
@@ -68,7 +76,7 @@ function mintWorkspaceApiToken(workspaceConfig) {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(body),
       },
-      rejectUnauthorized: false,
+      rejectUnauthorized: apiTlsVerify(),
     };
 
     const req = https.request(options, (res) => {
@@ -153,7 +161,7 @@ async function databricksApiRequest(method, path, body, workspaceConfig) {
         'Authorization': `Bearer ${apiToken}`,
         'Content-Type': 'application/json',
       },
-      rejectUnauthorized: false,
+      rejectUnauthorized: apiTlsVerify(),
     };
 
     if (bodyStr) {

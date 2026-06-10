@@ -195,11 +195,11 @@ function toGeoJsonString(filter) {
       coordinates: filter.rings,
     };
   } else if (typeof filter === "object" && filter.paths) {
-    // Esri Polyline format
-    geojson = {
-      type: "LineString",
-      coordinates: filter.paths[0],
-    };
+    // Esri Polyline format — multi-path polylines map to MultiLineString
+    // (matches the Lakebase path in lakebaseQuery.parseGeometryFilter)
+    geojson = filter.paths.length === 1
+      ? { type: "LineString", coordinates: filter.paths[0] }
+      : { type: "MultiLineString", coordinates: filter.paths };
   } else if (typeof filter === "object" && filter.xmin !== undefined) {
     // Esri Envelope format
     geojson = {

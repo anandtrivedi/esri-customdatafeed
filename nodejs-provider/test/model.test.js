@@ -3,19 +3,30 @@ const proxyquire = require("proxyquire").noCallThru();
 
 // Stub connectionPool to avoid real Databricks connections.
 // New signature: getPool(workspaceConfig, httpPath, options) — args ignored by the stub.
+// Configurable: set lakehouseQueryRows for results, lakehouseExecuteError to make
+// executeStatement throw; lakehouseReleaseLog records release(conn, opts) calls.
+let lakehouseQueryRows = [];
+let lakehouseExecuteError = null;
+let lakehouseReleaseLog = [];
 const connectionPoolStub = {
   getPool: () => ({
     poolLabel: () => "test-pool",
     acquire: async () => ({
       id: "test-conn",
       session: {
-        executeStatement: async () => ({
-          fetchAll: async () => [],
-          close: async () => {},
-        }),
+        executeStatement: async (sql) => {
+          if (lakehouseExecuteError) throw lakehouseExecuteError;
+          return {
+            // DESCRIBE TABLE probe (geometry format detection) gets no rows
+            fetchAll: async () => (/^\s*DESCRIBE/i.test(sql) ? [] : lakehouseQueryRows),
+            close: async () => {},
+          };
+        },
       },
     }),
-    release: () => {},
+    release: (conn, opts) => {
+      lakehouseReleaseLog.push(opts || {});
+    },
   }),
   shutdownPool: async () => {},
   getAllPoolStats: () => [],
@@ -89,6 +100,9 @@ describe("model", () => {
   beforeEach(() => {
     lakebaseQueryResult = { rows: [] };
     lakebaseQueryLog = [];
+    lakehouseQueryRows = [];
+    lakehouseExecuteError = null;
+    lakehouseReleaseLog = [];
   });
 
   after(() => {
@@ -473,6 +487,142 @@ describe("model", () => {
         expect(err).to.be.an("error");
         expect(err.message).to.include("Invalid table name format");
         done();
+      });
+    });
+  });
+
+  describe("pagination / exceededTransferLimit", () => {
+    // SQL fetches resultRecordCount + 1 rows; the provider must pop the extra
+    // row and set exceededTransferLimit by comparing against the REQUESTED page
+    // size, not maxRecordCount. (Regression test for double-pagination bug.)
+    const makeRows = (n) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: i + 1,
+        name: `feature ${i + 1}`,
+        geometry: '{"type":"Point","coordinates":[-77,38]}',
+      }));
+
+    const lakehouseReq = (query) => ({
+      query,
+      params: {
+        tableName: "catalog.schema.towers",
+        geometryColumn: "geometry",
+        idField: "id",
+        geometryFormat: "GEOMETRY",
+      },
+      ip: "127.0.0.1",
+    });
+
+    const lakebaseReq = (query) => ({
+      query,
+      params: {
+        lakebaseHost: "lakebase.example.com",
+        lakebaseDatabase: "testdb",
+        lakebaseTable: "cell_towers",
+        geometryColumn: "geometry",
+        idField: "id",
+      },
+      ip: "127.0.0.1",
+    });
+
+    it("Lakehouse: pops extra row and sets exceededTransferLimit when resultRecordCount < maxRecordCount", (done) => {
+      lakehouseQueryRows = makeRows(6); // LIMIT was fetchSize + 1 = 6
+      const model = new Model();
+      model.getData(lakehouseReq({ f: "json", resultRecordCount: "5" }), (err, result) => {
+        expect(err).to.be.null;
+        expect(result.features).to.have.lengthOf(5);
+        expect(result.metadata.exceededTransferLimit).to.be.true;
+        done();
+      });
+    });
+
+    it("Lakehouse: no pop and exceededTransferLimit false when fewer rows than requested", (done) => {
+      lakehouseQueryRows = makeRows(3);
+      const model = new Model();
+      model.getData(lakehouseReq({ f: "json", resultRecordCount: "5" }), (err, result) => {
+        expect(err).to.be.null;
+        expect(result.features).to.have.lengthOf(3);
+        expect(result.metadata.exceededTransferLimit).to.be.false;
+        done();
+      });
+    });
+
+    it("Lakehouse: declares resultRecordCount/resultOffset in filtersApplied", (done) => {
+      lakehouseQueryRows = makeRows(2);
+      const model = new Model();
+      model.getData(
+        lakehouseReq({ f: "json", resultRecordCount: "5", resultOffset: "5" }),
+        (err, result) => {
+          expect(err).to.be.null;
+          expect(result.filtersApplied.resultRecordCount).to.be.true;
+          expect(result.filtersApplied.resultOffset).to.be.true;
+          expect(result.filtersApplied.limit).to.be.true;
+          expect(result.filtersApplied.offset).to.be.true;
+          done();
+        }
+      );
+    });
+
+    it("Lakebase: pops extra row and sets exceededTransferLimit when resultRecordCount < maxRecordCount", (done) => {
+      lakebaseQueryResult = { rows: makeRows(6) };
+      const model = new Model();
+      model.getData(lakebaseReq({ f: "json", resultRecordCount: "5" }), (err, result) => {
+        expect(err).to.be.null;
+        expect(result.features).to.have.lengthOf(5);
+        expect(result.metadata.exceededTransferLimit).to.be.true;
+        done();
+      });
+    });
+
+    it("Lakebase: no pop and exceededTransferLimit false when fewer rows than requested", (done) => {
+      lakebaseQueryResult = { rows: makeRows(3) };
+      const model = new Model();
+      model.getData(lakebaseReq({ f: "json", resultRecordCount: "5" }), (err, result) => {
+        expect(err).to.be.null;
+        expect(result.features).to.have.lengthOf(3);
+        expect(result.metadata.exceededTransferLimit).to.be.false;
+        done();
+      });
+    });
+  });
+
+  describe("connection release on error", () => {
+    it("destroys the connection when the query fails", (done) => {
+      lakehouseExecuteError = new Error("session expired");
+      const model = new Model();
+      const req = {
+        query: { f: "json", resultRecordCount: "5" },
+        params: { tableName: "catalog.schema.towers", geometryFormat: "GEOMETRY" },
+        ip: "127.0.0.1",
+      };
+      model.getData(req, (err) => {
+        expect(err).to.be.an("error");
+        // release() runs in the finally block after the callback — defer the assert
+        setImmediate(() => {
+          expect(lakehouseReleaseLog).to.have.lengthOf(1);
+          expect(lakehouseReleaseLog[0].destroy).to.be.true;
+          done();
+        });
+      });
+    });
+
+    it("releases the connection normally when the query succeeds", (done) => {
+      lakehouseQueryRows = [
+        { id: 1, geometry: '{"type":"Point","coordinates":[-77,38]}' },
+      ];
+      const model = new Model();
+      const req = {
+        query: { f: "json", resultRecordCount: "5" },
+        params: { tableName: "catalog.schema.towers", geometryFormat: "GEOMETRY" },
+        ip: "127.0.0.1",
+      };
+      model.getData(req, (err) => {
+        expect(err).to.be.null;
+        setImmediate(() => {
+          expect(lakehouseReleaseLog).to.have.lengthOf(1);
+          expect(lakehouseReleaseLog[0].destroy).to.be.false;
+          done();
+        });
       });
     });
   });

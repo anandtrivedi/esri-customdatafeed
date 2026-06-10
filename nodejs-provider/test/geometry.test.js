@@ -198,6 +198,33 @@ describe("geometry", () => {
         );
         expect(result).to.include("LineString");
       });
+
+      it("should map multi-path Esri polyline to MultiLineString", () => {
+        const polyline = JSON.stringify({
+          paths: [
+            [
+              [0, 0],
+              [1, 1],
+            ],
+            [
+              [2, 2],
+              [3, 3],
+            ],
+          ],
+          spatialReference: { wkid: 4326 },
+        });
+        const result = getGeometryQuery(
+          polyline,
+          defaultField,
+          null,
+          "esriSpatialRelIntersects",
+          defaultDbSR,
+          "GEOMETRY"
+        );
+        expect(result).to.include("MultiLineString");
+        // Both paths must survive the conversion
+        expect(result).to.include("[2,2]");
+      });
     });
 
     describe("spatial reference transformation", () => {

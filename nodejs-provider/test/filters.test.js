@@ -44,6 +44,17 @@ describe("filters", () => {
       expect(result.offset).to.be.true;
     });
 
+    it("should set resultOffset flag (CDF 12.0 param name) when resultOffset is present", () => {
+      // The 12.0 featureserver removes already-applied params by geoservice
+      // name — without this key it re-applies the offset and drops features
+      const result = generateFiltersApplied(
+        { resultOffset: 10 },
+        "OBJECTID",
+        "geometry"
+      );
+      expect(result.resultOffset).to.be.true;
+    });
+
     it("should set orderByFields flag when orderByFields is present", () => {
       const result = generateFiltersApplied(
         { orderByFields: "name ASC" },
@@ -78,6 +89,15 @@ describe("filters", () => {
         "geometry"
       );
       expect(result.limit).to.be.true;
+    });
+
+    it("should set resultRecordCount flag (CDF 12.0 param name) when resultRecordCount is present", () => {
+      const result = generateFiltersApplied(
+        { resultRecordCount: 100 },
+        "OBJECTID",
+        "geometry"
+      );
+      expect(result.resultRecordCount).to.be.true;
     });
 
     it("should set time flag when time is present", () => {
