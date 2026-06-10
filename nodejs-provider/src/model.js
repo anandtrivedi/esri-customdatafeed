@@ -264,6 +264,7 @@ class Model {
         connection = conn;
         let queryOperation;
         let extentOperation;
+        let queryFailed = false;
 
         try {
           this.logger.info(`Query ${requestCounter}: Using pooled connection ${connection.id}`);
@@ -349,9 +350,17 @@ class Model {
             return callback(null, geojson);
           }
 
-          // Check if we exceeded transfer limit
+          // Check if we exceeded transfer limit.
+          // SQL fetched fetchSize + 1 rows; the extra row only signals that more
+          // pages exist. Compare against fetchSize, not maxRecordCountPerPage —
+          // resultRecordCount can request a smaller page. No LIMIT is applied
+          // for returnIdsOnly/returnDistinctValues, so skip the pop there.
+          const limitApplied =
+            !returnCountOnly &&
+            !geoserviceParams.returnIdsOnly &&
+            !geoserviceParams.returnDistinctValues;
           let exceededTransferLimit = false;
-          if (!returnCountOnly && rows.length > sourceConfig.maxRecordCountPerPage) {
+          if (limitApplied && rows.length > fetchSize) {
             exceededTransferLimit = true;
             rows.pop(); // Remove extra row used for detection
           }
@@ -413,6 +422,7 @@ class Model {
           callback(null, geojson);
 
         } catch (error) {
+          queryFailed = true;
           this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
           callback(error);
         } finally {
@@ -428,10 +438,15 @@ class Model {
             }
           }
 
-          // Release connection back to pool (reused for next request)
+          // Release connection back to pool (reused for next request).
+          // On query failure the session may be dead (warehouse restart, network
+          // drop) — destroy it instead of recycling so the next request gets a
+          // fresh connection.
           if (connection) {
-            pool.release(connection);
-            this.logger.info(`Query ${requestCounter}: Connection ${connection.id} released back to pool`);
+            pool.release(connection, { destroy: queryFailed });
+            this.logger.info(
+              `Query ${requestCounter}: Connection ${connection.id} ${queryFailed ? 'destroyed after error' : 'released back to pool'}`
+            );
           }
         }
       })
@@ -576,9 +591,9 @@ class Model {
 
     this.logger.info(`Query ${requestCounter}: Executing Lakebase query...`);
 
-    let sql, params;
+    let sql, params, fetchSize;
     try {
-      ({ sql, params } = buildLakebaseSelectSql(geoserviceParams, sourceConfig));
+      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, sourceConfig));
     } catch (validationError) {
       this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
       return callback(validationError);
@@ -599,9 +614,11 @@ class Model {
         if (returnCountOnly) {
           geojson.count = Number(rows[0].count);
         } else {
-          // Check exceeded transfer limit
+          // Check exceeded transfer limit — compare against fetchSize (the
+          // requested page size), not maxRecordCountPerPage. No LIMIT is
+          // applied for returnIdsOnly, so skip the pop there.
           let exceededTransferLimit = false;
-          if (rows.length > sourceConfig.maxRecordCountPerPage) {
+          if (!geoserviceParams.returnIdsOnly && rows.length > fetchSize) {
             exceededTransferLimit = true;
             rows.pop();
           }

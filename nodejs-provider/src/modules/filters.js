@@ -32,7 +32,12 @@ function generateFiltersApplied(geoParams, idField, geometryField) {
   }
 
   if (resultOffset) {
+    // The CDF 12.0 featureserver removes params by their geoservice name
+    // (resultOffset); older Koop-based runtimes check `offset`. Declare both,
+    // otherwise the runtime re-applies the offset to already-offset rows and
+    // pages beyond the first lose features.
     filtersApplied.offset = true;
+    filtersApplied.resultOffset = true;
   }
 
   if (orderByFields) {
@@ -44,7 +49,9 @@ function generateFiltersApplied(geoParams, idField, geometryField) {
   }
 
   if (resultRecordCount) {
+    // Same dual-key reasoning as resultOffset above.
     filtersApplied.limit = true;
+    filtersApplied.resultRecordCount = true;
   }
 
   if (outFields && outFields !== '*') {

@@ -29,6 +29,24 @@ describe("lakebaseQuery", () => {
       expect(params).to.have.lengthOf(0);
     });
 
+    it("should return the effective fetchSize so callers can detect exceededTransferLimit", () => {
+      const dflt = buildLakebaseSelectSql({ outFields: "*" }, baseConfig);
+      expect(dflt.fetchSize).to.equal(2000);
+
+      const paged = buildLakebaseSelectSql(
+        { outFields: "*", resultRecordCount: "5" },
+        baseConfig
+      );
+      expect(paged.fetchSize).to.equal(5);
+      expect(paged.sql).to.include("LIMIT 6"); // fetchSize + 1
+
+      const capped = buildLakebaseSelectSql(
+        { outFields: "*", resultRecordCount: "99999" },
+        baseConfig
+      );
+      expect(capped.fetchSize).to.equal(2000); // capped to maxRecordCountPerPage
+    });
+
     it("should build COUNT query for returnCountOnly", () => {
       const { sql, params } = buildLakebaseSelectSql(
         { returnCountOnly: true },
