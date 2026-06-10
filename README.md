@@ -61,7 +61,7 @@ nodejs-provider/
       lakebasePool.js         # PostgreSQL connection pooling (pg module, workspace-aware)
       lakebaseQuery.js        # PostGIS SELECT query builder
       editSql.js              # INSERT/UPDATE/DELETE SQL builders
-  test/                       # 339 unit tests (mocha + chai)
+  test/                       # 350 unit tests (mocha + chai)
 ```
 
 ## Setup
@@ -99,6 +99,13 @@ git clone <this-repo-url>                # clones into ./esri-customdatafeed/
 cd esri-customdatafeed/nodejs-provider   # provider source + cdconfig.json + package.json live here
 npm install
 ```
+
+> **If `npm` errors with `Cannot find module '../lib/cli.js'`:** on some installs the ArcGIS-bundled `npm` launcher is broken (and there may be no system npm at all). Invoke npm through the bundled Node directly — same `install` semantics, just explicit paths:
+> ```bash
+> /opt/arcgis/server/framework/runtime/node/bin/node \
+>   /opt/arcgis/server/framework/runtime/node/lib/node_modules/npm/bin/npm-cli.js install
+> ```
+> Use the same pattern for any other npm command on the server. Building with the bundled Node is preferred anyway — it guarantees native modules compile against the exact Node version the CDF runtime uses.
 
 ### 2. Configure Databricks Connection
 
@@ -591,7 +598,13 @@ All geometry types work: Point, MultiPoint, LineString, MultiLineString, Polygon
 | `WKT` | STRING column | `POINT(-77.03 38.90)` | Human-readable, easy to debug. Common in demo data and required for Lakebase Synced Tables. Has measurable parse overhead at large scale. |
 | `GEOJSON` | STRING column | `{"type":"Point",...}` | Useful when JSON tooling already produces it. |
 
-**Auto-detection caveat — when you must set `geometryFormat` explicitly:** the provider tries to infer the format from the column name (e.g. `geometry_wkt` → WKT). If your column is named generically (like `geometry`) but actually stores text WKT, set `geometryFormat: "WKT"` on the service explicitly — otherwise the provider assumes native GEOMETRY and fails to parse the rows. Same applies to a generic `geometry` column holding WKB or GeoJSON.
+**How format detection works** (in priority order):
+
+1. **Explicit `geometryFormat` service parameter** — always wins. Recommended for production: it's unambiguous and skips the probe below.
+2. **Column-name hints** — a column named like `geometry_wkt` → WKT, `geom_wkb` → WKB, `geojson_col` → GeoJSON.
+3. **Schema probe** — for generically-named columns (like `geometry`), the provider runs `DESCRIBE TABLE` once and maps the column type: `STRING` → WKT, `BINARY` → WKB, anything else → native GEOMETRY. The result is cached for the process lifetime.
+
+**The one case where you MUST set `geometryFormat` explicitly:** GeoJSON stored in a generically-named STRING column — the schema probe sees `STRING` and guesses WKT. Set `geometryFormat: "GEOJSON"` on the service.
 
 **Lakebase** uses native PostGIS geometry only — no `geometryFormat` configuration needed.
 
@@ -611,9 +624,12 @@ Set these in your `.env` file, or in `init_user_param.sh` on ArcGIS Server. Per-
 | `LAKEBASE_PASSWORD` | OAuth token or password (auto-generated from PAT if omitted) |
 | `LAKEBASE_USER` | Username (default: `databricks`) |
 | `LAKEBASE_INSTANCE_NAME` | Instance name override (skips hostname→name lookup) |
+| **Multi-Workspace (optional)** | |
+| `DATABRICKS_CONFIG_FILE` | Path to `.databrickscfg` with named workspace profiles (default: `~/.databrickscfg`) |
 | **Query Defaults** | |
 | `DATABRICKS_MAX_RECORD_COUNT` | Max features per page (default: `2000`) |
 | `DATABRICKS_QUERY_TIMEOUT` | Query timeout in ms (default: `120000`) |
+| `DATABRICKS_SRID` | Default SRID when a service doesn't set `srid` (default: `4326`) |
 | **Connection Pool Tuning** | |
 | `DATABRICKS_POOL_MIN` / `DATABRICKS_POOL_MAX` | Lakehouse pool size (default: `2` / `10`) |
 | `LAKEBASE_POOL_MIN` / `LAKEBASE_POOL_MAX` | Lakebase pool size (default: `2` / `10`) |
@@ -621,6 +637,7 @@ Set these in your `.env` file, or in `init_user_param.sh` on ArcGIS Server. Per-
 | **Security** | |
 | `ENABLE_USER_AUTH` | Set to `true` to require ArcGIS user authentication |
 | `ENABLE_AUDIT_LOG` | Set to `true` to enable query audit logging |
+| `DATABRICKS_API_SSL_VERIFY` | TLS verification on Databricks REST calls (token minting, Lakebase credentials). Verified by default — set to `false` only behind a TLS-intercepting proxy |
 
 ---
 
@@ -779,7 +796,7 @@ These are the provider's own unit tests (mocha + chai) — they exercise the SQL
 ```bash
 cd esri-customdatafeed/nodejs-provider
 npm test
-# 339 passing
+# 350 passing
 ```
 
 ## License
