@@ -131,12 +131,21 @@ class DatabricksConnectionPool {
     });
   }
 
-  release(connection) {
+  release(connection, { destroy = false } = {}) {
     if (!connection) return;
+
+    this.activeConnections--;
+
+    if (destroy) {
+      // The connection errored — its session may be dead (warehouse restart,
+      // network drop). Close it instead of recycling, and refill for any waiters.
+      this.destroyConnection(connection);
+      this.refillForWaiters();
+      return;
+    }
 
     connection.inUse = false;
     connection.lastUsed = Date.now();
-    this.activeConnections--;
 
     if (this.waitQueue.length > 0) {
       const { resolve, timeoutId } = this.waitQueue.shift();
@@ -147,6 +156,27 @@ class DatabricksConnectionPool {
     }
 
     this.cleanupIdleConnections();
+  }
+
+  // After a connection is destroyed, create a replacement for the next waiter
+  // (waiters are only queued when the pool is at max, so destroying freed a slot).
+  refillForWaiters() {
+    if (this.waitQueue.length === 0 || this.shuttingDown || this.pool.length >= this.maxConnections) {
+      return;
+    }
+    this.createConnection()
+      .then((conn) => {
+        const waiter = this.waitQueue.shift();
+        if (!waiter) return; // all waiters timed out — connection stays idle in pool
+        clearTimeout(waiter.timeoutId);
+        conn.inUse = true;
+        this.activeConnections++;
+        waiter.resolve(conn);
+      })
+      .catch((err) => {
+        // Waiters will hit their own acquisition timeout; next acquire() retries
+        console.error(`[Pool ${this.poolLabel()}] Failed to create replacement connection: ${err.message}`);
+      });
   }
 
   async cleanupIdleConnections() {
