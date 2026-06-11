@@ -105,7 +105,7 @@ npm install
 > /opt/arcgis/server/framework/runtime/node/bin/node \
 >   /opt/arcgis/server/framework/runtime/node/lib/node_modules/npm/bin/npm-cli.js install
 > ```
-> Use the same pattern for any other npm command on the server. Building with the bundled Node is preferred anyway — it guarantees native modules compile against the exact Node version the CDF runtime uses.
+> The bundled Node binary is typically mode `700`, owned by the `arcgis` OS user — if you're logged in as a different user (e.g. `ubuntu`) you'll get *Permission denied*; prefix the command with `sudo -u arcgis`. Use the same pattern for any other npm command on the server. Building with the bundled Node is preferred anyway — it guarantees native modules compile against the exact Node version the CDF runtime uses.
 
 ### 2. Configure Databricks Connection
 
@@ -248,13 +248,17 @@ This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provi
 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
 
-> **Fresh server vs. reused server.** The smoothest path is a server with **no CDF provider registered yet** — the steps below just work. If you're deploying onto a box that *already* has a Databricks CDF provider registered (e.g. a pre-baked or reused AMI), ArcGIS Server will refuse a second registration under a **different** provider name — you'll see something like *"a provider with this name already exists"* / *"can't load another one."* Two ways out:
-> - **Keep the same name** (recommended) — build your `.cdpk` from this repo's unchanged `cdconfig.json` (provider name `databricks-geospatial-provider`). Re-registering the same name updates the existing provider in place, which is exactly what you want when upgrading the provider code. No need to remove anything first.
-> - **Remove the old one first** if you genuinely need a different name. List what's registered, then unregister the stale one — via the Admin Directory UI (`https://localhost:6443/arcgis/admin` → Services → Types → Custom Data Providers) or the matching REST operation:
+> **Fresh server vs. reused server.** On a server with **no CDF provider registered yet**, the steps below just work. If a Databricks CDF provider is *already* registered (pre-baked or reused AMI), know that `register` is strictly first-install — ArcGIS Server refuses any `register` call for a provider name that's already registered (*"Custom data provider with name '...' is already registered"*). Your options:
+> - **Same provider name, new code** (the upgrade case) — use the **`update`** operation instead of `register`; see "Upgrading the provider later" below the commands.
+> - **Retire the old one** — list what's registered, then unregister by `.cdpk` filename:
 >   ```bash
+>   # list registered providers
 >   curl -sk "https://localhost:6443/arcgis/admin/services/types/customdataproviders?token=$TOKEN&f=json"
+>   # unregister one (also deletes its extracted provider directory)
+>   curl -sk -X POST "https://localhost:6443/arcgis/admin/services/types/customdataproviders/unregister?token=$TOKEN&f=json" \
+>     --data-urlencode "customdataFilename=old-provider-name.cdpk"
 >   ```
-> If registration "worked anyway" despite the warning, the existing same-named provider was updated in place — that's fine. Either way, restart the server (below) so the new code actually loads.
+> Either way, restart the server (below) afterward so everything reloads cleanly.
 
 > **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer) for the difference between the two binding modes and when to use each.
 
@@ -262,10 +266,15 @@ All four commands below are part of this step — run them in order on the serve
 
 ```bash
 # (a) Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
+#     Keep the .env excludes EXACTLY as written. A wildcard like '*.env*' would
+#     also strip node_modules files whose names contain ".env" (e.g.
+#     @dabh/diagnostics/adapters/process.env.js, a transitive dep of
+#     @databricks/sql) — the broken package then fails provider validation at
+#     register time with "Cannot find module '../adapters/process.env'".
 cd esri-customdatafeed/nodejs-provider   # if not already there
 zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
-  -x '*.env*' 'test/*' '*.md'
+  -x '.env' '.env.*' 'test/*' '*.md'
 
 # (b) Get an ArcGIS admin token (siteadmin login). client=requestip binds the
 #     token to your IP — no Referer header to keep in sync. Run this on the box
@@ -284,13 +293,23 @@ curl -k "https://localhost:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json"
 
 # (d) Register the upload — paste the itemID from (c)'s response. This itemID
 #     always comes from the upload above; it has nothing to do with Lakebase.
+#     register is for FIRST install only — see the upgrade note below.
 curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
   --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
 ```
 
-> **What just happened.** The `register` call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
+**Upgrading the provider later** (new code, same provider name): `register` will refuse with *"Custom data provider with name '...' is already registered"*. Build and upload the new `.cdpk` exactly as in (a)–(c), then call **`update`** instead of `register`:
+
+```bash
+curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/update?token=$TOKEN&f=json" \
+  --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
+```
+
+> ⚠️ **Back up `.env` before running `update`.** The update extracts the new `.cdpk` over the provider directory (wiping any `.env` you added), and if the new package fails validation the runtime **deletes the provider directory entirely** — your services stay down until a good `.cdpk` is updated in. Back up first: `sudo cp <provider-dir>/.env /tmp/cdf.env.bak`.
+
+> **What just happened.** The `register` (or `update`) call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`, then validates it by starting the provider with the bundled Node runtime. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
 >
-> **Before re-registering (skip on first install):** if you've already done a register once and added a `.env` to the live provider directory, **back it up first** — the `.cdpk` extraction wipes the directory:
+> **Before updating (skip on first install):** if you've already registered once and added a `.env` to the live provider directory, **back it up first** — the `.cdpk` extraction wipes the directory (and a *failed* update deletes it entirely):
 > ```bash
 > sudo cp /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env /tmp/cdf.env.bak
 > ```
@@ -706,6 +725,10 @@ ls -t /opt/arcgis/server/usr/logs/*/server/server-*.log 2>/dev/null | head -1 \
 This dumps everything that matters — provider directory contents, env vars, multi-workspace profiles, and the last few Custom_data_feeds log lines — with secrets redacted, in one command.
 
 </details>
+
+**Register/update fails: `Failed to start '/opt/arcgis/.../customdata/app/src/index.js'`**
+- Tail the server log for the real module error. If it shows `Cannot find module '../adapters/process.env'`, your `.cdpk` was built with an overbroad exclude (e.g. `-x '*.env*'`) that stripped `node_modules` files whose names contain `.env`. Rebuild with the exact excludes from [Step 4(a)](#4-package-and-register-provider): `-x '.env' '.env.*' 'test/*' '*.md'`.
+- **A failed `update` deletes the live provider directory** and your CDF services 404 until a good package is in. Upload a correctly-built `.cdpk` and run `update` again, then recreate `.env` and restart.
 
 **Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
 - Verify the `.cdpk` was registered (check ArcGIS Server Manager → Site → Extensions).
