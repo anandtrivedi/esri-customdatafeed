@@ -253,7 +253,20 @@ async function getLakebasePassword(host, workspaceConfig) {
     throw new Error('Cannot generate Lakebase token: workspaceConfig is required');
   }
 
-  const instanceName = process.env.LAKEBASE_INSTANCE_NAME || await resolveInstanceName(host, workspaceConfig);
+  // Resolve the instance from the service's lakebaseHost so multiple services can
+  // target different instances; LAKEBASE_INSTANCE_NAME is only a fallback when the
+  // host isn't visible to the workspace (e.g. cross-account DNS).
+  let instanceName;
+  try {
+    instanceName = await resolveInstanceName(host, workspaceConfig);
+  } catch (err) {
+    if (process.env.LAKEBASE_INSTANCE_NAME) {
+      console.log(`[LakebasePool] Host lookup failed (${err.message}); falling back to LAKEBASE_INSTANCE_NAME`);
+      instanceName = process.env.LAKEBASE_INSTANCE_NAME;
+    } else {
+      throw err;
+    }
+  }
 
   console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
   const cred = await generateDatabaseCredential(instanceName, workspaceConfig);
