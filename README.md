@@ -258,30 +258,34 @@ You package the provider as a `.cdpk` file (just a zip archive with a different 
 
 > **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer) for the difference between the two binding modes and when to use each.
 
+All four commands below are part of this step — run them in order on the server. (The letters (a)–(d) are deliberate: they are sub-commands of this step, not the README's numbered install Steps.)
+
 ```bash
-# 1. Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
+# (a) Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
 cd esri-customdatafeed/nodejs-provider   # if not already there
 zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '*.env*' 'test/*' '*.md'
 
-# 2. Get an ArcGIS admin token (siteadmin login). client=requestip binds the
-#    token to your IP — no Referer header to keep in sync. Run this on the box
-#    (or replace localhost with the server host) and use your real password.
+# (b) Get an ArcGIS admin token (siteadmin login). client=requestip binds the
+#     token to your IP — no Referer header to keep in sync. Run this on the box
+#     (or replace localhost with the server host) and use your real password.
 TOKEN=$(curl -sk -X POST 'https://localhost:6443/arcgis/admin/generateToken?f=json' \
   --data-urlencode 'username=siteadmin' \
   --data-urlencode 'password=...' \
   --data-urlencode 'client=requestip' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 
-# 3. Upload the .cdpk ($TOKEN expands from step 2; requestip token needs no Referer header)
+# (c) Upload the .cdpk. The response contains an itemID — copy it, the next
+#     command needs it. Do NOT skip this even if you skipped optional steps.
 curl -k "https://localhost:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
   -F "itemFile=@databricks-geospatial-provider.cdpk"
-# Returns: {"status":"success","item":{"itemID":"i..."}}
+# Returns: {"status":"success","item":{"itemID":"i273bb53a-..."}}   <-- copy this itemID
 
-# 4. Register using the itemID from step 3
+# (d) Register the upload — paste the itemID from (c)'s response. This itemID
+#     always comes from the upload above; it has nothing to do with Lakebase.
 curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
-  --data-urlencode "id=ITEM_ID_FROM_STEP_3"
+  --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
 ```
 
 > **What just happened.** The `register` call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
