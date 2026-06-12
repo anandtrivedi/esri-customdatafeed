@@ -36,6 +36,9 @@ describe('workspaceResolver', () => {
     if (fs.existsSync(TMP_CFG)) fs.unlinkSync(TMP_CFG);
     delete process.env.DATABRICKS_SERVER_HOSTNAME;
     delete process.env.DATABRICKS_ACCESS_TOKEN;
+    delete process.env.DATABRICKS_HOST;
+    delete process.env.DATABRICKS_CLIENT_ID;
+    delete process.env.DATABRICKS_CLIENT_SECRET;
     resolver.clearProfileCache();
   });
 
@@ -158,6 +161,30 @@ client_secret = secret-bbbb
         authType: 'pat',
         token: 'dapi-env',
       });
+    });
+
+    it('returns OAuth M2M config from injected service-principal env (Databricks Apps)', () => {
+      process.env.DATABRICKS_HOST = 'app-host.cloud.databricks.com';
+      process.env.DATABRICKS_CLIENT_ID = 'sp-client-id';
+      process.env.DATABRICKS_CLIENT_SECRET = 'sp-secret';
+      const profile = resolver.resolveWorkspace();
+      expect(profile).to.deep.equal({
+        workspaceAlias: 'default',
+        hostname: 'app-host.cloud.databricks.com',
+        authType: 'oauth-m2m',
+        clientId: 'sp-client-id',
+        clientSecret: 'sp-secret',
+      });
+    });
+
+    it('prefers OAuth M2M over a PAT when both are present in env', () => {
+      process.env.DATABRICKS_SERVER_HOSTNAME = 'env-host.example.com';
+      process.env.DATABRICKS_ACCESS_TOKEN = 'dapi-env';
+      process.env.DATABRICKS_CLIENT_ID = 'sp-client-id';
+      process.env.DATABRICKS_CLIENT_SECRET = 'sp-secret';
+      const profile = resolver.resolveWorkspace();
+      expect(profile.authType).to.equal('oauth-m2m');
+      expect(profile.token).to.equal(undefined);
     });
 
     it('honors no-arg call as equivalent to alias "default"', () => {

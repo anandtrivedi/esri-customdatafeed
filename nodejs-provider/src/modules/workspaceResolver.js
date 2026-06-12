@@ -146,16 +146,39 @@ function buildProfileFromIni(alias, raw) {
 }
 
 function buildDefaultFromEnv() {
-  const hostname = process.env.DATABRICKS_SERVER_HOSTNAME;
-  const token = process.env.DATABRICKS_ACCESS_TOKEN;
-  if (!hostname || !token) return null;
+  // DATABRICKS_HOST is injected by the Databricks Apps runtime (hostname only, no scheme);
+  // DATABRICKS_SERVER_HOSTNAME is the explicit/local-dev form.
+  const rawHost = process.env.DATABRICKS_SERVER_HOSTNAME || process.env.DATABRICKS_HOST;
+  if (!rawHost) return null;
+  const hostname = rawHost.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 
-  return {
-    workspaceAlias: 'default',
-    hostname: hostname.replace(/^https?:\/\//i, '').replace(/\/+$/, ''),
-    authType: 'pat',
-    token,
-  };
+  // Prefer OAuth M2M (service principal). Databricks Apps inject DATABRICKS_CLIENT_ID and
+  // DATABRICKS_CLIENT_SECRET for the app's service principal — use them so the app never
+  // needs a PAT. connectionPool and lakebasePool both consume authType 'oauth-m2m'.
+  const clientId = process.env.DATABRICKS_CLIENT_ID;
+  const clientSecret = process.env.DATABRICKS_CLIENT_SECRET;
+  if (clientId && clientSecret) {
+    return {
+      workspaceAlias: 'default',
+      hostname,
+      authType: 'oauth-m2m',
+      clientId,
+      clientSecret,
+    };
+  }
+
+  // Fall back to a PAT for local development.
+  const token = process.env.DATABRICKS_ACCESS_TOKEN;
+  if (token) {
+    return {
+      workspaceAlias: 'default',
+      hostname,
+      authType: 'pat',
+      token,
+    };
+  }
+
+  return null;
 }
 
 function resolveWorkspace(alias) {
