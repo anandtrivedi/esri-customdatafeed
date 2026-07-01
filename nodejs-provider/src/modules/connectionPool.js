@@ -15,7 +15,7 @@
  */
 
 const { DBSQLClient } = require('@databricks/sql');
-const pkg = require('../../package.json');
+const { userAgentTag } = require('./version');
 
 class DatabricksConnectionPool {
   constructor(workspaceConfig, httpPath, options = {}) {
@@ -59,7 +59,7 @@ class DatabricksConnectionPool {
     const baseOptions = {
       host: this.workspaceConfig.hostname,
       path: this.httpPath,
-      userAgentEntry: `esri_databricks-customdatafeed/${pkg.version}`,
+      userAgentEntry: userAgentTag('esri_databricks-customdatafeed'),
     };
 
     let connectOptions;

@@ -19,6 +19,7 @@ const {
 const { buildInsertSql, buildUpdateSql, buildDeleteSql, toGeoJSON } = require("./editSql");
 const { buildLakebaseSelectSql, parseGeometryFilter, getSpatialPredicate, buildGeomParam, parseInSR } = require("./lakebaseQuery");
 const { getLakebasePool, shutdownLakebasePools } = require("./lakebasePool");
+const { CONNECTOR_RELEASE, deploymentLabel, userAgentTag, applicationName } = require("./version");
 
 module.exports = {
   translateToGeoJSON,
@@ -45,4 +46,8 @@ module.exports = {
   parseInSR,
   getLakebasePool,
   shutdownLakebasePools,
+  CONNECTOR_RELEASE,
+  deploymentLabel,
+  userAgentTag,
+  applicationName,
 };

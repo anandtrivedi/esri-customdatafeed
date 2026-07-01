@@ -18,7 +18,7 @@
 
 const { Pool } = require('pg');
 const https = require('https');
-const pkg = require('../../package.json');
+const { applicationName } = require('./version');
 
 // Map of serviceKey -> { pool, tokenExpiry, workspaceConfig }
 const pools = {};
@@ -326,7 +326,7 @@ async function getLakebasePool(config) {
     user: config.user || process.env.LAKEBASE_USER || 'databricks',
     password,
     ssl: { rejectUnauthorized: sslVerify },
-    application_name: `esri_databricks-lakebase-customdatafeed/${pkg.version}`,
+    application_name: applicationName('esri_databricks-lakebase-customdatafeed'),
     min: poolMin,
     max: poolMax,
     idleTimeoutMillis: 60000,
