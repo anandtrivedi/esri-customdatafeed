@@ -323,7 +323,14 @@ async function getLakebasePool(config) {
     host: config.host,
     port: config.port || 5432,
     database: config.database,
-    user: config.user || process.env.LAKEBASE_USER || 'databricks',
+    // Postgres role to log in as. For OAuth M2M (service principal) workspaces the
+    // Lakebase credential is minted for the SP, so the pg role must be the SP's
+    // client id — otherwise Postgres rejects it ("OAuth: User is not authorized").
+    // PAT/default workspaces fall back to LAKEBASE_USER (a human/PAT identity).
+    user: config.user
+      || (config.workspaceConfig && config.workspaceConfig.authType === 'oauth-m2m' && config.workspaceConfig.clientId)
+      || process.env.LAKEBASE_USER
+      || 'databricks',
     password,
     ssl: { rejectUnauthorized: sslVerify },
     application_name: applicationName('esri_databricks-lakebase-customdatafeed'),
