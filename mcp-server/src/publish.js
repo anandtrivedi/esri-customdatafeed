@@ -12,7 +12,7 @@ export { PROVIDER_NAME };
  * key list from the registered provider manifest — every key must be present
  * (empty string when unused) or ArcGIS rejects the service.
  */
-export function buildServiceJson({ serviceName, description = "", params, manifestParams, editing = false }) {
+export function buildServiceJson({ serviceName, description = "", params, manifestParams, editing = false, providerName = PROVIDER_NAME }) {
   if (!SERVICE_NAME_RE.test(serviceName)) {
     throw new Error(`Service name must match ${SERVICE_NAME_RE} — got '${serviceName}'`);
   }
@@ -48,7 +48,7 @@ export function buildServiceJson({ serviceName, description = "", params, manife
     jsonProperties: {
       customDataProviderInfo: {
         forwardUserIdentity: false,
-        dataProviderName: PROVIDER_NAME,
+        dataProviderName: providerName,
         serviceParameters,
       },
     },
@@ -58,13 +58,13 @@ export function buildServiceJson({ serviceName, description = "", params, manife
   };
 }
 
-/** Locate our provider's manifest on the target server. */
-export async function getProviderManifest(client) {
+/** Locate a provider's manifest on the target server. */
+export async function getProviderManifest(client, providerName = PROVIDER_NAME) {
   const providers = await client.listProviders();
-  const mine = providers.find((p) => p.name === PROVIDER_NAME);
+  const mine = providers.find((p) => p.name === providerName);
   if (!mine) {
     throw new Error(
-      `Provider '${PROVIDER_NAME}' is not registered on this ArcGIS Server — run register_provider/provider setup first.`
+      `Provider '${providerName}' is not registered on this ArcGIS Server — run register_provider/provider setup first.`
     );
   }
   return {
@@ -112,11 +112,11 @@ export async function smokeTest(client, serviceName) {
 }
 
 /** Guard for unpublish: only ever delete services owned by our provider. */
-export function assertOwnService(serviceJson, serviceName) {
-  const providerName = serviceJson?.jsonProperties?.customDataProviderInfo?.dataProviderName;
-  if (providerName !== PROVIDER_NAME) {
+export function assertOwnService(serviceJson, serviceName, providerName = PROVIDER_NAME) {
+  const actual = serviceJson?.jsonProperties?.customDataProviderInfo?.dataProviderName;
+  if (actual !== providerName) {
     throw new Error(
-      `Refusing to delete '${serviceName}': it is not a ${PROVIDER_NAME} service (provider: ${providerName || "unknown"}).`
+      `Refusing to delete '${serviceName}': it is not a ${providerName} service (provider: ${actual || "unknown"}).`
     );
   }
 }

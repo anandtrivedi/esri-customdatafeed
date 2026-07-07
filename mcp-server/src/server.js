@@ -9,6 +9,7 @@ import { TargetRegistry } from "./registry.js";
 import { getAuth, execSql } from "./databricks.js";
 import { inspectTable, buildPublishViewSql, validateTableName } from "./inspect.js";
 import { buildServiceJson, getProviderManifest, waitForStart, smokeTest, assertOwnService, PROVIDER_NAME } from "./publish.js";
+import { repackageCdpk, loadCdpk, registerProviderFlow, unregisterProviderFlow } from "./provider.js";
 
 const TARGET_PARAM = z
   .string()
@@ -112,6 +113,92 @@ export function buildServer({ registry, deps = {} } = {}) {
   );
 
   server.registerTool(
+    "register_provider",
+    {
+      title: "Register or update the CDF provider from a .cdpk",
+      description:
+        "Install (or with update=true, replace) a Custom Data Feed provider on the target ArcGIS Server from a .cdpk package " +
+        "on the MCP server host. Optionally rename the provider (providerName) and bake environment config into the package " +
+        "(envVars) — baked env survives future updates, eliminating the classic '.cdpk update wiped my .env' failure. " +
+        "Updating a live provider briefly restarts it; its services may blip. New provider code may require an ArcGIS Server " +
+        "restart to fully load.",
+      inputSchema: {
+        cdpkPath: z.string().describe("Path to the .cdpk on the MCP server host"),
+        target: TARGET_PARAM,
+        providerName: z.string().optional().describe("Override the provider name inside the package (for side-by-side installs)"),
+        envVars: z.record(z.string()).optional().describe("KEY=value pairs baked into the package as .env (e.g. DATABRICKS_SERVER_HOSTNAME)"),
+        update: z.boolean().optional().describe("Replace an already-registered provider (required for upgrades)"),
+        confirm: z.boolean().optional().describe("Required when update=true — the update replaces the live provider directory"),
+      },
+    },
+    async ({ cdpkPath, target: targetParam, providerName, envVars, update, confirm }) => {
+      try {
+        if (update && !confirm) {
+          throw new Error("update=true replaces the live provider directory (its services blip). Set confirm=true to proceed.");
+        }
+        const { client } = await resolveTargetAndClient(targetParam);
+        const repack = repackageCdpk(loadCdpk(cdpkPath), { providerName, envVars });
+        const manifest = await registerProviderFlow(client, repack.buffer, repack.providerName, {
+          mode: update ? "update" : "register",
+        });
+        return text({
+          [update ? "updated" : "registered"]: repack.providerName,
+          renamedFrom: repack.originalName !== repack.providerName ? repack.originalName : undefined,
+          envBaked: envVars ? Object.keys(envVars) : undefined,
+          manifest: { arcgisVersion: manifest.arcgisVersion, editingEnabled: manifest.editingEnabled, parameterCount: manifest.parameterKeys.length },
+          note: "If services on this provider misbehave after a code update, restart ArcGIS Server to reload the provider runtime.",
+        });
+      } catch (e) {
+        return toolError(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "unregister_provider",
+    {
+      title: "Unregister a CDF provider",
+      description:
+        "Remove a Custom Data Feed provider from the target ArcGIS Server. Refuses if any feature service still uses it " +
+        "(unpublish them first), and requires confirm=true.",
+      inputSchema: {
+        providerName: z.string().describe("Exact provider name to unregister"),
+        target: TARGET_PARAM,
+        confirm: z.boolean().describe("Must be true — removes the provider from the server"),
+      },
+    },
+    async ({ providerName, target: targetParam, confirm }) => {
+      try {
+        if (!confirm) throw new Error("Set confirm=true to unregister the provider.");
+        const { client } = await resolveTargetAndClient(targetParam);
+        const services = await client.listServices();
+        const serviceProviders = [];
+        const unverifiable = [];
+        for (const svc of services.filter((s) => s.type === "FeatureServer")) {
+          try {
+            const json = await client.getService(svc.serviceName);
+            serviceProviders.push({
+              serviceName: svc.serviceName,
+              dataProviderName: json.jsonProperties?.customDataProviderInfo?.dataProviderName,
+            });
+          } catch {
+            unverifiable.push(svc.serviceName);
+          }
+        }
+        if (unverifiable.length) {
+          throw new Error(
+            `Cannot verify the provider of ${unverifiable.length} service(s) (${unverifiable.slice(0, 5).join(", ")}) — ` +
+              "refusing to unregister until every service can be checked. Retry when the server is stable."
+          );
+        }
+        return text(await unregisterProviderFlow(client, providerName, serviceProviders));
+      } catch (e) {
+        return toolError(e);
+      }
+    }
+  );
+
+  server.registerTool(
     "inspect_table",
     {
       title: "Inspect a UC table for publishability",
@@ -186,6 +273,7 @@ export function buildServer({ registry, deps = {} } = {}) {
         timeColumn: z.string().optional(),
         maxRecordCount: z.string().optional(),
         workspace: z.string().optional().describe("Provider-side .databrickscfg profile on the ArcGIS box (multi-workspace routing)"),
+        provider: z.string().optional().describe(`CDF provider to publish through (default ${PROVIDER_NAME})`),
         warehouseHttpPath: z.string().optional(),
         profile: z.string().optional().describe("Databricks profile for inspection queries"),
         warehouseId: z.string().optional(),
@@ -198,7 +286,7 @@ export function buildServer({ registry, deps = {} } = {}) {
         const fqn = validateTableName(args.table);
         const serviceName = args.serviceName || fqn.split(".").pop().replace(/[^A-Za-z0-9_]/g, "_");
 
-        const manifest = await getProviderManifest(client);
+        const manifest = await getProviderManifest(client, args.provider || PROVIDER_NAME);
 
         // Derive parameters via inspection unless fully overridden.
         let inspection = null;
@@ -236,6 +324,7 @@ export function buildServer({ registry, deps = {} } = {}) {
           description: args.description || `${fqn} via Databricks Custom Data Feed (published by databricks-cdf-mcp)`,
           params,
           manifestParams: manifest.parameterKeys,
+          providerName: args.provider || PROVIDER_NAME,
         });
 
         if (args.dryRun) return text({ dryRun: true, serviceJson, inspection });
@@ -307,15 +396,16 @@ export function buildServer({ registry, deps = {} } = {}) {
       inputSchema: {
         serviceName: z.string().describe("Exact service name to delete"),
         target: TARGET_PARAM,
+        provider: z.string().optional().describe(`Provider the service must belong to (default ${PROVIDER_NAME})`),
         confirm: z.boolean().describe("Must be true — this permanently deletes the service (the Databricks table is untouched)"),
       },
     },
-    async ({ serviceName, target: targetParam, confirm }) => {
+    async ({ serviceName, target: targetParam, provider, confirm }) => {
       try {
         if (!confirm) throw new Error("Set confirm=true to delete. The underlying Databricks table is never affected.");
         const { client } = await resolveTargetAndClient(targetParam);
         const serviceJson = await client.getService(serviceName);
-        assertOwnService(serviceJson, serviceName);
+        assertOwnService(serviceJson, serviceName, provider || PROVIDER_NAME);
         await client.deleteService(serviceName);
         return text({ deleted: serviceName, note: "Feature service removed; Databricks data untouched." });
       } catch (e) {

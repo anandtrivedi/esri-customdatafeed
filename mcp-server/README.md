@@ -133,6 +133,30 @@ Multi-Agent Supervisor.
   client — no 443 requirement, no egress policy. Stateless HTTP mode means raw
   `requests.post` JSON-RPC works without an MCP client library.
 
+## Provider lifecycle (register_provider / unregister_provider)
+
+Verified end-to-end against ArcGIS Server 12.0 (register → publish through the new
+provider → in-place update → unregister, production provider untouched). Operational
+notes from that testing:
+
+- **Package quality matters.** Registration validates the `.cdpk` by starting it with
+  the bundled Node runtime; a package built with over-broad zip excludes (e.g.
+  `'*.env*'`, which strips `@dabh/diagnostics/adapters/process.env.js` out of
+  `node_modules`) fails with `Cannot find module '../adapters/process.env'`. The
+  authoritative copy of a working package lives in the server's config-store
+  (`/opt/arcgis/server/usr/config-store/customdataproviders/*.cdpk`).
+- **Bake env into the package** (`envVars` parameter) instead of hand-placing `.env`
+  in the provider directory — baked config survives every update; hand-placed `.env`
+  is wiped by each one.
+- **New provider code loads on ArcGIS Server restart.** Registration succeeds without
+  one, but services on a *newly registered* provider return connection errors until
+  the server restarts. Registration can take 30–120 s (validation), and a failed
+  validation may leave a half-registered entry that ArcGIS cleans up asynchronously —
+  wait a minute and retry.
+- **Side-by-side installs** (`providerName` rename) are the safe way to test new
+  provider builds next to production: services pin to a provider by name, so the
+  production provider and its services are never touched.
+
 ## Tests
 
 ```bash

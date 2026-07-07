@@ -77,14 +77,14 @@ export class ArcGisClient {
   }
 
   /** Admin API call; params object is sent urlencoded, token + f=json auto-added. */
-  async request(adminPath, params = {}, { method = "GET" } = {}) {
+  async request(adminPath, params = {}, { method = "GET", timeout = 30000 } = {}) {
     const token = await this.getToken();
     const search = new URLSearchParams({ ...params, token, f: "json" });
     const url = `${this.adminUrl}/${adminPath.replace(/^\/+/, "")}`;
     const res =
       method === "GET"
-        ? await httpsRequest(`${url}?${search}`, { allowSelfSigned: this.allowSelfSigned })
-        : await httpsRequest(url, { method, body: search.toString(), allowSelfSigned: this.allowSelfSigned });
+        ? await httpsRequest(`${url}?${search}`, { allowSelfSigned: this.allowSelfSigned, timeout })
+        : await httpsRequest(url, { method, body: search.toString(), allowSelfSigned: this.allowSelfSigned, timeout });
     return parseArcgisJson(res, adminPath);
   }
 
@@ -117,6 +117,53 @@ export class ArcGisClient {
 
   async deleteService(serviceName) {
     return this.request(`services/${serviceName}.FeatureServer/delete`, {}, { method: "POST" });
+  }
+
+  /**
+   * Multipart upload of a .cdpk (or any file) to the admin uploads endpoint.
+   * Returns the upload item metadata ({ itemID, ... }).
+   */
+  async uploadFile(buffer, fileName) {
+    const token = await this.getToken();
+    const boundary = "----cdfmcp" + Date.now().toString(16);
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="itemFile"; filename="${fileName}"\r\n` +
+        `Content-Type: application/octet-stream\r\n\r\n`
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([head, buffer, tail]);
+    const url = new URL(`${this.adminUrl}/uploads/upload?token=${token}&f=json`);
+    const res = await new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: url.hostname,
+          port: url.port || 443,
+          path: url.pathname + url.search,
+          method: "POST",
+          rejectUnauthorized: !this.allowSelfSigned,
+          timeout: 300000,
+          headers: {
+            "Content-Type": `multipart/form-data; boundary=${boundary}`,
+            "Content-Length": body.length,
+          },
+        },
+        (r) => {
+          let data = "";
+          r.on("data", (c) => (data += c));
+          r.on("end", () => resolve({ status: r.statusCode, body: data }));
+        }
+      );
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("upload timed out"));
+      });
+      req.write(body);
+      req.end();
+    });
+    const json = parseArcgisJson(res, "uploads/upload");
+    if (!json.item?.itemID) throw new Error(`Upload returned no itemID: ${JSON.stringify(json).slice(0, 200)}`);
+    return json.item;
   }
 
   /** Registered custom data providers, from the .cdpk manifests. */

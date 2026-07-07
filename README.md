@@ -541,7 +541,7 @@ editData(req) → Always Lakebase (Lakehouse is read-only)
 
 ## 7. Agent-driven publishing (`mcp-server/`)
 
-An MCP server that turns per-layer publishing (section 6) into a conversation. Instead of hand-building `createService` JSON, an agent inspects the Unity Catalog table (geometry column/format, SRID, int32-safe unique id, time column — all derived automatically), publishes it as a feature service, smoke-tests it live, and returns the FeatureServer URL.
+An MCP server that turns provider setup **and** per-layer publishing (sections 3–6) into a conversation. Instead of hand-building `createService` JSON, an agent inspects the Unity Catalog table (geometry column/format, SRID, int32-safe unique id, time column — all derived automatically), publishes it as a feature service, smoke-tests it live, and returns the FeatureServer URL. Given a built `.cdpk`, it also installs and upgrades the provider itself — with environment config **baked into the package**, so the ".cdpk update wiped my `.env`" failure mode (section 6 warning) can't happen.
 
 ### Quickstart (local, Claude Code / Claude Desktop)
 
@@ -566,6 +566,8 @@ Then: *"publish catalog.schema.my_table to my-gis"* — or *"why can't I publish
 | `list_gis_targets` | Registered ArcGIS targets (credentials never shown) |
 | `test_connectivity` | Mints an ArcGIS admin token + probes the SQL warehouse |
 | `provider_status` | Is the CDF `.cdpk` registered, version, editing enabled |
+| `register_provider` | Install/upgrade the provider from a `.cdpk` — optional rename (side-by-side installs) and env baking; upgrades need `update: true` + `confirm` |
+| `unregister_provider` | Remove a provider — refuses while any service still uses it, or if any service can't be verified |
 | `inspect_table` | DESCRIBE + sampling → derived service parameters + validation report |
 | `create_publish_view` | Fix-up view with a `ROW_NUMBER()` int32 `objectid` for tables that fail id validation |
 | `publish_layer` | Inspect → createService → wait for START → live smoke test → FeatureServer URL (`dryRun` supported) |
