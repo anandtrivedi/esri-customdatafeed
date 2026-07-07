@@ -1,0 +1,26 @@
+{
+  "name": "databricks-cdf-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that publishes Databricks tables as ArcGIS feature services via the Custom Data Feed provider",
+  "type": "module",
+  "bin": {
+    "cdf-mcp": "bin/cli.js"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node bin/cli.js serve",
+    "test": "mocha 'test/**/*.test.js' --timeout 5000"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "chai": "^4.3.0",
+    "mocha": "^10.2.0"
+  },
+  "license": "MIT"
+}

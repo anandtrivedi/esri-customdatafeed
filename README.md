@@ -62,6 +62,11 @@ nodejs-provider/
       lakebaseQuery.js        # PostGIS SELECT query builder
       editSql.js              # INSERT/UPDATE/DELETE SQL builders
   test/                       # 350 unit tests (mocha + chai)
+
+mcp-server/                   # MCP server: publish/manage CDF feature services from agents
+  bin/cli.js                  # serve (stdio|http) + register-target + list-targets
+  src/                        # 8 tools over the ArcGIS admin API + Statement Execution API
+  test/                       # 25 unit tests (mocha + chai)
 ```
 
 ## Setup
@@ -533,6 +538,58 @@ editData(req) → Always Lakebase (Lakehouse is read-only)
 > With the provider registered and at least one Feature Service created, you have a working deployment. **Everything below this point is reference material** — supported query parameters, performance benchmarks, geometry format details, environment-variable reference, and troubleshooting. Skim or skip ahead as needed.
 
 ---
+
+## 7. Agent-driven publishing (`mcp-server/`)
+
+An MCP server that turns per-layer publishing (section 6) into a conversation. Instead of hand-building `createService` JSON, an agent inspects the Unity Catalog table (geometry column/format, SRID, int32-safe unique id, time column — all derived automatically), publishes it as a feature service, smoke-tests it live, and returns the FeatureServer URL.
+
+### Quickstart (local, Claude Code / Claude Desktop)
+
+```bash
+cd mcp-server && npm install
+
+# One-time, per GIS environment — validates credentials before saving (~/.cdf-mcp/targets.json, 0600)
+node bin/cli.js register-target my-gis \
+  --admin-url https://gis.example.com:6443/arcgis/admin --user siteadmin \
+  --databricks-profile DEFAULT --warehouse-id <sql-warehouse-id> [--allow-self-signed]
+
+# Register with Claude Code
+claude mcp add databricks-cdf -- node /path/to/esri-customdatafeed/mcp-server/bin/cli.js serve
+```
+
+Then: *"publish catalog.schema.my_table to my-gis"* — or *"why can't I publish this table?"* (inspection reports blocking problems with the fix named).
+
+### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `list_gis_targets` | Registered ArcGIS targets (credentials never shown) |
+| `test_connectivity` | Mints an ArcGIS admin token + probes the SQL warehouse |
+| `provider_status` | Is the CDF `.cdpk` registered, version, editing enabled |
+| `inspect_table` | DESCRIBE + sampling → derived service parameters + validation report |
+| `create_publish_view` | Fix-up view with a `ROW_NUMBER()` int32 `objectid` for tables that fail id validation |
+| `publish_layer` | Inspect → createService → wait for START → live smoke test → FeatureServer URL (`dryRun` supported) |
+| `list_layers` | Feature services with backing Databricks table attribution |
+| `unpublish_layer` | Delete a service — refuses non-CDF services, requires `confirm: true` |
+
+### Security model
+
+- **Credentials never pass through chat or tool arguments.** Tools accept a target *name*; passwords resolve server-side from `env:VAR` or `secret:scope/key` references. Unknown targets fail with "an operator must register it" — by design.
+- **Zero-touch registration for teams:** back the registry with a Databricks secret scope (`CDF_MCP_SECRET_SCOPE`) — each key is a target name whose value is the target JSON. Anyone with `WRITE` on the scope registers a GIS server via `databricks secrets put-secret`, from anywhere; the running server picks it up within a minute. Who may *call* the tools is governed by Unity Catalog (`USE CONNECTION`) in hosted mode.
+- **Hosted mode** enforces a bearer token on every request and should sit behind TLS.
+- The ArcGIS admin token is minted short-lived per operation and never returned.
+
+### Hosted mode (Databricks Playground / Genie / Agent Bricks)
+
+Run `serve --transport http --port <port>` as a service (systemd unit, TLS reverse proxy) and register it as a [UC HTTP connection / external MCP server](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp). Hard requirements learned from real deployment testing:
+
+1. **The endpoint must present HTTPS on port 443** — Databricks serverless egress does not connect to other ports. Self-signed certificates are accepted. Standard patterns: a reverse proxy on 443 on the MCP host; your org's existing load balancer/API gateway routing by hostname; or (production, locked-down environments) an **NCC private endpoint + NLB** mapping 443 to the service.
+2. **Serverless egress policy must permit the destination.** In environments with restricted egress (SEG), arbitrary self-hosted endpoints are dropped regardless of port — an admin must allowlist the FQDN in the serverless network policy or provision the NCC private endpoint. Verify with a `http_request()` probe against the connection before debugging anything else.
+3. Where Databricks Apps have open egress, hosting the MCP server as an app named `mcp-*` is the zero-infrastructure alternative (Playground discovers it natively).
+
+Classic (non-serverless) compute reaches the server with none of these constraints — useful for notebook-based agents and for isolating egress-policy issues from server issues.
+
+See [`mcp-server/README.md`](mcp-server/README.md) for the full operator runbook (systemd unit, reverse proxy, `CREATE CONNECTION` SQL, Playground attach steps).
 
 ## Supported Operations
 
