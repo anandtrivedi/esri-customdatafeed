@@ -13,7 +13,7 @@ One provider is registered once. Each Feature Service chooses its backend via se
 
 > **How to read this README**
 >
-> The install path is **6 steps**:
+> The manual install path is **6 steps**:
 >
 > 1. [Get the code and install dependencies](#1-get-the-code-and-install-dependencies) *(Setup)*
 > 2. [Configure Databricks connection](#2-configure-databricks-connection) *(Setup)*
@@ -22,7 +22,9 @@ One provider is registered once. Each Feature Service chooses its backend via se
 > 5. [Apply production hardening](#5-production-hardening-recommended) *(recommended)*
 > 6. [Create your first Feature Service](#6-create-your-first-feature-service)
 >
-> Once you hit the **"Installation complete"** marker after step 6, you're done. Everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
+> **Easier path — let an agent do it ([section 7: MCP server](#7-agent-driven-publishing-mcp-server)).** With a built `.cdpk` in hand, steps 2–4 and 6 collapse into a conversation with Claude (or Databricks Playground): `register_provider` installs the provider with the Databricks config **baked into the package** (immune to the update-wipes-`.env` failure), and `publish_layer` derives every service parameter from the table automatically, publishes, and smoke-tests it. Only step 1's prerequisites (a licensed ArcGIS Server) and step 5 (hardening) stay manual. Steps 2–6 below remain the reference for what the tools do under the hood — and the fallback when you can't run an MCP client.
+>
+> Once you hit the **"Installation complete"** marker after step 6, you're done — [section 7](#7-agent-driven-publishing-mcp-server) covers the MCP server (agent-driven install, publishing, and day-2 operations), and everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
 
 ## Overview
 
@@ -249,6 +251,8 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 
 ### 4. Package and Register Provider
 
+> **Agent shortcut:** with a built `.cdpk` (step a below), the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool performs the upload/register/update flow for you — including baking `.env` config into the package so upgrades can't wipe it.
+
 This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is the next step: [Step 6](#6-create-your-first-feature-service).
 
 You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
@@ -392,6 +396,8 @@ curl -sk -H "Referer: https://your-server:6443" \
 ```
 
 ## 6. Create your first Feature Service
+
+> **Agent shortcut:** the [MCP server's](#7-agent-driven-publishing-mcp-server) `publish_layer` tool does everything in this section from one sentence — it inspects the table, derives all service parameters (geometry column/format, SRID, a validated id field), creates the service, and smoke-tests it live.
 
 In [Step 4](#4-package-and-register-provider) you registered the provider — that was a one-time install. **This step is what you do every time you want to expose a new Databricks table as a Feature Service**: a separate REST call per table, against a different admin endpoint (`/createService` instead of `/customdataproviders/register`). Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend (Lakehouse or Lakebase) is used.
 
