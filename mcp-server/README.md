@@ -68,12 +68,17 @@ FeatureServer URL.
 
 ### 1. Service setup
 
+The **MCP host** is whatever machine runs the server — any host with HTTPS reach to the
+ArcGIS admin API and to Databricks. It does not have to be the ArcGIS Server, though
+co-locating there is often simplest (it sidesteps the port-443/egress hop). Copy the code
+to it and install production dependencies:
+
 ```bash
-# on the MCP host
 rsync -a --exclude node_modules mcp-server/ /opt/cdf-mcp/ && cd /opt/cdf-mcp && npm install --omit=dev
 ```
 
-`/opt/cdf-mcp/.env.service` (0600):
+Create `/opt/cdf-mcp/.env.service` with the following, then lock it down since it holds
+secrets (`chmod 600 /opt/cdf-mcp/.env.service`):
 
 ```bash
 CDF_MCP_BEARER_TOKEN=<openssl rand -hex 32>       # transport auth — required in http mode
@@ -95,8 +100,10 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-Gotcha: the service user must be able to read every file referenced here — a root-owned
-`.databrickscfg` silently yields "profile not found: available (none)".
+Apply the same `chmod 600` to `targets.json` and `.databrickscfg` if they live on this host.
+
+Gotcha: the service user (`User=` in the unit) must be able to read every file referenced
+here — a root-owned `.databrickscfg` silently yields "profile not found: available (none)".
 
 ### 2. Secret-scope-backed registry (recommended — no host access needed to add targets)
 
