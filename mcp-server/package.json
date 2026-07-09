@@ -1,6 +1,6 @@
 {
   "name": "databricks-cdf-mcp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "MCP server that publishes Databricks tables as ArcGIS feature services via the Custom Data Feed provider",
   "type": "module",
   "bin": {

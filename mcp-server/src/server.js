@@ -9,7 +9,7 @@ import { TargetRegistry } from "./registry.js";
 import { getAuth, execSql } from "./databricks.js";
 import { inspectTable, buildPublishViewSql, validateTableName } from "./inspect.js";
 import { buildServiceJson, getProviderManifest, waitForStart, smokeTest, assertOwnService, PROVIDER_NAME } from "./publish.js";
-import { repackageCdpk, loadCdpk, registerProviderFlow, unregisterProviderFlow } from "./provider.js";
+import { repackageCdpk, loadCdpk, registerProviderFlow, unregisterProviderFlow, buildProviderPackage } from "./provider.js";
 
 const TARGET_PARAM = z
   .string()
@@ -117,13 +117,17 @@ export function buildServer({ registry, deps = {} } = {}) {
     {
       title: "Register or update the CDF provider from a .cdpk",
       description:
-        "Install (or with update=true, replace) a Custom Data Feed provider on the target ArcGIS Server from a .cdpk package " +
-        "on the MCP server host. Optionally rename the provider (providerName) and bake environment config into the package " +
+        "Install (or with update=true, replace) a Custom Data Feed provider on the target ArcGIS Server. Provide EITHER " +
+        "cdpkPath (a prebuilt .cdpk on the MCP server host) OR sourcePath (a provider source directory — the package is " +
+        "built from source: npm install --omit=dev + zip from an explicit include list, immune to the wildcard-exclude " +
+        "packaging footgun). Optionally rename the provider (providerName) and bake environment config into the package " +
         "(envVars) — baked env survives future updates, eliminating the classic '.cdpk update wiped my .env' failure. " +
         "Updating a live provider briefly restarts it; its services may blip. New provider code may require an ArcGIS Server " +
         "restart to fully load.",
       inputSchema: {
-        cdpkPath: z.string().describe("Path to the .cdpk on the MCP server host"),
+        cdpkPath: z.string().optional().describe("Path to a prebuilt .cdpk on the MCP server host"),
+        sourcePath: z.string().optional().describe("Path to the provider source dir (contains cdconfig.json) to build from"),
+        skipInstall: z.boolean().optional().describe("With sourcePath: skip npm install and use the existing node_modules (airgapped hosts with vendored deps)"),
         target: TARGET_PARAM,
         providerName: z.string().optional().describe("Override the provider name inside the package (for side-by-side installs)"),
         envVars: z.record(z.string()).optional().describe("KEY=value pairs baked into the package as .env (e.g. DATABRICKS_SERVER_HOSTNAME)"),
@@ -131,18 +135,29 @@ export function buildServer({ registry, deps = {} } = {}) {
         confirm: z.boolean().optional().describe("Required when update=true — the update replaces the live provider directory"),
       },
     },
-    async ({ cdpkPath, target: targetParam, providerName, envVars, update, confirm }) => {
+    async ({ cdpkPath, sourcePath, skipInstall, target: targetParam, providerName, envVars, update, confirm }) => {
       try {
         if (update && !confirm) {
           throw new Error("update=true replaces the live provider directory (its services blip). Set confirm=true to proceed.");
         }
+        if (!cdpkPath && !sourcePath) throw new Error("Provide cdpkPath (prebuilt package) or sourcePath (build from source).");
+        if (cdpkPath && sourcePath) throw new Error("Provide only one of cdpkPath / sourcePath.");
         const { client } = await resolveTargetAndClient(targetParam);
-        const repack = repackageCdpk(loadCdpk(cdpkPath), { providerName, envVars });
+        let base;
+        let built = null;
+        if (sourcePath) {
+          built = buildProviderPackage(sourcePath, { runInstall: !skipInstall });
+          base = built.buffer;
+        } else {
+          base = loadCdpk(cdpkPath);
+        }
+        const repack = repackageCdpk(base, { providerName, envVars });
         const manifest = await registerProviderFlow(client, repack.buffer, repack.providerName, {
           mode: update ? "update" : "register",
         });
         return text({
           [update ? "updated" : "registered"]: repack.providerName,
+          builtFromSource: built ? { sourcePath, entryCount: built.entryCount, warnings: built.warnings.length ? built.warnings : undefined } : undefined,
           renamedFrom: repack.originalName !== repack.providerName ? repack.originalName : undefined,
           envBaked: envVars ? Object.keys(envVars) : undefined,
           manifest: { arcgisVersion: manifest.arcgisVersion, editingEnabled: manifest.editingEnabled, parameterCount: manifest.parameterKeys.length },

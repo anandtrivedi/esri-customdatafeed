@@ -22,7 +22,7 @@ One provider is registered once. Each Feature Service chooses its backend via se
 > 5. [Apply production hardening](#5-production-hardening-recommended) *(recommended)*
 > 6. [Create your first Feature Service](#6-create-your-first-feature-service)
 >
-> **Easier path — let an agent do most of it ([section 7: MCP server](#7-agent-driven-publishing-mcp-server)).** You still build the `.cdpk` once (the packaging half of step 4 — or use one someone already built). From there the bundled MCP server turns the rest into a conversation with Claude (or Databricks Playground): `register_provider` uploads and registers the package with the Databricks config **baked in** — replacing steps 2–3 and the register half of step 4, and immune to the update-wipes-`.env` failure — and `publish_layer` handles step 6 end to end (derives every service parameter from the table, publishes, smoke-tests). Step 1 (an ArcGIS Server), the one-time packaging, and step 5 (hardening) stay manual. Steps 2–6 below remain the reference for what the tools do under the hood — and the fallback when you can't run an MCP client.
+> **Easier path — let an agent do most of it ([section 7: MCP server](#7-agent-driven-publishing-mcp-server)).** The bundled MCP server turns steps 2–4 and 6 into a conversation with Claude (or Databricks Playground): point `register_provider` at the `nodejs-provider/` source directory and it **builds the package** (`npm install` + zip from an explicit include list — the wildcard-exclude footgun in step 4a can't happen), bakes the Databricks config in (replacing steps 2–3, and immune to the update-wipes-`.env` failure), uploads, and registers; `publish_layer` then handles step 6 end to end (derives every service parameter from the table, publishes, smoke-tests). Airgapped hosts can pass a prebuilt `.cdpk` or vendored dependencies instead. Step 1 (an ArcGIS Server) and step 5 (hardening) stay manual. Steps 2–6 below remain the reference for what the tools do under the hood — and the fallback when you can't run an MCP client.
 >
 > Once you hit the **"Installation complete"** marker after step 6, you're done — [section 7](#7-agent-driven-publishing-mcp-server) covers the MCP server (agent-driven install, publishing, and day-2 operations), and everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
 
@@ -572,7 +572,7 @@ Then: *"publish catalog.schema.my_table to my-gis"* — or *"why can't I publish
 | `list_gis_targets` | Registered ArcGIS targets (credentials never shown) |
 | `test_connectivity` | Mints an ArcGIS admin token + probes the SQL warehouse |
 | `provider_status` | Is the CDF `.cdpk` registered, version, editing enabled |
-| `register_provider` | Install/upgrade the provider from a `.cdpk` — optional rename (side-by-side installs) and env baking; upgrades need `update: true` + `confirm` |
+| `register_provider` | Install/upgrade the provider from a `.cdpk` **or build it from the source directory** (`sourcePath`: npm install + include-list zip); optional rename (side-by-side installs) and env baking; upgrades need `update: true` + `confirm` |
 | `unregister_provider` | Remove a provider — refuses while any service still uses it, or if any service can't be verified |
 | `inspect_table` | DESCRIBE + sampling → derived service parameters + validation report |
 | `create_publish_view` | Fix-up view with a `ROW_NUMBER()` int32 `objectid` for tables that fail id validation |
