@@ -35,7 +35,7 @@ export function buildServer({ registry, deps = {} } = {}) {
     return { target, client: _clientFor(target) };
   }
 
-  function sqlRunner(target, overrides = {}) {
+  async function sqlRunner(target, overrides = {}) {
     const profile = overrides.profile || target.databricks?.profile;
     const warehouseId = overrides.warehouseId || target.databricks?.warehouseId || process.env.DATABRICKS_WAREHOUSE_ID;
     if (!warehouseId) {
@@ -43,7 +43,7 @@ export function buildServer({ registry, deps = {} } = {}) {
         `No SQL warehouse configured for target '${target.name}' — set databricks.warehouseId on the target or pass warehouseId.`
       );
     }
-    const auth = _getAuth({ profile });
+    const auth = await _getAuth({ profile });
     return { runSql: (stmt) => _execSql(auth, warehouseId, stmt), profile: profile || "DEFAULT", warehouseId };
   }
 
@@ -130,7 +130,7 @@ export function buildServer({ registry, deps = {} } = {}) {
         await client.getToken();
         result.arcgis = "OK — admin token minted";
         try {
-          const { runSql, profile, warehouseId } = sqlRunner(target);
+          const { runSql, profile, warehouseId } = await sqlRunner(target);
           await runSql("SELECT 1");
           result.databricks = `OK — warehouse ${warehouseId} responded (profile ${profile})`;
         } catch (e) {
@@ -279,7 +279,7 @@ export function buildServer({ registry, deps = {} } = {}) {
     async ({ table, target: targetParam, profile, warehouseId }) => {
       try {
         const target = await reg.resolve(targetParam);
-        const { runSql } = sqlRunner(target, { profile, warehouseId });
+        const { runSql } = await sqlRunner(target, { profile, warehouseId });
         return text(await inspectTable(runSql, table));
       } catch (e) {
         return toolError(e);
@@ -306,7 +306,7 @@ export function buildServer({ registry, deps = {} } = {}) {
     async ({ sourceTable, viewName, orderBy, target: targetParam, profile, warehouseId }) => {
       try {
         const target = await reg.resolve(targetParam);
-        const { runSql } = sqlRunner(target, { profile, warehouseId });
+        const { runSql } = await sqlRunner(target, { profile, warehouseId });
         const sql = buildPublishViewSql(sourceTable, viewName, { orderBy });
         await runSql(sql);
         return text({ created: viewName, sql, note: "Publish this view with publish_layer. ROW_NUMBER ids are not stable across refreshes unless orderBy is a stable column." });
@@ -364,7 +364,7 @@ export function buildServer({ registry, deps = {} } = {}) {
             timeColumn: args.timeColumn || "",
           });
         } else {
-          const { runSql } = sqlRunner(target, args);
+          const { runSql } = await sqlRunner(target, args);
           inspection = await inspectTable(runSql, fqn);
           if (!inspection.readyToPublish) {
             return text({

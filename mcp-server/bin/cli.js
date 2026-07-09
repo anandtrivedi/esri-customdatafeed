@@ -54,9 +54,17 @@ async function serveStdio() {
 }
 
 async function serveHttp(port) {
+  // Databricks App runtime fronts auth via Apps permissions (platform OAuth),
+  // so the bearer layer is disabled in that mode. Standalone HTTP stays
+  // secure-by-default: it requires a bearer token.
+  const platformAuth =
+    process.env.CDF_MCP_PLATFORM_AUTH === "true" || Boolean(process.env.DATABRICKS_APP_PORT);
   const bearer = process.env.CDF_MCP_BEARER_TOKEN;
-  if (!bearer) {
-    console.error("FATAL: HTTP mode requires CDF_MCP_BEARER_TOKEN to be set (transport auth).");
+  if (!bearer && !platformAuth) {
+    console.error(
+      "FATAL: standalone HTTP mode requires CDF_MCP_BEARER_TOKEN (transport auth). " +
+        "When hosted as a Databricks App, the platform fronts auth — set CDF_MCP_PLATFORM_AUTH=true (auto-detected via DATABRICKS_APP_PORT)."
+    );
     process.exit(1);
   }
   const httpServer = createServer(async (req, res) => {
@@ -64,10 +72,12 @@ async function serveHttp(port) {
       res.writeHead(404).end();
       return;
     }
-    const auth = req.headers.authorization || "";
-    if (auth !== `Bearer ${bearer}`) {
-      res.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "unauthorized" }));
-      return;
+    if (bearer && !platformAuth) {
+      const auth = req.headers.authorization || "";
+      if (auth !== `Bearer ${bearer}`) {
+        res.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
     }
     try {
       // Stateless mode: fresh server+transport per request.
@@ -87,7 +97,9 @@ async function serveHttp(port) {
     }
   });
   httpServer.listen(port, "0.0.0.0", () => {
-    console.error(`databricks-cdf-mcp: streamable HTTP on :${port}/mcp (bearer auth enforced)`);
+    console.error(
+      `databricks-cdf-mcp: streamable HTTP on :${port}/mcp (${platformAuth ? "platform auth — Databricks Apps permissions" : "bearer auth enforced"})`
+    );
   });
 }
 
@@ -176,8 +188,10 @@ const command = args._[0] || "serve";
 
 try {
   if (command === "serve") {
-    const transport = args.transport || "stdio";
-    if (transport === "http") await serveHttp(Number(args.port || 8090));
+    // In a Databricks App the runtime injects the port; default 8000 there, 8090 standalone.
+    const transport = args.transport || (process.env.DATABRICKS_APP_PORT ? "http" : "stdio");
+    const port = Number(args.port || process.env.DATABRICKS_APP_PORT || process.env.PORT || 8090);
+    if (transport === "http") await serveHttp(port);
     else await serveStdio();
   } else if (command === "register-target") {
     await registerTarget(args);

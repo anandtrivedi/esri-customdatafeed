@@ -1,0 +1,25 @@
+# Databricks App — hosts this MCP server so AI Playground / Genie Code / Agent
+# Bricks can reach it with no self-hosting. App name must start with `mcp-`.
+#
+# The runtime injects DATABRICKS_APP_PORT (the server auto-selects HTTP mode and
+# binds it), the app service-principal OAuth creds (DATABRICKS_CLIENT_ID/SECRET,
+# used by databricks.js for SQL access), and — from the resource below —
+# DATABRICKS_WAREHOUSE_ID. Client↔app auth is handled by Databricks Apps
+# permissions, so the server runs in platform-auth mode (no bearer token).
+
+command: ["node", "bin/cli.js", "serve", "--transport", "http"]
+
+env:
+  # Platform (Databricks Apps permissions) fronts auth; also auto-detected via DATABRICKS_APP_PORT.
+  - name: CDF_MCP_PLATFORM_AUTH
+    value: "true"
+  # GIS targets live in a Databricks secret scope (no host filesystem in app mode).
+  # Each key in the scope is a target name whose value is the target JSON.
+  - name: CDF_MCP_SECRET_SCOPE
+    value: "gis-targets"
+  # Default warehouse for table inspection, injected from the bound resource
+  # named "sql-warehouse". Attach that resource at deploy time (DABs
+  # databricks.yml or `databricks apps` create --resources) — see mcp-server
+  # README, "Deploy as a Databricks App".
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse

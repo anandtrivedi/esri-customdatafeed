@@ -38,14 +38,44 @@ export function parseDatabricksCfg(filePath) {
   return profiles;
 }
 
+// Cache for OAuth M2M access tokens (app runtime), keyed by client id.
+const _m2mCache = new Map();
+
+/** OAuth M2M client-credentials exchange — the auth path inside a Databricks App. */
+async function m2mToken(host, clientId, clientSecret) {
+  const cached = _m2mCache.get(clientId);
+  if (cached && Date.now() < cached.expires - 5 * 60 * 1000) return cached.token;
+  const body = new URLSearchParams({ grant_type: "client_credentials", scope: "all-apis" }).toString();
+  const res = await fetch(`${host}/oidc/v1/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || !json.access_token) {
+    throw new Error(`OAuth M2M token exchange failed (HTTP ${res.status}): ${json.error_description || JSON.stringify(json).slice(0, 200)}`);
+  }
+  _m2mCache.set(clientId, { token: json.access_token, expires: Date.now() + (json.expires_in || 3600) * 1000 });
+  return json.access_token;
+}
+
 /**
- * Resolve {host, token} for a profile.
- * Precedence: explicit env (when no profile requested) → profile token (PAT)
- * → `databricks auth token --profile X` (OAuth via CLI).
+ * Resolve {host, token} for a profile. Async because the app-runtime path
+ * mints an OAuth token over the network.
+ * Precedence: explicit env PAT → app-runtime OAuth M2M (injected client
+ * id/secret) → profile token (PAT) → `databricks auth token --profile X`.
  */
-export function getAuth({ profile, cfgFile } = {}) {
+export async function getAuth({ profile, cfgFile } = {}) {
   if (!profile && process.env.DATABRICKS_HOST && process.env.DATABRICKS_TOKEN) {
     return { host: normalizeHost(process.env.DATABRICKS_HOST), token: process.env.DATABRICKS_TOKEN };
+  }
+  // Databricks App runtime injects the app service principal's OAuth creds.
+  if (!profile && process.env.DATABRICKS_HOST && process.env.DATABRICKS_CLIENT_ID && process.env.DATABRICKS_CLIENT_SECRET) {
+    const host = normalizeHost(process.env.DATABRICKS_HOST);
+    return { host, token: await m2mToken(host, process.env.DATABRICKS_CLIENT_ID, process.env.DATABRICKS_CLIENT_SECRET) };
   }
   const profiles = parseDatabricksCfg(cfgFile);
   const name = profile || "DEFAULT";

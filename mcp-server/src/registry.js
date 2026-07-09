@@ -187,7 +187,7 @@ export class TargetRegistry {
     if (ref.startsWith("secret:")) {
       const [scope, key] = ref.slice(7).split("/");
       if (!scope || !key) throw new Error(`Target '${name}': malformed secret ref '${ref}' (want secret:scope/key).`);
-      const auth = this._getAuth({ profile: this.secretProfile });
+      const auth = await this._getAuth({ profile: this.secretProfile });
       return this._getSecret(auth, scope, key);
     }
     throw new Error(`Target '${name}': unsupported passwordRef '${ref}' (use env: or secret:).`);
