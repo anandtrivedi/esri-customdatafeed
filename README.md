@@ -587,17 +587,24 @@ Then in the client:
 - **Hosted mode** enforces a bearer token on every request and should sit behind TLS.
 - The ArcGIS admin token is minted short-lived per operation and never returned.
 
-### Hosted mode (Databricks Playground / Genie / Agent Bricks)
+### Using it from Databricks (Playground / Genie Code / Agent Bricks)
 
-Run `serve --transport http --port <port>` as a service (systemd unit, TLS reverse proxy) and register it as a [UC HTTP connection / external MCP server](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp). Hard requirements learned from real deployment testing:
+Yes — you can add this in Genie Code the same way you add any MCP server (**Settings → MCP Servers → Add Server**), and it shows up in AI Playground under **Tools → MCP Servers → External**. But one thing has to be true first, and it's what makes this different from the built-in ones:
 
-1. **The endpoint must present HTTPS on port 443** — Databricks serverless egress does not connect to other ports. Self-signed certificates are accepted. Standard patterns: a reverse proxy on 443 on the MCP host; your org's existing load balancer/API gateway routing by hostname; or (production, locked-down environments) an **NCC private endpoint + NLB** mapping 443 to the service.
-2. **Serverless egress policy must permit the destination.** In environments with restricted egress (SEG), arbitrary self-hosted endpoints are dropped regardless of port — an admin must allowlist the FQDN in the serverless network policy or provision the NCC private endpoint. Verify with a `http_request()` probe against the connection before debugging anything else.
-3. Where Databricks Apps have open egress, hosting the MCP server as an app named `mcp-*` is the zero-infrastructure alternative (Playground discovers it natively).
+**The built-in Databricks MCP servers (Genie, Unity Catalog functions, vector search) are already running on Databricks infrastructure — you just point at them.** This one is *your own* server, so someone has to stand it up as an always-on HTTPS service once, and register it as a [UC HTTP connection](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp). After that, adding it in Genie Code / Playground is the one-click experience you're used to, and it's a one-time setup — end users never run anything.
 
-Classic (non-serverless) compute reaches the server with none of these constraints — useful for notebook-based agents and for isolating egress-policy issues from server issues.
+So there are **two roles**:
 
-See [`mcp-server/README.md`](mcp-server/README.md) for the full operator runbook (systemd unit, reverse proxy, `CREATE CONNECTION` SQL, Playground attach steps).
+- **Operator, once:** host the server (`serve --transport http` behind TLS, as a systemd service) and create the UC connection. This is the involved part, and it has real networking requirements on locked-down workspaces (below). Full step-by-step: [`mcp-server/README.md`](mcp-server/README.md).
+- **Everyone else, every time:** open Genie Code / Playground → add/select the connection → ask. Nothing to install or run.
+
+The operator-side networking requirements that trip people up (all covered in the runbook):
+
+1. **The endpoint must be HTTPS on port 443.** Databricks serverless egress only connects to 443 (self-signed certs are fine). Put a reverse proxy on 443 on the host, route through your org's existing load balancer, or — for locked-down/production — use an NCC private endpoint + NLB.
+2. **Serverless egress must be allowed to reach it.** On workspaces with restricted egress (SEG), self-hosted endpoints are blocked by policy regardless of port until an admin allowlists the FQDN (or provisions the NCC private endpoint). Probe with `http_request()` against the connection before debugging anything else — a timeout here means policy, not your server.
+3. **Shortcut where egress is open:** host it as a Databricks App named `mcp-*` and Playground discovers it natively — no separate hosting or connection needed.
+
+Testing without any of that: **classic (non-serverless) compute** reaches the server with none of these constraints, so a notebook-based agent is the quickest way to try the tools end to end (and to tell a server problem apart from an egress-policy problem).
 
 ## Supported Operations
 
