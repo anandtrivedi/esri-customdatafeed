@@ -589,9 +589,9 @@ Then in the client:
 
 ### Using it from Databricks (Playground / Genie Code / Agent Bricks)
 
-Yes — you can add this in Genie Code the same way you add any MCP server (**Settings → MCP Servers → Add Server**), and it shows up in AI Playground under **Tools → MCP Servers → External**. But one thing has to be true first, and it's what makes this different from the built-in ones:
+This server is added in Genie Code like any other MCP server (**Settings → MCP Servers → Add Server**) and appears in AI Playground under **Tools → MCP Servers → External**. The one difference from the built-in servers is what has to exist before that step works.
 
-**The built-in Databricks MCP servers (Genie, Unity Catalog functions, vector search) are already running on Databricks infrastructure — you just point at them.** This one is *your own* server, so someone has to stand it up as an always-on HTTPS service once, and register it as a [UC HTTP connection](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp). After that, adding it in Genie Code / Playground is the one-click experience you're used to, and it's a one-time setup — end users never run anything.
+The built-in Databricks MCP servers (Genie, Unity Catalog functions, vector search) already run on Databricks infrastructure, so adding them is the whole setup. This one is self-hosted: someone stands it up as an always-on HTTPS service once and registers it as a [UC HTTP connection](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp). After that, adding it in Genie Code or Playground is the same one-click flow, and it stays set up — end users never run anything.
 
 So there are **two roles**:
 
