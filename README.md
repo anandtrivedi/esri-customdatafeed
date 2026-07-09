@@ -7,24 +7,13 @@ A Node.js Custom Data Provider that connects Databricks tables to ArcGIS Server 
 | **Lakehouse** | Databricks SQL Warehouse | Large-scale analytics, complex queries across massive tables | Query |
 | **Lakebase** | Databricks Managed PostgreSQL + PostGIS | Low-latency serving (14–16ms), interactive maps, feature editing | Query + Editing |
 
-Choose **Lakehouse** when you need to query large Delta Lake tables directly with full Databricks SQL power. Choose **Lakebase** when you need fast, interactive map performance or feature editing — Lakebase serves data at PostgreSQL speeds with native PostGIS spatial indexing.
-
-One provider is registered once. Each Feature Service chooses its backend via service parameters.
+One provider is registered once; each Feature Service picks its backend via service parameters.
 
 > **How to read this README**
 >
-> The manual install path is **6 steps**:
+> Manual setup is **6 steps** — [get the code](#1-get-the-code-and-install-dependencies), [configure Databricks](#2-configure-databricks-connection), [Lakebase (optional)](#3-configure-lakebase-optional), [package & register the provider](#4-package-and-register-provider), [harden](#5-production-hardening-recommended), [publish your first service](#6-create-your-first-feature-service). You're done at the **"Installation complete"** marker; everything after is reference (query params, performance, geometry, env vars, troubleshooting).
 >
-> 1. [Get the code and install dependencies](#1-get-the-code-and-install-dependencies) *(Setup)*
-> 2. [Configure Databricks connection](#2-configure-databricks-connection) *(Setup)*
-> 3. [Configure Lakebase](#3-configure-lakebase-optional) *(Setup, optional)*
-> 4. [Package and register the provider](#4-package-and-register-provider) *(Setup)*
-> 5. [Apply production hardening](#5-production-hardening-recommended) *(recommended)*
-> 6. [Create your first Feature Service](#6-create-your-first-feature-service)
->
-> **Easier path — let an agent do most of it ([section 7: MCP server](#7-agent-driven-publishing-mcp-server)).** The bundled MCP server turns steps 2–4 and 6 into a conversation with Claude (or Databricks Playground): point `register_provider` at the `nodejs-provider/` source directory and it **builds the package** (`npm install` + zip from an explicit include list — the wildcard-exclude footgun in step 4a can't happen), bakes the Databricks config in (replacing steps 2–3, and immune to the update-wipes-`.env` failure), uploads, and registers; `publish_layer` then handles step 6 end to end (derives every service parameter from the table, publishes, smoke-tests). Airgapped hosts can pass a prebuilt `.cdpk` or vendored dependencies instead. Step 1 (an ArcGIS Server) and step 5 (hardening) stay manual. Steps 2–6 below remain the reference for what the tools do under the hood — and the fallback when you can't run an MCP client.
->
-> Once you hit the **"Installation complete"** marker after step 6, you're done — [section 7](#7-agent-driven-publishing-mcp-server) covers the MCP server (agent-driven install, publishing, and day-2 operations), and everything after that is reference material — query parameters, performance benchmarks, geometry formats, environment-variable reference, troubleshooting, and a brief design appendix — to look up as needed.
+> **Prefer to skip most of that?** [Section 7](#7-agent-driven-publishing-mcp-server) does the provider install and publishing through an MCP agent (Claude or Databricks Playground) — only the ArcGIS Server itself and hardening stay manual.
 
 ## Overview
 
@@ -583,7 +572,7 @@ Then in the client:
 ### Security model
 
 - **Credentials never pass through chat or tool arguments.** Tools accept a target *name*; passwords resolve server-side from `env:VAR` or `secret:scope/key` references. Unknown targets fail with "an operator must register it" — by design.
-- **Zero-touch registration for teams:** back the registry with a Databricks secret scope (`CDF_MCP_SECRET_SCOPE`) — each key is a target name whose value is the target JSON. Anyone with `WRITE` on the scope registers a GIS server via `databricks secrets put-secret`, from anywhere; the running server picks it up within a minute. Who may *call* the tools is governed by Unity Catalog (`USE CONNECTION`) in hosted mode.
+- **Zero-touch registration for teams:** back the registry with a Databricks secret scope (`CDF_MCP_SECRET_SCOPE`), one target per key. Anyone with `WRITE` on the scope adds a GIS server via `databricks secrets put-secret`; the server picks it up within a minute. Tool access is governed by Unity Catalog (`USE CONNECTION`) in hosted mode.
 - **Hosted mode** enforces a bearer token on every request and should sit behind TLS.
 - The ArcGIS admin token is minted short-lived per operation and never returned.
 
