@@ -64,40 +64,72 @@ FeatureServer URL.
   config file must be readable by the service user (a root-owned `.databrickscfg` yields a
   confusing "profile not found: available (none)").
 
-## Hosted (streamable HTTP) mode
+## Hosting for Databricks (Playground / Genie Code / Agent Bricks)
 
-### 1. Service setup
+To use the tools from Databricks (not just a local editor), the server has to run
+somewhere Databricks can reach. Two ways, easiest first.
 
-The **MCP host** is whatever machine runs the server — any host with HTTPS reach to the
-ArcGIS admin API and to Databricks. It does not have to be the ArcGIS Server, though
-co-locating there is often simplest (it sidesteps the port-443/egress hop). Copy the code
-to it and install production dependencies:
+### Option A — Deploy as a Databricks App (recommended)
+
+The platform hosts the server, handles TLS, and fronts auth via Databricks Apps
+permissions — no VM, no reverse proxy, no bearer token. The app name must start with
+`mcp-` so Playground discovers it. `app.yaml` is included in this directory.
+
+```bash
+databricks apps create mcp-cdf
+databricks sync . /Workspace/Users/<you>/apps/mcp-cdf --exclude node_modules --exclude .git
+# bind a SQL warehouse (used for table inspection) as the resource app.yaml expects:
+databricks apps update mcp-cdf --json \
+  '{"resources":[{"name":"sql-warehouse","sql_warehouse":{"id":"<warehouse-id>","permission":"CAN_USE"}}]}'
+databricks apps deploy mcp-cdf --source-code-path /Workspace/Users/<you>/apps/mcp-cdf
+```
+
+The app authenticates to Databricks as its own service principal (injected OAuth — no PAT),
+and reads GIS targets from a secret scope (set `CDF_MCP_SECRET_SCOPE`, below). Then attach
+it: **AI Playground → Tools → MCP Servers → External**, or Genie Code → **Settings → MCP
+Servers**. Grant the app's service principal `USE CONNECTION` / workspace access to control
+who can call it.
+
+> **Restricted npm proxies:** the build runs `npm install`. If your workspace uses a proxy
+> that filters newly published packages (e.g. the FE internal proxy's 7-day window), the
+> build can 404 on a recent transitive dependency. This repo pins the known offender
+> (`zod-to-json-schema`); if the build still 404s on a package, ask your registry admin to
+> mirror it, or use Option B. On workspaces with normal registry access this just works.
+
+> **Egress to the ArcGIS Server:** the publishing tools (`register_provider`,
+> `publish_layer`, …) call your ArcGIS admin API. In workspaces with restricted serverless
+> egress (SEG), the app can reach Databricks (SQL/inspection works) but not an external
+> ArcGIS host until an admin allowlists it or provides an NCC private endpoint. Where app
+> egress is open, everything works.
+
+### Option B — Self-host the HTTP server (fallback)
+
+Run the server yourself on any host with HTTPS reach to ArcGIS + Databricks, and register
+it as a [UC HTTP connection](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp).
+Use this when you can't deploy an app (e.g. restricted registry) or need to sit next to an
+on-prem ArcGIS Server.
+
+<details>
+<summary>Self-hosted runbook (systemd + TLS + UC connection)</summary>
+
+**Service setup.** Copy the code to the host and install production deps:
 
 ```bash
 rsync -a --exclude node_modules mcp-server/ /opt/cdf-mcp/ && cd /opt/cdf-mcp && npm install --omit=dev
+openssl rand -hex 32    # generate a bearer token — paste into the env file below
 ```
 
-Generate a bearer token (any long random string; this is what Databricks presents to
-authenticate to the server):
+Create `/opt/cdf-mcp/.env.service` (holds secrets — `chmod 600`):
 
 ```bash
-openssl rand -hex 32    # prints a 64-char hex string — copy it into the file below
-```
-
-Create `/opt/cdf-mcp/.env.service` with the following, then lock it down since it holds
-secrets (`chmod 600 /opt/cdf-mcp/.env.service`):
-
-```bash
-CDF_MCP_BEARER_TOKEN=<paste the openssl output here>   # transport auth — required in http mode
-CDF_MCP_TARGETS_FILE=/opt/cdf-mcp/targets.json         # or CDF_MCP_SECRET_SCOPE=gis-targets
+CDF_MCP_BEARER_TOKEN=<paste the openssl output>   # standalone HTTP transport auth
+CDF_MCP_TARGETS_FILE=/opt/cdf-mcp/targets.json     # or CDF_MCP_SECRET_SCOPE=gis-targets
 DATABRICKS_CONFIG_FILE=/opt/cdf-mcp/.databrickscfg
-ARCGIS_ADMIN_PASSWORD=<...>                            # only if targets use env: refs
+ARCGIS_ADMIN_PASSWORD=<...>                         # only if targets use env: refs
 ```
 
-systemd unit (`/etc/systemd/system/cdf-mcp.service`). `User=` is the OS account the
-service runs as — use a dedicated low-privilege user (e.g. `sudo useradd -r -s
-/usr/sbin/nologin cdfmcp`) or an existing service account; it just needs read access to
-the files above (on the ArcGIS box, the `arcgis` user is a reasonable choice):
+systemd unit (`/etc/systemd/system/cdf-mcp.service`) — `User=` is a dedicated low-privilege
+OS account (`sudo useradd -r -s /usr/sbin/nologin cdfmcp`) that can read the files above:
 
 ```ini
 [Service]
@@ -110,15 +142,32 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-Apply the same `chmod 600` to `targets.json` and `.databrickscfg` if they live on this host.
+Gotcha: a root-owned `.databrickscfg` the service user can't read yields "profile not
+found: available (none)".
 
-Gotcha: the service user (`User=` in the unit) must be able to read every file referenced
-here — a root-owned `.databrickscfg` silently yields "profile not found: available (none)".
+**TLS on 443.** Databricks serverless egress only connects to 443 (self-signed OK). Front
+it with Caddy (`reverse_proxy 127.0.0.1:8090`), your org LB, or an NCC private endpoint +
+NLB. Scope host-firewall ingress to the [published serverless outbound CIDRs](https://www.databricks.com/networking/v1/ip-ranges.json).
 
-### 2. Secret-scope-backed registry (recommended — no host access needed to add targets)
+**UC connection + probe.** Then attach in Playground as in Option A.
 
-Set `CDF_MCP_SECRET_SCOPE=gis-targets`. Each key in the scope is a target name; its value
-is the target JSON:
+```sql
+CREATE CONNECTION cdf_gis_mcp TYPE HTTP OPTIONS (
+  host 'https://<mcp-host-fqdn>', port '443', base_path '/mcp',
+  bearer_token '<CDF_MCP_BEARER_TOKEN>');
+SELECT http_request(conn => 'cdf_gis_mcp', method => 'POST', path => '',
+  json => '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}',
+  headers => map('Accept','application/json, text/event-stream')).text;
+```
+
+A JSON-RPC result = wired. `REMOTE_FUNCTION_HTTP_RETRY_TIMEOUT`/503 = egress policy blocks
+the host (allowlist the FQDN / use NCC); connection-refused or cert errors = TLS front.
+</details>
+
+### GIS targets in hosted mode — secret scope
+
+Both options read targets from a Databricks secret scope (no host filesystem needed). Set
+`CDF_MCP_SECRET_SCOPE=gis-targets`; each key is a target name, its value the target JSON:
 
 ```bash
 databricks secrets create-scope gis-targets
@@ -128,64 +177,15 @@ databricks secrets put-secret gis-targets dod-cop --string-value \
     "databricks":{"profile":"DEFAULT","warehouseId":"<id>"}}'
 ```
 
-The server re-reads the scope on a 60 s TTL — new targets appear without a restart.
-Gate registration with scope ACLs (`WRITE`), tool usage with `USE CONNECTION` grants.
+Anyone with `WRITE` on the scope adds a target from anywhere; the server picks it up within
+a minute.
 
-### 3. TLS on port 443 (hard requirement for serverless callers)
+### Testing without hosting
 
-Databricks serverless egress **only connects to port 443**; self-signed certificates are
-accepted. Minimal Caddy front (`caddy run --config /etc/caddy/Caddyfile`):
-
-```
-https://<mcp-host-fqdn>:443 {
-	tls internal
-	reverse_proxy 127.0.0.1:8090
-}
-```
-
-Equivalent patterns: your org's existing LB/API-gateway routing by hostname, or an NCC
-private endpoint + NLB (production; see below). Scope host-firewall ingress to the
-[published Databricks serverless outbound CIDRs](https://www.databricks.com/networking/v1/ip-ranges.json)
-for your region rather than 0.0.0.0/0.
-
-### 4. Egress policy (the step that actually gates Playground)
-
-In workspaces with restricted serverless egress, connections to self-hosted endpoints are
-dropped by policy **regardless of port** — well-known public sites succeeding while your
-endpoint times out is the signature. An account admin must either add the MCP FQDN to the
-serverless network policy allowlist, or provision an **NCC private endpoint + internal
-NLB** (preferred for production/IL environments: the server is never internet-exposed).
-
-Probe before debugging anything else:
-
-```sql
-CREATE CONNECTION cdf_gis_mcp TYPE HTTP OPTIONS (
-  host 'https://<mcp-host-fqdn>', port '443', base_path '/mcp',
-  bearer_token '<CDF_MCP_BEARER_TOKEN>');
-
-SELECT http_request(conn => 'cdf_gis_mcp', method => 'POST', path => '',
-  json => '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}',
-  headers => map('Accept','application/json, text/event-stream')).text;
-```
-
-A JSON-RPC result = fully wired. `REMOTE_FUNCTION_HTTP_RETRY_TIMEOUT`/503 = egress policy
-(step 4); connection-refused/cert errors = TLS front (step 3).
-
-### 5. Attach in Playground
-
-`GRANT USE CONNECTION ON CONNECTION cdf_gis_mcp TO <group>`, then in **AI Playground →
-Tools → + Add tool → MCP Servers → External MCP servers**, pick the connection. Tools are
-discovered automatically. The same connection works programmatically in Agent Bricks /
-Multi-Agent Supervisor.
-
-### Alternatives that skip all of the above
-
-- **Databricks App hosting** (workspaces with open app egress): deploy this server as an
-  app named `mcp-*` with streamable HTTP — Playground discovers it natively, OAuth handled
-  by the platform.
-- **Classic compute** (notebooks/jobs): reaches the server on any port with a plain HTTP
-  client — no 443 requirement, no egress policy. Stateless HTTP mode means raw
-  `requests.post` JSON-RPC works without an MCP client library.
+**Classic (non-serverless) compute** reaches a self-hosted server on any port with a plain
+HTTP client — no 443, no egress policy. Stateless HTTP means raw `requests.post` JSON-RPC
+works without an MCP client library — the quickest way to exercise the tools and to tell a
+server problem from an egress-policy one.
 
 ## Provider lifecycle
 

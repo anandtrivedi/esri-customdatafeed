@@ -578,22 +578,15 @@ Then in the client:
 
 ### Using it from Databricks (Playground / Genie Code / Agent Bricks)
 
-This server is added in Genie Code like any other MCP server (**Settings → MCP Servers → Add Server**) and appears in AI Playground under **Tools → MCP Servers → External**. It differs from the built-in servers in what must exist before that step works.
+To use the tools from Databricks (Playground, Genie Code, Agent Bricks) rather than a local editor, host the server once as a **Databricks App**. The platform runs it, terminates TLS, and fronts auth via Apps permissions — no VM, reverse proxy, or bearer token. `mcp-server/app.yaml` is included; deploy is roughly:
 
-The built-in Databricks MCP servers (Genie, Unity Catalog functions, vector search) already run on Databricks infrastructure, so adding them is the whole setup. This one is self-hosted: an operator stands it up as an always-on HTTPS service once and registers it as a [UC HTTP connection](https://docs.databricks.com/aws/en/generative-ai/mcp/external-mcp). After that, adding it in Genie Code or Playground is the same one-click flow and stays set up — end users never run anything.
+```bash
+databricks apps create mcp-cdf          # name must start with mcp- for Playground to discover it
+databricks sync mcp-server /Workspace/Users/<you>/apps/mcp-cdf --exclude node_modules --exclude .git
+databricks apps deploy mcp-cdf --source-code-path /Workspace/Users/<you>/apps/mcp-cdf
+```
 
-Two roles:
-
-- **Operator, once:** host the server (`serve --transport http` behind TLS, as a systemd service) and create the UC connection. This step has real networking requirements on locked-down workspaces (below). Full step-by-step: [`mcp-server/README.md`](mcp-server/README.md).
-- **Everyone else, every time:** open Genie Code or Playground, select the connection, and ask. Nothing to install or run.
-
-Operator-side networking requirements (all covered in the runbook):
-
-1. **The endpoint must be HTTPS on port 443.** Databricks serverless egress only connects to 443 (self-signed certs are fine). Put a reverse proxy on 443 on the host, route through your org's existing load balancer, or — for locked-down/production — use an NCC private endpoint + NLB.
-2. **Serverless egress must be allowed to reach it.** On workspaces with restricted egress (SEG), self-hosted endpoints are blocked by policy regardless of port until an admin allowlists the FQDN (or provisions the NCC private endpoint). Probe with `http_request()` against the connection before debugging anything else — a timeout here means policy, not your server.
-3. **Where egress is open**, host it as a Databricks App named `mcp-*`; Playground discovers it natively, with no separate hosting or connection needed.
-
-**Classic (non-serverless) compute** reaches the server with none of these constraints. A notebook-based agent on classic compute is the quickest way to try the tools end to end, and it isolates a server problem from an egress-policy problem.
+Then attach it in **Playground → Tools → MCP Servers → External** or **Genie Code → Settings → MCP Servers** — the same one-click flow as any MCP server; end users run nothing. Full deploy steps (warehouse binding, secret-scope targets), the self-hosted fallback for restricted environments, and the egress/registry caveats are in [`mcp-server/README.md`](mcp-server/README.md#hosting-for-databricks-playground--genie-code--agent-bricks).
 
 ## Supported Operations
 
