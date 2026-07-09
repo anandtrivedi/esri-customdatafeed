@@ -19,6 +19,9 @@
     "adm-zip": "^0.5.10",
     "zod": "^3.23.0"
   },
+  "overrides": {
+    "zod-to-json-schema": "3.25.1"
+  },
   "devDependencies": {
     "chai": "^4.3.0",
     "mocha": "^10.2.0"
