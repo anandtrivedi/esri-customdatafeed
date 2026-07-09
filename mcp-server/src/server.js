@@ -5,7 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ArcGisClient } from "./arcgis.js";
-import { TargetRegistry } from "./registry.js";
+import { TargetRegistry, saveLocalTarget } from "./registry.js";
 import { getAuth, execSql } from "./databricks.js";
 import { inspectTable, buildPublishViewSql, validateTableName } from "./inspect.js";
 import { buildServiceJson, getProviderManifest, waitForStart, smokeTest, assertOwnService, PROVIDER_NAME } from "./publish.js";
@@ -61,6 +61,54 @@ export function buildServer({ registry, deps = {} } = {}) {
     async () => {
       try {
         return text(await reg.listTargets());
+      } catch (e) {
+        return toolError(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "register_gis_target",
+    {
+      title: "Register an ArcGIS Server target (conversational onboarding)",
+      description:
+        "Register a new ArcGIS Server as a named target so its tables can be published. Collects everything EXCEPT the " +
+        "admin password (which must never pass through chat) and saves it to the local registry, then returns the single " +
+        "terminal command the user runs once to set the password securely. This is the normal first-run onboarding step: " +
+        "gather adminUrl/user/databricks details in conversation, call this, then have the user run the printed command " +
+        "before test_connectivity. For shared/hosted deployments, prefer a secret-scope-backed registry instead (see docs).",
+      inputSchema: {
+        name: z.string().describe("Short name for this target (e.g. 'demo-gis')"),
+        adminUrl: z.string().describe("ArcGIS admin API URL, ending in /arcgis/admin (e.g. https://gis.example.com:6443/arcgis/admin)"),
+        user: z.string().describe("ArcGIS admin username (e.g. siteadmin)"),
+        databricksProfile: z.string().optional().describe("Databricks CLI profile for SQL/inspection (defaults to DEFAULT)"),
+        warehouseId: z.string().optional().describe("SQL warehouse ID used for table inspection"),
+        allowSelfSigned: z.boolean().optional().describe("Set true if the ArcGIS Server uses a self-signed certificate"),
+      },
+    },
+    async ({ name, adminUrl, user, databricksProfile, warehouseId, allowSelfSigned }) => {
+      try {
+        if (!/\/arcgis\/admin\/?$/.test(adminUrl)) {
+          throw new Error(`adminUrl must end in /arcgis/admin — got '${adminUrl}'`);
+        }
+        const target = {
+          adminUrl: adminUrl.replace(/\/+$/, ""),
+          user,
+          passwordPending: true,
+          allowSelfSigned: Boolean(allowSelfSigned),
+          databricks: {
+            ...(databricksProfile ? { profile: databricksProfile } : {}),
+            ...(warehouseId ? { warehouseId } : {}),
+          },
+        };
+        const file = saveLocalTarget(name, target);
+        return text({
+          registered: name,
+          savedTo: file,
+          passwordPending: true,
+          nextStep: `Run this once in a terminal on this machine to set the admin password securely (it prompts — the password never goes through chat):\n\n  cdf-mcp set-password ${name}\n\nThen say "test connectivity to ${name}".`,
+          note: databricksProfile || warehouseId ? undefined : "No Databricks profile/warehouse set — inspection/publish will need one; you can pass it per-call or re-register.",
+        });
       } catch (e) {
         return toolError(e);
       }

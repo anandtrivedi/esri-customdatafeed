@@ -551,24 +551,24 @@ An MCP server that turns provider setup **and** per-layer publishing (sections 3
 
 ### Quickstart (local, Claude Code / Claude Desktop)
 
+Three steps, most of it conversation. Full walkthrough (Claude Code + Claude Desktop config, security notes) in [`mcp-server/README.md`](mcp-server/README.md).
+
 ```bash
-cd mcp-server && npm install
-
-# One-time, per GIS environment — validates credentials before saving (~/.cdf-mcp/targets.json, 0600)
-node bin/cli.js register-target my-gis \
-  --admin-url https://gis.example.com:6443/arcgis/admin --user siteadmin \
-  --databricks-profile DEFAULT --warehouse-id <sql-warehouse-id> [--allow-self-signed]
-
-# Register with Claude Code
-claude mcp add databricks-cdf -- node /path/to/esri-customdatafeed/mcp-server/bin/cli.js serve
+git clone https://github.com/anandtrivedi/esri-customdatafeed.git
+cd esri-customdatafeed/mcp-server && npm install
+claude mcp add databricks-cdf -- node "$(pwd)/bin/cli.js" serve
 ```
 
-Then: *"publish catalog.schema.my_table to my-gis"* — or *"why can't I publish this table?"* (inspection reports blocking problems with the fix named).
+Then in the client:
+1. *"Register my ArcGIS server at https://gis.example.com:6443/arcgis/admin (user siteadmin, Databricks profile DEFAULT, warehouse abc123) as `my-gis`."* — the agent saves the target and prints one `set-password` command to run in a terminal (the password is never typed into chat).
+2. *"install the Databricks provider on my-gis from ./nodejs-provider"* — builds and registers the CDF provider (skip if it's already installed).
+3. *"publish catalog.schema.my_table to my-gis"* — or *"why can't I publish this table?"* (inspection reports blocking problems with the fix named).
 
 ### Tools
 
 | Tool | What it does |
 |------|--------------|
+| `register_gis_target` | Onboard an ArcGIS Server by conversation — saves everything except the password, returns the one-line `set-password` command to run in a terminal |
 | `list_gis_targets` | Registered ArcGIS targets (credentials never shown) |
 | `test_connectivity` | Mints an ArcGIS admin token + probes the SQL warehouse |
 | `provider_status` | Is the CDF `.cdpk` registered, version, editing enabled |

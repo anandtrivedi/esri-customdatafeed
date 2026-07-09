@@ -1,31 +1,68 @@
-# databricks-cdf-mcp — Operator Runbook
+# databricks-cdf-mcp
 
-MCP server that publishes Unity Catalog tables as ArcGIS feature services through the
-[Custom Data Feed provider](../README.md). Tool reference, security model, and quickstart
-live in the [main README, section 7](../README.md#7-agent-driven-publishing-mcp-server) —
-this file is the hosted-deployment runbook.
+An MCP server that publishes Databricks Unity Catalog tables as ArcGIS feature services
+through the [Custom Data Feed provider](../README.md) — from a conversation with Claude
+(or Databricks Playground) instead of hand-run publishing workflows.
 
-## Prerequisites
+## Quickstart (local, ~3 steps)
 
-- ArcGIS Server 11.4+ with the CDF provider registered (main README sections 1–5)
-- Node 18+ on the MCP host (any host with HTTPS reach to the ArcGIS admin API — it does
-  not have to be the ArcGIS box)
-- A Databricks profile the server can use: PAT in a `.databrickscfg` readable **by the
-  service user**, or OAuth via the `databricks` CLI on PATH
+**Prerequisites:** Node 18+, an ArcGIS Server 11.4+ you have admin on, and a Databricks
+CLI profile (`databricks auth login …`) with access to a SQL warehouse. The machine
+running this needs HTTPS reach to the ArcGIS admin API; it does **not** have to be the
+ArcGIS box.
 
-## Local (stdio) mode
+**1. Add the server to your MCP client.**
 
+Claude Code:
 ```bash
-npm install
-node bin/cli.js register-target <name> --admin-url https://<gis-host>:6443/arcgis/admin \
-  --user <admin-user> --databricks-profile <profile> --warehouse-id <id> [--allow-self-signed]
-claude mcp add databricks-cdf -- node $(pwd)/bin/cli.js serve
+git clone https://github.com/anandtrivedi/esri-customdatafeed.git
+cd esri-customdatafeed/mcp-server && npm install
+claude mcp add databricks-cdf -- node "$(pwd)/bin/cli.js" serve
 ```
 
-`register-target` prompts for the password (never on the command line), validates by
-minting a real admin token, and writes `~/.cdf-mcp/targets.json` (0600). Prefer
-`--password-ref env:VAR` or `--password-ref secret:scope/key` over the inline default
-for anything shared.
+Claude Desktop (`claude_desktop_config.json` → **Settings → Developer → Edit Config**):
+```json
+{
+  "mcpServers": {
+    "databricks-cdf": {
+      "command": "node",
+      "args": ["/absolute/path/to/esri-customdatafeed/mcp-server/bin/cli.js", "serve"]
+    }
+  }
+}
+```
+
+**2. Onboard your ArcGIS Server by asking.** In the client:
+
+> *"Register my ArcGIS server at https://gis.example.com:6443/arcgis/admin (user siteadmin,
+> Databricks profile DEFAULT, warehouse abc123) as `my-gis`."*
+
+The agent calls `register_gis_target` and saves everything except the password, then prints
+one command to run **once in a terminal** (the password is prompted, never typed into chat):
+```bash
+cd esri-customdatafeed/mcp-server
+node bin/cli.js set-password my-gis
+```
+Then: *"test connectivity to my-gis"* → the agent confirms ArcGIS + warehouse are reachable.
+
+If the CDF provider isn't installed on that server yet, also ask:
+*"install the Databricks provider on my-gis from ./nodejs-provider"* — `register_provider`
+builds and registers it (see [Provider lifecycle](#provider-lifecycle)).
+
+**3. Publish.** *"publish `catalog.schema.my_table` to my-gis"* — the agent inspects the
+table, derives every service parameter, publishes, smoke-tests, and hands back the
+FeatureServer URL.
+
+### Notes
+
+- **Where the password lives:** `set-password` writes it into `~/.cdf-mcp/targets.json`
+  (mode 0600) on the machine running the server, and validates it against the admin API
+  before saving. It never passes through the model or chat transcript. For shared/hosted
+  deployments, use a secret-scope-backed registry instead (below).
+- **Full tool reference and security model:** [main README, section 7](../README.md#7-agent-driven-publishing-mcp-server).
+- **Databricks auth:** the server uses your `.databrickscfg` profiles. In hosted mode the
+  config file must be readable by the service user (a root-owned `.databrickscfg` yields a
+  confusing "profile not found: available (none)").
 
 ## Hosted (streamable HTTP) mode
 

@@ -46,6 +46,22 @@ export function saveLocalTarget(name, target) {
   return file;
 }
 
+/**
+ * Set the password on an already-registered local target (used by the
+ * `set-password` CLI, which prompts so the secret never transits chat/argv).
+ * Clears the passwordPending marker.
+ */
+export function setLocalTargetPassword(name, password) {
+  const file = localTargetsPath();
+  if (!existsSync(file)) throw new Error(`No local targets file at ${file} — register the target first.`);
+  const targets = JSON.parse(readFileSync(file, "utf8"));
+  if (!targets[name]) throw new Error(`Target '${name}' not found in ${file}. Known: ${Object.keys(targets).join(", ") || "(none)"}`);
+  targets[name].password = password;
+  delete targets[name].passwordPending;
+  writeFileSync(file, JSON.stringify(targets, null, 2) + "\n", { mode: 0o600 });
+  return file;
+}
+
 function envTarget() {
   if (!process.env.ARCGIS_ADMIN_URL) return {};
   return {
@@ -154,6 +170,13 @@ export class TargetRegistry {
 
   async _resolvePassword(target, name) {
     if (target.password) return target.password;
+    if (target.passwordPending) {
+      throw new Error(
+        `Target '${name}' is registered but has no password yet. Run this once in a terminal on the MCP host:\n` +
+          `  cdf-mcp set-password ${name}\n` +
+          "(it prompts for the password so it never goes through chat), then retry."
+      );
+    }
     const ref = target.passwordRef;
     if (!ref) throw new Error(`Target '${name}' has no password or passwordRef configured.`);
     if (ref.startsWith("env:")) {

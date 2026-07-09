@@ -5,6 +5,7 @@
 //   cdf-mcp register-target <name> --admin-url <url> --user <user>
 //           [--password-ref env:VAR | secret:scope/key] [--allow-self-signed]
 //           [--databricks-profile P] [--warehouse-id W] [--validate-only]
+//   cdf-mcp set-password <name>          # set password on a target registered via the chat tool
 //   cdf-mcp list-targets
 
 import { createServer } from "node:http";
@@ -12,7 +13,7 @@ import readline from "node:readline";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "../src/server.js";
-import { TargetRegistry, saveLocalTarget, localTargetsPath } from "../src/registry.js";
+import { TargetRegistry, saveLocalTarget, setLocalTargetPassword, localTargetsPath } from "../src/registry.js";
 import { ArcGisClient } from "../src/arcgis.js";
 
 function parseArgs(argv) {
@@ -133,6 +134,33 @@ async function registerTarget(args) {
   }
 }
 
+async function setPassword(args) {
+  const name = args._[1];
+  if (!name) {
+    console.error("Usage: cdf-mcp set-password <name>");
+    process.exit(1);
+  }
+  const password = await promptHidden(`ArcGIS admin password for target '${name}': `);
+  if (!password) {
+    console.error("No password entered; nothing changed.");
+    process.exit(1);
+  }
+  // Validate against the admin API before saving.
+  const registry = new TargetRegistry();
+  const targets = await registry.listTargets();
+  if (!targets[name]) {
+    console.error(`Target '${name}' is not registered locally. Known: ${Object.keys(targets).join(", ") || "(none)"}`);
+    process.exit(1);
+  }
+  const t = targets[name];
+  process.stderr.write("Validating credentials against the admin API... ");
+  const client = new ArcGisClient({ adminUrl: t.adminUrl, user: t.user, password, allowSelfSigned: t.allowSelfSigned });
+  const services = await client.listServices();
+  process.stderr.write(`OK (${services.length} services visible)\n`);
+  const file = setLocalTargetPassword(name, password);
+  console.log(`Password set for '${name}' in ${file}. You can now use it from the MCP tools.`);
+}
+
 async function listTargets() {
   const registry = new TargetRegistry();
   const targets = await registry.listTargets();
@@ -153,10 +181,12 @@ try {
     else await serveStdio();
   } else if (command === "register-target") {
     await registerTarget(args);
+  } else if (command === "set-password") {
+    await setPassword(args);
   } else if (command === "list-targets") {
     await listTargets();
   } else {
-    console.error(`Unknown command '${command}'. Commands: serve, register-target, list-targets`);
+    console.error(`Unknown command '${command}'. Commands: serve, register-target, set-password, list-targets`);
     process.exit(1);
   }
 } catch (e) {

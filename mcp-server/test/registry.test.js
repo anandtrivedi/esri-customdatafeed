@@ -1,5 +1,8 @@
 import { expect } from "chai";
-import { TargetRegistry } from "../src/registry.js";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { TargetRegistry, saveLocalTarget, setLocalTargetPassword } from "../src/registry.js";
 
 function makeRegistry({ local = {}, scope = {}, secrets = {} } = {}) {
   return new TargetRegistry({
@@ -95,6 +98,17 @@ describe("TargetRegistry", () => {
     expect(listed.demo.credentialSource).to.equal("inline");
   });
 
+  it("gives a set-password instruction when the target is pending a password", async () => {
+    const reg = makeRegistry({ local: { demo: { adminUrl: "https://g:6443/arcgis/admin", user: "u", passwordPending: true } } });
+    try {
+      await reg.resolve("demo");
+      throw new Error("should have thrown");
+    } catch (e) {
+      expect(e.message).to.match(/cdf-mcp set-password demo/);
+      expect(e.message).to.match(/never goes through chat/);
+    }
+  });
+
   it("gives an operator-pointing error when no targets exist", async () => {
     const reg = makeRegistry({});
     try {
@@ -103,5 +117,41 @@ describe("TargetRegistry", () => {
     } catch (e) {
       expect(e.message).to.match(/No GIS targets registered/);
     }
+  });
+});
+
+describe("local target file round-trip (register tool → set-password)", () => {
+  let dir, prev;
+  before(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "cdf-targets-"));
+    prev = process.env.CDF_MCP_TARGETS_FILE;
+    process.env.CDF_MCP_TARGETS_FILE = path.join(dir, "targets.json");
+  });
+  after(() => {
+    if (prev === undefined) delete process.env.CDF_MCP_TARGETS_FILE;
+    else process.env.CDF_MCP_TARGETS_FILE = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("saves a passwordPending target, then set-password fills it and clears the marker", () => {
+    saveLocalTarget("demo", {
+      adminUrl: "https://gis:6443/arcgis/admin",
+      user: "siteadmin",
+      passwordPending: true,
+      allowSelfSigned: true,
+      databricks: { profile: "DEFAULT" },
+    });
+    let saved = JSON.parse(readFileSync(process.env.CDF_MCP_TARGETS_FILE, "utf8"));
+    expect(saved.demo.passwordPending).to.equal(true);
+    expect(saved.demo.password).to.equal(undefined);
+
+    setLocalTargetPassword("demo", "the-secret");
+    saved = JSON.parse(readFileSync(process.env.CDF_MCP_TARGETS_FILE, "utf8"));
+    expect(saved.demo.password).to.equal("the-secret");
+    expect(saved.demo.passwordPending).to.equal(undefined);
+  });
+
+  it("set-password errors on an unknown target", () => {
+    expect(() => setLocalTargetPassword("nope", "x")).to.throw(/not found/);
   });
 });
