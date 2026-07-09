@@ -170,11 +170,11 @@ Multi-Agent Supervisor.
   client — no 443 requirement, no egress policy. Stateless HTTP mode means raw
   `requests.post` JSON-RPC works without an MCP client library.
 
-## Provider lifecycle (register_provider / unregister_provider)
+## Provider lifecycle
 
-Verified end-to-end against ArcGIS Server 12.0 (register → publish through the new
-provider → in-place update → unregister, production provider untouched). Operational
-notes from that testing:
+The `register_provider` and `unregister_provider` tools, verified end-to-end against
+ArcGIS Server 12.0 (register → publish through the new provider → in-place update →
+unregister, production provider untouched). Operational notes from that testing:
 
 - **Prefer building from source** (`sourcePath` pointing at `nodejs-provider/`): the
   tool runs `npm install --omit=dev` and assembles the zip from an explicit include
