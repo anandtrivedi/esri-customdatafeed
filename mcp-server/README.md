@@ -77,21 +77,31 @@ to it and install production dependencies:
 rsync -a --exclude node_modules mcp-server/ /opt/cdf-mcp/ && cd /opt/cdf-mcp && npm install --omit=dev
 ```
 
+Generate a bearer token (any long random string; this is what Databricks presents to
+authenticate to the server):
+
+```bash
+openssl rand -hex 32    # prints a 64-char hex string — copy it into the file below
+```
+
 Create `/opt/cdf-mcp/.env.service` with the following, then lock it down since it holds
 secrets (`chmod 600 /opt/cdf-mcp/.env.service`):
 
 ```bash
-CDF_MCP_BEARER_TOKEN=<openssl rand -hex 32>       # transport auth — required in http mode
-CDF_MCP_TARGETS_FILE=/opt/cdf-mcp/targets.json    # or CDF_MCP_SECRET_SCOPE=gis-targets
+CDF_MCP_BEARER_TOKEN=<paste the openssl output here>   # transport auth — required in http mode
+CDF_MCP_TARGETS_FILE=/opt/cdf-mcp/targets.json         # or CDF_MCP_SECRET_SCOPE=gis-targets
 DATABRICKS_CONFIG_FILE=/opt/cdf-mcp/.databrickscfg
-ARCGIS_ADMIN_PASSWORD=<...>                       # only if targets use env: refs
+ARCGIS_ADMIN_PASSWORD=<...>                            # only if targets use env: refs
 ```
 
-systemd unit (`/etc/systemd/system/cdf-mcp.service`):
+systemd unit (`/etc/systemd/system/cdf-mcp.service`). `User=` is the OS account the
+service runs as — use a dedicated low-privilege user (e.g. `sudo useradd -r -s
+/usr/sbin/nologin cdfmcp`) or an existing service account; it just needs read access to
+the files above (on the ArcGIS box, the `arcgis` user is a reasonable choice):
 
 ```ini
 [Service]
-User=<svc-user>
+User=cdfmcp
 WorkingDirectory=/opt/cdf-mcp
 EnvironmentFile=/opt/cdf-mcp/.env.service
 ExecStart=/usr/bin/node bin/cli.js serve --transport http --port 8090
