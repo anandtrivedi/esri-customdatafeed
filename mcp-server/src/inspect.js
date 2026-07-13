@@ -43,12 +43,21 @@ function nameScore(colName) {
   return 0;
 }
 
+/** Backtick-quote an identifier for Databricks SQL (column names come from
+ * DESCRIBE output and may contain spaces/hyphens/reserved words). */
+function q(name) {
+  if (String(name).includes("`")) throw new Error(`Unsupported column name (contains backtick): ${name}`);
+  return `\`${name}\``;
+}
+
 /**
  * Inspect a UC table and derive publishable service parameters.
  * @param {function} runSql — async (statement) => { columns, rows }
  * @param {string} table — catalog.schema.table
+ * @param {object} opts.overrides — user-supplied {geometryColumn, geometryFormat,
+ *   srid, idField} take precedence over detection (validated against the table).
  */
-export async function inspectTable(runSql, table, { sampleLimit = 5 } = {}) {
+export async function inspectTable(runSql, table, { sampleLimit = 5, overrides = {} } = {}) {
   const fqn = validateTableName(table);
   const warnings = [];
   const errors = [];
@@ -60,21 +69,41 @@ export async function inspectTable(runSql, table, { sampleLimit = 5 } = {}) {
     columns.push({ name, type: (type || "").toUpperCase() });
   }
   if (columns.length === 0) throw new Error(`DESCRIBE TABLE ${fqn} returned no columns`);
+  const byName = new Map(columns.map((c) => [c.name, c]));
 
-  // ---- geometry detection -------------------------------------------------
+  // ---- geometry detection (overrides win) ---------------------------------
   let geometry = null;
+  if (overrides.geometryColumn) {
+    if (!byName.has(overrides.geometryColumn)) {
+      errors.push(`Overridden geometryColumn '${overrides.geometryColumn}' does not exist on ${fqn}.`);
+    } else {
+      const col = byName.get(overrides.geometryColumn);
+      const format =
+        overrides.geometryFormat ||
+        (col.type.startsWith("GEOMETRY") || col.type.startsWith("GEOGRAPHY") ? "GEOMETRY" : null);
+      if (!format) {
+        // Column named but format unknown: sample it like a candidate.
+        const sample = await runSql(`SELECT ${q(col.name)} FROM ${fqn} WHERE ${q(col.name)} IS NOT NULL LIMIT ${sampleLimit}`);
+        const detected = col.type.startsWith("BINARY") ? "WKB" : classifyStringSample(sample.rows.map((r) => r[0]));
+        if (detected) geometry = { column: col.name, format: detected, srid: Number(overrides.srid) || 4326, confidence: "override+sampled" };
+        else errors.push(`Could not determine geometry format of overridden column '${col.name}' — pass geometryFormat too.`);
+      } else {
+        geometry = { column: col.name, format, srid: Number(overrides.srid) || 4326, confidence: "override" };
+      }
+    }
+  }
   const nativeGeom = columns.find((c) => c.type.startsWith("GEOMETRY") || c.type.startsWith("GEOGRAPHY"));
-  if (nativeGeom) {
+  if (!geometry && errors.length === 0 && nativeGeom) {
     geometry = { column: nativeGeom.name, format: "GEOMETRY", srid: 4326, confidence: "high" };
     try {
       const sridRes = await runSql(
-        `SELECT st_srid(${nativeGeom.name}) FROM ${fqn} WHERE ${nativeGeom.name} IS NOT NULL LIMIT 1`
+        `SELECT st_srid(${q(nativeGeom.name)}) FROM ${fqn} WHERE ${q(nativeGeom.name)} IS NOT NULL LIMIT 1`
       );
       if (sridRes.rows[0]?.[0] != null) geometry.srid = Number(sridRes.rows[0][0]);
     } catch {
       warnings.push(`Could not read ST_SRID(${nativeGeom.name}) — assuming 4326.`);
     }
-  } else {
+  } else if (!geometry && errors.length === 0) {
     const candidates = columns
       .filter((c) => ["STRING", "BINARY", "VARCHAR"].some((t) => c.type.startsWith(t)))
       .map((c) => ({ ...c, score: nameScore(c.name) }))
@@ -86,25 +115,25 @@ export async function inspectTable(runSql, table, { sampleLimit = 5 } = {}) {
         warnings.push(`Geometry format WKB inferred from BINARY type of '${cand.name}' — override geometryFormat if wrong.`);
         break;
       }
-      const sample = await runSql(`SELECT ${cand.name} FROM ${fqn} WHERE ${cand.name} IS NOT NULL LIMIT ${sampleLimit}`);
+      const sample = await runSql(`SELECT ${q(cand.name)} FROM ${fqn} WHERE ${q(cand.name)} IS NOT NULL LIMIT ${sampleLimit}`);
       const format = classifyStringSample(sample.rows.map((r) => r[0]));
       if (format) {
         geometry = { column: cand.name, format, srid: 4326, confidence: "high" };
         break;
       }
     }
-    if (geometry?.format === "GEOJSON") {
-      warnings.push("GeoJSON storage: SRID is fixed to 4326 by ST_GeomFromGeoJSON.");
-    }
   }
-  if (!geometry) {
+  if (geometry?.format === "GEOJSON") {
+    warnings.push("GeoJSON storage: SRID is fixed to 4326 by ST_GeomFromGeoJSON.");
+  }
+  if (!geometry && errors.length === 0) {
     errors.push(
       "No geometry column detected. If geometry lives in a generically-named STRING column, " +
         "re-run with an explicit geometryColumn/geometryFormat override."
     );
   }
 
-  // ---- id field detection -------------------------------------------------
+  // ---- id field detection (override wins) ---------------------------------
   const intCols = columns.filter((c) => ["INT", "BIGINT", "SMALLINT", "TINYINT", "LONG"].some((t) => c.type.startsWith(t)));
   const scored = intCols
     .map((c) => {
@@ -115,10 +144,19 @@ export async function inspectTable(runSql, table, { sampleLimit = 5 } = {}) {
     })
     .sort((a, b) => b.score - a.score);
   let idField = null;
-  const idCandidate = scored[0];
+  let idCandidate = scored[0];
+  if (overrides.idField) {
+    if (!byName.has(overrides.idField)) {
+      errors.push(`Overridden idField '${overrides.idField}' does not exist on ${fqn}.`);
+      idCandidate = null;
+    } else {
+      idCandidate = byName.get(overrides.idField);
+    }
+  }
   if (idCandidate) {
+    const c = q(idCandidate.name);
     const stats = await runSql(
-      `SELECT count(*), count(${idCandidate.name}), count(DISTINCT ${idCandidate.name}), min(${idCandidate.name}), max(${idCandidate.name}) FROM ${fqn}`
+      `SELECT count(*), count(${c}), count(DISTINCT ${c}), min(${c}), max(${c}) FROM ${fqn}`
     );
     const [total, nonNull, distinct, min, max] = stats.rows[0].map(Number);
     idField = {
@@ -137,7 +175,7 @@ export async function inspectTable(runSql, table, { sampleLimit = 5 } = {}) {
         `idField '${idCandidate.name}' exceeds the 32-bit OBJECTID limit (max=${max} > ${OBJECTID_MAX}). ` +
           "Use create_publish_view to generate a view with a ROW_NUMBER() objectid."
       );
-  } else {
+  } else if (!overrides.idField) {
     errors.push("No integer id column found. Use create_publish_view to add a ROW_NUMBER() objectid.");
   }
 

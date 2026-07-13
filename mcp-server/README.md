@@ -1,8 +1,17 @@
 # databricks-cdf-mcp
 
+![status: Beta](https://img.shields.io/badge/status-Beta-yellow)
+
 An MCP server that publishes Databricks Unity Catalog tables as ArcGIS feature services
 through the [Custom Data Feed provider](../README.md) — from a conversation with Claude
 (or Databricks Playground) instead of hand-run publishing workflows.
+
+**Status: Beta.** The core loop — inspect a table, publish it as a feature service,
+manage the provider — is tested end-to-end against a live ArcGIS Server 12.0, from Claude
+(stdio) and from Databricks compute. Hosted deployments, editing-service parameters, and
+unusual table shapes have seen less mileage. The underlying
+[CDF provider](../README.md) is the mature component; this is a newer control layer on
+top of it. Issues and feedback welcome.
 
 ## Quickstart (local, ~3 steps)
 

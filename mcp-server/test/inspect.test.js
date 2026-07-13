@@ -42,8 +42,8 @@ describe("inspectTable", () => {
   it("derives WKT geometry, id field, and time column", async () => {
     const runSql = fakeRunSql([
       DESCRIBE_WKT,
-      ["SELECT geometry_wkt FROM cat.sch.roads", { columns: [], rows: [["LINESTRING (1 2, 3 4)"], ["POINT (5 6)"]] }],
-      ["SELECT count(*), count(road_id)", { columns: [], rows: [["100", "100", "100", "1", "100"]] }],
+      ["SELECT `geometry_wkt` FROM cat.sch.roads", { columns: [], rows: [["LINESTRING (1 2, 3 4)"], ["POINT (5 6)"]] }],
+      ["SELECT count(*), count(`road_id`)", { columns: [], rows: [["100", "100", "100", "1", "100"]] }],
     ]);
     const result = await inspectTable(runSql, "cat.sch.roads");
     expect(result.readyToPublish).to.equal(true);
@@ -65,8 +65,8 @@ describe("inspectTable", () => {
         "DESCRIBE TABLE cat.sch.places",
         { columns: [], rows: [["id", "bigint", null], ["geojson_col", "string", null]] },
       ],
-      ["SELECT geojson_col FROM cat.sch.places", { columns: [], rows: [['{"type":"Point","coordinates":[1,2]}']] }],
-      ["SELECT count(*), count(id)", { columns: [], rows: [["10", "10", "10", "1", "10"]] }],
+      ["SELECT `geojson_col` FROM cat.sch.places", { columns: [], rows: [['{"type":"Point","coordinates":[1,2]}']] }],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["10", "10", "10", "1", "10"]] }],
     ]);
     const result = await inspectTable(runSql, "cat.sch.places");
     expect(result.geometry).to.include({ column: "geojson_col", format: "GEOJSON" });
@@ -79,8 +79,8 @@ describe("inspectTable", () => {
         "DESCRIBE TABLE cat.sch.big",
         { columns: [], rows: [["id", "bigint", null], ["geom_wkt", "string", null]] },
       ],
-      ["SELECT geom_wkt FROM cat.sch.big", { columns: [], rows: [["POINT (0 0)"]] }],
-      ["SELECT count(*), count(id)", { columns: [], rows: [["5", "5", "5", "1", "9999999999"]] }],
+      ["SELECT `geom_wkt` FROM cat.sch.big", { columns: [], rows: [["POINT (0 0)"]] }],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["5", "5", "5", "1", "9999999999"]] }],
     ]);
     const result = await inspectTable(runSql, "cat.sch.big");
     expect(result.readyToPublish).to.equal(false);
@@ -95,8 +95,8 @@ describe("inspectTable", () => {
         "DESCRIBE TABLE cat.sch.geo",
         { columns: [], rows: [["id", "int", null], ["geom", "geometry", null]] },
       ],
-      ["SELECT st_srid(geom)", { columns: [], rows: [["3857"]] }],
-      ["SELECT count(*), count(id)", { columns: [], rows: [["7", "7", "7", "1", "7"]] }],
+      ["SELECT st_srid(`geom`)", { columns: [], rows: [["3857"]] }],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["7", "7", "7", "1", "7"]] }],
     ]);
     const result = await inspectTable(runSql, "cat.sch.geo");
     expect(result.geometry).to.include({ column: "geom", format: "GEOMETRY", srid: 3857 });
@@ -105,11 +105,66 @@ describe("inspectTable", () => {
   it("reports missing geometry as blocking", async () => {
     const runSql = fakeRunSql([
       ["DESCRIBE TABLE cat.sch.plain", { columns: [], rows: [["id", "int", null], ["name", "string", null]] }],
-      ["SELECT count(*), count(id)", { columns: [], rows: [["3", "3", "3", "1", "3"]] }],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["3", "3", "3", "1", "3"]] }],
     ]);
     const result = await inspectTable(runSql, "cat.sch.plain");
     expect(result.readyToPublish).to.equal(false);
     expect(result.errors.join(" ")).to.match(/No geometry column/);
+  });
+});
+
+describe("inspectTable overrides", () => {
+  it("a partial override rescues an unhinted geometry column", async () => {
+    const runSql = fakeRunSql([
+      [
+        "DESCRIBE TABLE cat.sch.odd",
+        { columns: [], rows: [["id", "int", null], ["boundary", "string", null]] },
+      ],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["9", "9", "9", "1", "9"]] }],
+    ]);
+    const result = await inspectTable(runSql, "cat.sch.odd", {
+      overrides: { geometryColumn: "boundary", geometryFormat: "WKT" },
+    });
+    expect(result.readyToPublish).to.equal(true);
+    expect(result.geometry).to.include({ column: "boundary", format: "WKT", confidence: "override" });
+  });
+
+  it("samples an overridden column when only the name is given", async () => {
+    const runSql = fakeRunSql([
+      [
+        "DESCRIBE TABLE cat.sch.odd2",
+        { columns: [], rows: [["id", "int", null], ["boundary", "string", null]] },
+      ],
+      ["SELECT `boundary` FROM cat.sch.odd2", { columns: [], rows: [["POLYGON ((0 0, 1 0, 1 1, 0 0))"]] }],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["9", "9", "9", "1", "9"]] }],
+    ]);
+    const result = await inspectTable(runSql, "cat.sch.odd2", { overrides: { geometryColumn: "boundary" } });
+    expect(result.geometry).to.include({ column: "boundary", format: "WKT" });
+  });
+
+  it("rejects an override naming a nonexistent column", async () => {
+    const runSql = fakeRunSql([
+      ["DESCRIBE TABLE cat.sch.odd3", { columns: [], rows: [["id", "int", null], ["geom_wkt", "string", null]] }],
+      ["SELECT count(*), count(`id`)", { columns: [], rows: [["9", "9", "9", "1", "9"]] }],
+    ]);
+    const result = await inspectTable(runSql, "cat.sch.odd3", { overrides: { geometryColumn: "nope" } });
+    expect(result.readyToPublish).to.equal(false);
+    expect(result.errors.join(" ")).to.match(/does not exist/);
+  });
+
+  it("validates an overridden idField instead of the auto-pick", async () => {
+    const runSql = fakeRunSql([
+      [
+        "DESCRIBE TABLE cat.sch.odd4",
+        { columns: [], rows: [["id", "bigint", null], ["stable_key", "int", null], ["geom_wkt", "string", null]] },
+      ],
+      ["SELECT geom_wkt FROM", { columns: [], rows: [] }], // not used; geometry hinted below
+      ["SELECT `geom_wkt` FROM cat.sch.odd4", { columns: [], rows: [["POINT (1 1)"]] }],
+      ["SELECT count(*), count(`stable_key`)", { columns: [], rows: [["5", "5", "5", "1", "5"]] }],
+    ]);
+    const result = await inspectTable(runSql, "cat.sch.odd4", { overrides: { idField: "stable_key" } });
+    expect(result.idField).to.include({ column: "stable_key", unique: true });
+    expect(result.readyToPublish).to.equal(true);
   });
 });
 

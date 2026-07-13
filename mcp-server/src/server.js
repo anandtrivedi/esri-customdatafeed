@@ -4,6 +4,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { createRequire } from "node:module";
+
+const pkg = createRequire(import.meta.url)("../package.json");
 import { ArcGisClient } from "./arcgis.js";
 import { TargetRegistry, saveLocalTarget } from "./registry.js";
 import { getAuth, execSql } from "./databricks.js";
@@ -47,7 +50,7 @@ export function buildServer({ registry, deps = {} } = {}) {
     return { runSql: (stmt) => _execSql(auth, warehouseId, stmt), profile: profile || "DEFAULT", warehouseId };
   }
 
-  const server = new McpServer({ name: "databricks-cdf-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "databricks-cdf-mcp", version: pkg.version });
 
   server.registerTool(
     "list_gis_targets",
@@ -351,33 +354,27 @@ export function buildServer({ registry, deps = {} } = {}) {
 
         const manifest = await getProviderManifest(client, args.provider || PROVIDER_NAME);
 
-        // Derive parameters via inspection unless fully overridden.
-        let inspection = null;
-        let params = { tableName: fqn };
-        const fullyOverridden = args.geometryColumn && args.geometryFormat && args.idField;
-        if (fullyOverridden) {
-          Object.assign(params, {
+        // Derive parameters via inspection; user overrides feed INTO the
+        // inspection (a partial override — e.g. just geometryColumn — is
+        // enough when detection alone would fail).
+        const { runSql } = await sqlRunner(target, args);
+        const inspection = await inspectTable(runSql, fqn, {
+          overrides: {
             geometryColumn: args.geometryColumn,
             geometryFormat: args.geometryFormat,
+            srid: args.srid,
             idField: args.idField,
-            srid: args.srid || "4326",
-            timeColumn: args.timeColumn || "",
+          },
+        });
+        if (!inspection.readyToPublish) {
+          return text({
+            published: false,
+            reason: "Table failed inspection — fix the issues below (create_publish_view can fix id problems) or pass explicit overrides.",
+            inspection,
           });
-        } else {
-          const { runSql } = await sqlRunner(target, args);
-          inspection = await inspectTable(runSql, fqn);
-          if (!inspection.readyToPublish) {
-            return text({
-              published: false,
-              reason: "Table failed inspection — fix the issues below (create_publish_view can fix id problems) or pass explicit overrides.",
-              inspection,
-            });
-          }
-          params = { ...inspection.serviceParameters };
-          for (const key of ["geometryColumn", "geometryFormat", "idField", "srid", "timeColumn"]) {
-            if (args[key]) params[key] = args[key];
-          }
         }
+        const params = { ...inspection.serviceParameters };
+        if (args.timeColumn) params.timeColumn = args.timeColumn;
         if (args.maxRecordCount) params.maxRecordCount = args.maxRecordCount;
         if (args.workspace) params.workspace = args.workspace;
         if (args.warehouseHttpPath) params.warehouseHttpPath = args.warehouseHttpPath;
@@ -398,15 +395,27 @@ export function buildServer({ registry, deps = {} } = {}) {
         if (existing) throw new Error(`Service '${serviceName}' already exists — choose another serviceName or unpublish it first.`);
 
         await client.createService(serviceJson);
-        await waitForStart(client, serviceName);
-        const smoke = await smokeTest(client, serviceName);
+        // The service now EXISTS — verification failures below must not read
+        // as "publish failed" or the agent will retry and hit "already exists".
+        let smoke = null;
+        let verifyError = null;
+        try {
+          await waitForStart(client, serviceName);
+          smoke = await smokeTest(client, serviceName);
+        } catch (e) {
+          verifyError = e.message;
+        }
 
         return text({
           published: true,
+          verified: !verifyError,
           serviceName,
           featureServerUrl: `${client.restUrl}/services/${serviceName}/FeatureServer`,
           layerUrl: `${client.restUrl}/services/${serviceName}/FeatureServer/0`,
-          smokeTest: smoke,
+          smokeTest: smoke ?? undefined,
+          verificationError: verifyError
+            ? `Service was created but failed verification: ${verifyError}. Investigate (service params, provider runtime) or remove it with unpublish_layer — do NOT re-run publish_layer with the same name.`
+            : undefined,
           rowCount: inspection?.rowCount ?? undefined,
           warnings: inspection?.warnings || [],
         });

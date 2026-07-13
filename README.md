@@ -536,6 +536,8 @@ editData(req) → Always Lakebase (Lakehouse is read-only)
 
 ## 7. Agent-driven publishing (`mcp-server/`)
 
+![status: Beta](https://img.shields.io/badge/status-Beta-yellow) — the provider above is the mature component; this MCP layer is newer (core flows tested end-to-end against a live ArcGIS Server; see its [README](mcp-server/README.md) for the current status).
+
 An MCP server that turns provider setup **and** per-layer publishing (sections 3–6) into a conversation. Instead of hand-building `createService` JSON, an agent inspects the Unity Catalog table (geometry column/format, SRID, int32-safe unique id, time column — all derived automatically), publishes it as a feature service, smoke-tests it live, and returns the FeatureServer URL. Given a built `.cdpk`, it also installs and upgrades the provider itself — with environment config **baked into the package**, so the ".cdpk update wiped my `.env`" failure mode (section 6 warning) can't happen.
 
 ### Quickstart (local, Claude Code / Claude Desktop)
