@@ -6,7 +6,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createRequire } from "node:module";
 
-const pkg = createRequire(import.meta.url)("../package.json");
+let pkg = { version: "0.0.0" };
+try {
+  pkg = createRequire(import.meta.url)("../package.json");
+} catch {
+  // bundled deployments ship without a sibling package.json
+}
 import { ArcGisClient } from "./arcgis.js";
 import { TargetRegistry, saveLocalTarget } from "./registry.js";
 import { getAuth, execSql } from "./databricks.js";

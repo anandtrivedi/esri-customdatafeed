@@ -15,7 +15,7 @@
 //   "password": "..."                  // literal (local file only), or
 //   "passwordRef": "env:VAR" | "secret:scope/key",
 //   "allowSelfSigned": true,
-//   "databricks": { "profile": "Pubsec-FE", "warehouseId": "..." }
+//   "databricks": { "profile": "DoD-FE", "warehouseId": "..." }
 // }
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
