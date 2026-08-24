@@ -190,7 +190,13 @@ else
   ask "Databricks workspace profile" "DEFAULT" WORKSPACE
 fi
 echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
-ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
+while :; do
+  ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
+  case "$WAREHOUSE_PATH" in
+    ""|*/) echo "   !! Incomplete — include the warehouse id, e.g. /sql/1.0/warehouses/abc123def456." ;;
+    *) break ;;
+  esac
+done
 echo
 
 # --- publish loop: one table per pass, reusing connection/workspace/warehouse --
@@ -203,14 +209,26 @@ while true; do
     echo "!! '$SERVICE_NAME' is not a valid service name — try again."
     continue
   fi
-  ask "Table (catalog.schema.table)" "" TABLE
-  ask "Geometry column" "" GEOM_COL
+  while :; do
+    ask "Table (catalog.schema.table)" "" TABLE
+    if printf '%s' "$TABLE" | grep -qE '^[^[:space:].]+\.[^[:space:].]+\.[^[:space:].]+$'; then break; fi
+    echo "   !! Use a 3-part Unity Catalog name: catalog.schema.table — try again."
+  done
+  while :; do
+    ask "Geometry column" "" GEOM_COL
+    [ -n "$GEOM_COL" ] && break
+    echo "   !! Geometry column is required."
+  done
   echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
   ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
   case "$GF" in
     1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
   esac
-  ask "ID field (must be a UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD
+  while :; do
+    ask "ID field (must be a UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD
+    [ -n "$ID_FIELD" ] && break
+    echo "   !! ID field is required."
+  done
   ask "SRID" "4326" SRID
   ask "Time column (optional; blank if none)" "" TIME_COL
   ask "Max record count per page" "2000" MAXREC
