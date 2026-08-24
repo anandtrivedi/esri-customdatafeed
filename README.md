@@ -37,6 +37,13 @@ sudo bash publish-service.sh
 ```
 Run it **on the ArcGIS Server host**, as **root** (simplest) or the `arcgis` user — root is fine, the script only makes authenticated admin-API calls and can read the config to show the profile pick-list. It runs a preflight (and stops with a clear message if the provider isn't registered or the config isn't in place), auto-detects the registered provider, lists your `.databrickscfg` profiles to pick from, lets you leave the geometry format on **auto-detect**, and shows a review summary before creating. It asks for the connection, workspace, and warehouse **once**, then **publishes as many tables as you want in one session** — after each it asks whether to publish another from the same warehouse — verifying each with a live query and printing its FeatureServer URL.
 
+> **Optional — easier value lookup with the Databricks CLI.** Not required, but if you put the [Databricks CLI](https://github.com/databricks/cli/releases) on the box (a single Go binary — gov/air-gapped sites can mirror the GitHub release through Artifactory), it makes gathering the values the wizard asks for much easier. Using the **same `.databrickscfg` profile** the provider uses:
+> ```bash
+> databricks current-user me --profile DEFAULT                  # confirm the profile authenticates
+> databricks warehouses list --profile DEFAULT                  # find the SQL Warehouse id -> warehouseHttpPath is /sql/1.0/warehouses/<id>
+> databricks tables get catalog.schema.table --profile DEFAULT  # see the geometry column and a numeric id candidate
+> ```
+
 That's the whole path. The **6-step manual guide below** is the reference/advanced route — hand-built `createService` JSON — for scripting the payload yourself or understanding every parameter. [Section 7](#7-agent-driven-publishing-mcp-server) covers the MCP-agent path.
 
 ## Overview
