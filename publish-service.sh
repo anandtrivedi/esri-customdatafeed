@@ -128,23 +128,27 @@ echo
 build_service_json() {
 python3 - <<'PY'
 import os, json
+g = os.environ.get
 params = {
-    "workspace":         os.environ["WORKSPACE"],
-    "warehouseHttpPath": os.environ["WAREHOUSE_PATH"],
-    "tableName":         os.environ["TABLE"],
-    "geometryColumn":    os.environ["GEOM_COL"],
-    "idField":           os.environ["ID_FIELD"],
-    "geometryFormat":    os.environ["GEOM_FORMAT"],
-    "timeColumn":        os.environ["TIME_COL"],
-    "lakebaseHost": "", "lakebasePort": "", "lakebaseDatabase": "",
-    "lakebaseSchema": "", "lakebaseTable": "",
-    "maxRecordCount":    os.environ["MAXREC"],
-    "srid":              os.environ["SRID"],
-    "editingEnabled":    "",
+    "workspace":         g("WORKSPACE", ""),
+    "warehouseHttpPath": g("WAREHOUSE_PATH", ""),
+    "tableName":         g("TABLE", ""),
+    "geometryColumn":    g("GEOM_COL", ""),
+    "idField":           g("ID_FIELD", ""),
+    "geometryFormat":    g("GEOM_FORMAT", ""),
+    "timeColumn":        g("TIME_COL", ""),
+    "lakebaseHost":      g("LB_HOST", ""),
+    "lakebasePort":      g("LB_PORT", ""),
+    "lakebaseDatabase":  g("LB_DB", ""),
+    "lakebaseSchema":    g("LB_SCHEMA", ""),
+    "lakebaseTable":     g("LB_TABLE", ""),
+    "maxRecordCount":    g("MAXREC", ""),
+    "srid":              g("SRID", ""),
+    "editingEnabled":    g("EDITING", ""),
 }
 svc = {
     "serviceName": os.environ["SERVICE_NAME"],
-    "type": "FeatureServer", "capabilities": "Query", "provider": "CUSTOMDATA",
+    "type": "FeatureServer", "capabilities": g("CAPABILITIES", "Query"), "provider": "CUSTOMDATA",
     "clusterName": "default",
     "minInstancesPerNode": 0, "maxInstancesPerNode": 0, "instancesPerContainer": 1,
     "maxWaitTime": 60, "maxStartupTime": 300, "maxIdleTime": 1800, "maxUsageTime": 600,
@@ -163,7 +167,20 @@ print(json.dumps(svc))
 PY
 }
 
-# --- data source: pick workspace + warehouse ONCE (shared for every table) -----
+# --- choose backend -----------------------------------------------------------
+echo "-- Backend --"
+echo "  1) Lakehouse  (Databricks SQL Warehouse — read-only, large-scale query)"
+echo "  2) Lakebase   (Databricks Postgres + PostGIS — read + write, editing)"
+ask "  choose 1-2" "1" BE
+case "$BE" in 2) BACKEND=lakebase;; *) BACKEND=lakehouse;; esac
+echo
+
+# initialise every service parameter; the unused backend's fields stay empty
+WORKSPACE=""; WAREHOUSE_PATH=""; TABLE=""; GEOM_COL=""; ID_FIELD=""; GEOM_FORMAT=""
+TIME_COL=""; MAXREC=""; SRID=""; LB_HOST=""; LB_PORT=""; LB_DB=""; LB_SCHEMA=""; LB_TABLE=""
+EDITING=""; CAPABILITIES="Query"
+
+# --- data source: pick workspace (+ warehouse or Lakebase instance) ONCE -------
 echo "-- Data source (used for every table you publish this session) --"
 # Workspace profile pick-list read from the SAME .databrickscfg the provider uses.
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
@@ -190,13 +207,19 @@ else
   ask "Databricks workspace profile" "DEFAULT" WORKSPACE
 fi
 echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
-while :; do
-  ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
-  case "$WAREHOUSE_PATH" in
-    ""|*/) echo "   !! Incomplete — include the warehouse id, e.g. /sql/1.0/warehouses/abc123def456." ;;
-    *) break ;;
-  esac
-done
+if [ "$BACKEND" = "lakehouse" ]; then
+  while :; do
+    ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
+    case "$WAREHOUSE_PATH" in
+      ""|*/) echo "   !! Incomplete — include the warehouse id, e.g. /sql/1.0/warehouses/abc123def456." ;;
+      *) break ;;
+    esac
+  done
+else
+  while :; do ask "Lakebase host (…database.<region>.cloud.databricks.com)" "" LB_HOST; [ -n "$LB_HOST" ] && break; echo "   !! Lakebase host is required."; done
+  ask "Lakebase port" "5432" LB_PORT
+  while :; do ask "Lakebase database name" "" LB_DB; [ -n "$LB_DB" ] && break; echo "   !! Database name is required."; done
+fi
 echo
 
 # --- publish loop: one table per pass, reusing connection/workspace/warehouse --
@@ -209,54 +232,66 @@ while true; do
     echo "!! '$SERVICE_NAME' is not a valid service name — try again."
     continue
   fi
-  while :; do
-    ask "Table (catalog.schema.table)" "" TABLE
-    if printf '%s' "$TABLE" | grep -qE '^[^[:space:].]+\.[^[:space:].]+\.[^[:space:].]+$'; then break; fi
-    echo "   !! Use a 3-part Unity Catalog name: catalog.schema.table — try again."
-  done
-  while :; do
-    ask "Geometry column" "" GEOM_COL
-    [ -n "$GEOM_COL" ] && break
-    echo "   !! Geometry column is required."
-  done
-  echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
-  ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
-  case "$GF" in
-    1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
-  esac
-  while :; do
-    ask "ID field (must be a UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD
-    [ -n "$ID_FIELD" ] && break
-    echo "   !! ID field is required."
-  done
-  ask "SRID" "4326" SRID
-  ask "Time column (optional; blank if none)" "" TIME_COL
-  ask "Max record count per page" "2000" MAXREC
+  if [ "$BACKEND" = "lakehouse" ]; then
+    while :; do
+      ask "Table (catalog.schema.table)" "" TABLE
+      if printf '%s' "$TABLE" | grep -qE '^[^[:space:].]+\.[^[:space:].]+\.[^[:space:].]+$'; then break; fi
+      echo "   !! Use a 3-part Unity Catalog name: catalog.schema.table — try again."
+    done
+    while :; do ask "Geometry column" "" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
+    echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
+    ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
+    case "$GF" in
+      1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
+    esac
+    while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    ask "SRID" "4326" SRID
+    ask "Time column (optional; blank if none)" "" TIME_COL
+    ask "Max record count per page" "2000" MAXREC
+    CAPABILITIES="Query"; EDITING=""
+  else
+    ask "Lakebase schema" "public" LB_SCHEMA
+    while :; do ask "Lakebase table name" "" LB_TABLE; [ -n "$LB_TABLE" ] && break; echo "   !! Table name is required."; done
+    while :; do ask "Geometry column" "" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
+    while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    ask "Enable editing (add / update / delete)? (y/n)" "y" ED
+    case "$ED" in y|Y|yes|YES) EDITING="true"; CAPABILITIES="Query,Editing";; *) EDITING="false"; CAPABILITIES="Query";; esac
+  fi
 
   echo
   echo "-- Review --"
   printf "  %-13s %s\n" "Service name" "$SERVICE_NAME"
+  printf "  %-13s %s\n" "Backend"      "$BACKEND"
   printf "  %-13s %s\n" "Provider"     "$PROVIDER_NAME"
   printf "  %-13s %s\n" "Workspace"    "${WORKSPACE:-(env-var default)}"
-  printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
-  printf "  %-13s %s\n" "Table"        "$TABLE"
-  printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
-  printf "  %-13s %s\n" "Geometry fmt" "${GEOM_FORMAT:-(auto-detect)}"
-  printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
-  printf "  %-13s %s\n" "SRID"         "$SRID"
-  printf "  %-13s %s\n" "Time column"  "${TIME_COL:-(none)}"
-  printf "  %-13s %s\n" "Max records"  "$MAXREC"
+  if [ "$BACKEND" = "lakehouse" ]; then
+    printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
+    printf "  %-13s %s\n" "Table"        "$TABLE"
+    printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
+    printf "  %-13s %s\n" "Geometry fmt" "${GEOM_FORMAT:-(auto-detect)}"
+    printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
+    printf "  %-13s %s\n" "SRID"         "$SRID"
+    printf "  %-13s %s\n" "Time column"  "${TIME_COL:-(none)}"
+    printf "  %-13s %s\n" "Max records"  "$MAXREC"
+  else
+    printf "  %-13s %s\n" "Lakebase"     "$LB_HOST:$LB_PORT/$LB_DB"
+    printf "  %-13s %s\n" "Schema.table" "$LB_SCHEMA.$LB_TABLE"
+    printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
+    printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
+    printf "  %-13s %s\n" "Editing"      "$EDITING"
+  fi
   echo
   ask "Proceed and create this service? (y/n)" "y" GO
   case "$GO" in
     y|Y|yes|YES) : ;;
     *) echo "Skipped — '$SERVICE_NAME' not created."
-       ask "Publish another table from the same warehouse? (y/n)" "n" MORE
+       ask "Publish another table from the same data source? (y/n)" "n" MORE
        case "$MORE" in y|Y|yes|YES) echo; continue;; *) break;; esac ;;
   esac
   echo
 
-  export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC PROVIDER_NAME
+  export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC \
+         LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
@@ -317,7 +352,7 @@ while true; do
   fi
 
   echo
-  ask "Publish another table from the same warehouse? (y/n)" "n" MORE
+  ask "Publish another table from the same data source? (y/n)" "n" MORE
   case "$MORE" in y|Y|yes|YES) echo;; *) break;; esac
 done
 echo
