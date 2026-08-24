@@ -13,7 +13,7 @@ One provider is registered once; each Feature Service picks its backend via serv
 >
 > **Fastest path:** register the provider once, then run the **[`publish-service.sh` wizard](#quick-start--easy-deploy-recommended)** — no JSON to edit, no manual token. This is the recommended way to publish.
 >
-> **Want to understand every parameter, or script it yourself?** Manual setup is **6 steps** — [get the code](#1-get-the-code-and-install-dependencies), [configure Databricks](#2-configure-databricks-connection), [Lakebase (optional)](#3-configure-lakebase-optional), [package & register the provider](#4-package-and-register-provider), [harden](#5-production-hardening-recommended), [publish your first service](#6-create-your-first-feature-service). Everything after Step 6 is reference (query params, performance, geometry, env vars, troubleshooting).
+> **Doing it by hand?** [Setup](#setup) is five steps — [get the code & build the package](#step-1--get-the-code-and-build-the-provider-package), [register the provider](#step-2--register-the-provider), [configure the Databricks connection](#step-3--configure-the-databricks-connection), [publish your services](#step-4--publish-your-feature-services), [harden for production](#step-5--harden-for-production). [Manual service creation](#manual-service-creation-admin-rest-api--reference) and everything after it is reference (query params, performance, geometry, env vars, troubleshooting).
 >
 > **On Databricks Playground or Claude?** [Section 7](#7-agent-driven-publishing-mcp-server) does the same through an MCP agent.
 
@@ -21,7 +21,7 @@ One provider is registered once; each Feature Service picks its backend via serv
 
 Esri offers **no GUI** to publish a feature service from a custom data provider — the only supported way is the Admin REST API `createService` call with a 15-field JSON payload. The **`publish-service.sh`** wizard does that for you: it prompts one field at a time, mints the admin token itself, lists your workspace profiles, builds the JSON correctly, and creates → starts → verifies the service. Only three one-time setup steps come first.
 
-**1. Register the provider — GUI, one-time.** In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, upload the `.cdpk`. (No `.cdpk` yet? Build one per [Section 4](#4-package-and-register-provider).)
+**1. Register the provider — GUI, one-time.** In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, upload the `.cdpk`. (No `.cdpk` yet? Build one per [Step 1](#step-1--get-the-code-and-build-the-provider-package).)
 
 **2. Place the Databricks config where the provider reads it.** The provider runs as the **`arcgis`** OS user and reads `~/.databrickscfg` at query time:
 ```bash
@@ -44,7 +44,7 @@ Run it **on the ArcGIS Server host**, as **root** (simplest) or the `arcgis` use
 > databricks tables get catalog.schema.table --profile DEFAULT  # see the geometry column and a numeric id candidate
 > ```
 
-That's the whole path. The **6-step manual guide below** is the reference/advanced route — hand-built `createService` JSON — for scripting the payload yourself or understanding every parameter. [Section 7](#7-agent-driven-publishing-mcp-server) covers the MCP-agent path.
+That's the whole path. [Setup](#setup) below documents each stage manually, and [Manual service creation](#manual-service-creation-admin-rest-api--reference) covers the hand-built `createService` JSON for scripting the payload yourself or understanding every parameter. [Section 7](#7-agent-driven-publishing-mcp-server) covers the MCP-agent path.
 
 ## Overview
 
@@ -93,9 +93,9 @@ mcp-server/                   # MCP server: publish/manage CDF feature services 
 
 ## Setup
 
-> **Used the [Quick Start wizard](#quick-start--easy-deploy-recommended)?** You still need [Prerequisites](#prerequisites), [Get the code](#1-get-the-code-and-install-dependencies) (to build the `.cdpk`), and [Register the provider](#4-package-and-register-provider) from this section. Step 2 (manual `.env` config) and Step 6 (`createService`) are the manual route the wizard replaces.
+> **Used the [Quick Start wizard](#quick-start--easy-deploy-recommended)?** You still need [Prerequisites](#prerequisites), [Step 1](#step-1--get-the-code-and-build-the-provider-package) (build the `.cdpk`), [Step 2](#step-2--register-the-provider) (register it), and [Step 3](#step-3--configure-the-databricks-connection) (place `.databrickscfg`). The wizard is [Step 4](#step-4--publish-your-feature-services); it replaces the hand-built [`createService`](#manual-service-creation-admin-rest-api--reference) route.
 
-**Every command in this guide runs on the ArcGIS Server host itself — not on your laptop.** SSH into the box first and stay there for the whole install. That's why the `curl` examples target `https://localhost:6443/...`: `localhost` *is* the ArcGIS Server, because you're already logged into it. (The only exceptions are the two collapsed "alternative" blocks — the CDF CLI and the `referer` token flow — which use `your-server` as a placeholder for the box's external hostname, for the rare case you run them from elsewhere.)
+**Every command in this guide runs on the ArcGIS Server host itself — not on your laptop.** SSH into the box first and stay there for the whole install. That's why the `curl` examples target `https://localhost:6443/...`: `localhost` *is* the ArcGIS Server, because you're already logged into it. (The exceptions are the Enterprise SDK `cdf` CLI and the `referer` token flow, which use `your-server` as a placeholder for the box's external hostname, for the rare case you run them from elsewhere.)
 
 > **Which user runs what:**
 > - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build, package, and upload work — `git clone`, `npm install`, `zip`, and the `curl` calls to the Admin REST API.
@@ -117,7 +117,7 @@ mcp-server/                   # MCP server: publish/manage CDF feature services 
   Nothing needs to be opened *inbound* on the Databricks side — Databricks already listens on these ports and gates access via IP allowlists. If your workspace has [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list) enabled, allowlist the ArcGIS Server's outbound IP — otherwise the first query returns `HTTP 403` with no clear error in the ArcGIS Server UI. Apply this **per workspace** if you're connecting to more than one.
 - **Optional:** A Databricks Lakebase instance — only needed for low-latency serving or feature editing.
 
-### 1. Get the code and install dependencies
+### Step 1 — Get the code and build the provider package
 
 Do this **on the ArcGIS Server box itself** (the Linux or Windows machine where ArcGIS Server is installed), not on your laptop — the provider includes native modules that must compile for the server's OS, otherwise they fail to load at runtime.
 
@@ -136,157 +136,7 @@ npm install
 > ```
 > The bundled Node binary is typically mode `700`, owned by the `arcgis` OS user — if you're logged in as a different user (e.g. `ubuntu`) you'll get *Permission denied*; prefix the command with `sudo -u arcgis`. Use the same pattern for any other npm command on the server. Building with the bundled Node is preferred anyway — it guarantees native modules compile against the exact Node version the CDF runtime uses.
 
-### 2. Configure Databricks Connection
-
-The recommended config is a `[DEFAULT]` profile in `.databrickscfg` (used by the [Quick Start](#quick-start--easy-deploy-recommended) and covered in [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) below). For a **single-workspace PAT** setup you can instead put three values in `.env`:
-
-```bash
-cp .env.example .env
-```
-
-**For a single workspace with a PAT (Personal Access Token)**, set three env vars in `.env`:
-
-```bash
-DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
-DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here
-```
-
-Other env vars in [`.env.example`](nodejs-provider/.env.example) (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
-
-**For multiple workspaces, or for service-principal OAuth M2M auth instead of a PAT**, skip these env vars (leave them empty or remove the lines) and use the `.databrickscfg`-based setup in the next section.
-
-### Multiple Workspaces or OAuth M2M
-
-*Optional — skip this whole section if you only need one workspace and you're happy using a PAT.* The env vars in Step 2 already cover you; jump ahead to [Step 3](#3-configure-lakebase-optional).
-
-Use this section if you need either of:
-- **Multiple Databricks workspaces** served by the same ArcGIS Server (one Feature Service per workspace, with isolated connection pools per workspace), OR
-- **Service-principal OAuth M2M auth** (recommended for production — a machine identity with `client_id`+`client_secret` that auto-refreshes tokens, instead of a long-lived PAT tied to a user).
-
-Both modes work for Lakehouse and Lakebase. You configure them through a `.databrickscfg` file — the same one the Databricks CLI uses.
-
-#### `.databrickscfg` profiles
-
-The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`) — same format used by the Databricks CLI / Asset Bundles / dbt. See [`.databrickscfg.example`](nodejs-provider/.databrickscfg.example) for a copy-paste template.
-
-```ini
-# PAT (Personal Access Token)
-[WORKSPACE_A]
-host  = workspace-a.cloud.databricks.com
-token = dapiXXXXXXXXXXXXXXXXX
-
-# OAuth M2M (service principal — recommended for production)
-[WORKSPACE_B]
-host          = workspace-b.cloud.databricks.com
-client_id     = <service-principal-client-id>
-client_secret = <service-principal-secret>
-```
-
-- Each profile uses **one** auth mode — either `token` (PAT) **or** `client_id` + `client_secret` (OAuth M2M). Mixing both in one profile errors at request time.
-- Different profiles can use different auth modes independently — all-PAT, all-OAuth M2M, or any mix.
-- Add a profile per workspace.
-
-#### Default profile resolution
-
-When a service is created **without** a `workspace` parameter:
-
-1. If a `[DEFAULT]` profile exists in `.databrickscfg`, it's used.
-2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
-3. If neither is set, the service errors at request time.
-
-If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env vars in `.env` empty (or delete those lines) — the resolver picks `.databrickscfg` `[DEFAULT]` first, and empty/missing env vars avoid any chance of mismatched credentials.
-
-#### Example: services pointing at different workspaces
-
-Using the two profiles from the snippets above (`[WORKSPACE_A]` PAT and `[WORKSPACE_B]` OAuth M2M), here's how a Lakehouse service and a Lakebase service register against different workspaces — full createService payloads are in [Step 6: Create your first Feature Service](#6-create-your-first-feature-service) below.
-
-```json
-// Lakehouse service → workspace A (PAT)
-"serviceParameters": {
-  "workspace": "WORKSPACE_A",
-  "warehouseHttpPath": "/sql/1.0/warehouses/aaaa",
-  "tableName": "catalog_a.geo.cells",
-  "geometryColumn": "geometry",
-  "idField": "id"
-}
-
-// Lakebase service → workspace B (OAuth M2M)
-"serviceParameters": {
-  "workspace": "WORKSPACE_B",
-  "lakebaseHost": "instance-bbbb.database.cloud.databricks.com",
-  "lakebasePort": "5432",
-  "lakebaseDatabase": "geospatial",
-  "lakebaseTable": "buildings",
-  "geometryColumn": "geometry",
-  "idField": "id"
-}
-```
-
-For OAuth M2M Lakebase services, the provider exchanges `client_id`/`client_secret` at the workspace's `/oidc/v1/token` endpoint, then uses that token to call `/api/2.0/database/credentials` for the Lakebase OAuth token. Auto-refreshes ~5 minutes before expiry.
-
-#### Service principal setup (OAuth M2M)
-
-Per workspace, in the Databricks account console:
-
-1. Create a service principal (or reuse an existing one).
-2. Assign the SP to the workspace.
-3. Generate an OAuth secret — save the `client_id` and `client_secret`.
-4. Grant the SP `CAN_USE` on the SQL warehouse.
-5. For Lakebase: grant the SP database-level access on the Lakebase instance.
-
-Reference: [Authorize service principal access with OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
-
-#### `.databrickscfg` location on ArcGIS Server
-
-ArcGIS Server runs as the `arcgis` OS user and reads `~/.databrickscfg`, so put the file at **`/home/arcgis/.databrickscfg`** and make it readable by that user:
-
-```bash
-sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
-sudo chmod 600 /home/arcgis/.databrickscfg
-```
-
-If the `arcgis` user has no home directory on your system, put the file anywhere `arcgis` can read and set `DATABRICKS_CONFIG_FILE` to that path in [`init_user_param.sh`](#set-environment-variables-in-init_user_paramsh).
-
-#### Verifying it works
-
-Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/logs/*/server/server-*.log`) will show distinct connection pools per workspace:
-
-```
-[Pool WORKSPACE_A|/sql/1.0/warehouses/abc123] Initialized (min: 2, max: 10)
-[Pool WORKSPACE_B|/sql/1.0/warehouses/xyz789] Initialized (min: 2, max: 10)
-```
-
-#### Multi-workspace troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `Databricks workspace profile "X" not found` | Profile name typo (case-sensitive), wrong `DATABRICKS_CONFIG_FILE`, or file isn't readable by the `arcgis` user |
-| `Profile [X] is ambiguous: defines both PAT and OAuth M2M` | Pick one — comment out either `token` OR `client_id`+`client_secret` |
-| `OAuth M2M token endpoint returned 401` | SP `client_id`/`client_secret` is wrong/revoked, or SP isn't assigned to the workspace |
-| `No Lakebase instance found with hostname X in workspace Y` | The `lakebaseHost` belongs to a different workspace than the `workspace` profile points at |
-| `Source IP address X is blocked by Databricks IP ACL` | The ArcGIS Server's outbound IP isn't on that workspace's IP allowlist (workspace-level setting in Databricks, separate from CDF) |
-| Single-workspace deployment regressed after upgrade | Env vars `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` missing from init script |
-
-### 3. Configure Lakebase (optional)
-
-Skip this step if you don't need editing or low-latency serving.
-
-**One-time Lakebase database setup:** enable PostGIS on each database the provider will use — `CREATE EXTENSION IF NOT EXISTS postgis;`. The provider's Lakebase queries and edits rely on PostGIS geometry types and ST_* functions; without it the first query fails with `function st_intersects does not exist`.
-
-> **Heads-up if your Lakebase table is populated via Databricks Synced Tables** (the reverse-ETL feature that copies a Unity Catalog table into Lakebase): Databricks Sync **does not carry GEOMETRY or GEOGRAPHY columns** — the sync will fail if your source Delta table has them. The fix is to store geometry as WKT in a STRING column on the Databricks side, sync that, and either convert at query time or via a generated column on the Lakebase side. Full details and the workaround SQL are in [Known Limitations → Lakebase Synced Tables](#lakebase-synced-tables-geometrygeography-types-not-supported). If you're creating your Lakebase table directly (not via sync), ignore this — native PostGIS geometry works fine.
-
-For Lakebase services, no extra provider-side config is needed. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (see [Step 6: Create your first Feature Service](#6-create-your-first-feature-service)). Authentication is automatic — the provider uses your PAT from Step 2 (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
-
-To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
-
-### 4. Package and Register Provider
-
-> **Agent shortcut:** with a built `.cdpk` (step a below), the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool performs the upload/register/update flow for you — including baking `.env` config into the package so upgrades can't wipe it.
-
-This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is the next step: [Step 6](#6-create-your-first-feature-service).
-
-**First, build the `.cdpk`** (a zip archive with a different extension) — every registration method below uses it. Run this on the server, from inside the `nodejs-provider/` directory where you ran `npm install`:
+Then package the provider as a **`.cdpk`** (a zip archive with a different extension) — [Step 2](#step-2--register-the-provider) uploads it. Run this from the same `nodejs-provider/` directory:
 
 ```bash
 # Keep the .env excludes EXACTLY as written. A wildcard like '*.env*' would also strip
@@ -299,7 +149,15 @@ zip -r databricks-geospatial-provider.cdpk \
   -x '.env' '.env.*' 'test/*' '*.md'
 ```
 
-Then register it with **one** of the three methods below — pick the first that fits your environment.
+You now have `databricks-geospatial-provider.cdpk` ready to register.
+
+### Step 2 — Register the provider
+
+This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Publishing individual Feature Services against the registered provider is [Step 4](#step-4--publish-your-feature-services).
+
+> **Agent shortcut:** the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool performs the upload/register/update flow for you — including baking `.env` config into the package so upgrades can't wipe it.
+
+Register the `.cdpk` you built in [Step 1](#step-1--get-the-code-and-build-the-provider-package) with **one** of the three methods below — pick the first that fits your environment.
 
 #### Method 1 — Server Manager GUI (recommended)
 
@@ -339,8 +197,6 @@ curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/
   --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
 ```
 
-> **Agent shortcut:** with a built `.cdpk`, the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool performs this upload/register/update flow for you — including baking `.env` config into the package so upgrades can't wipe it.
-
 **Upgrading the provider later** (new code, same provider name): all three methods refuse a plain re-register — *"Custom data provider with name '...' is already registered"*. Rebuild the `.cdpk`, then in the GUI use the provider's **edit/update** action, or via REST upload the new `.cdpk` and call **`update`** instead of `register`:
 
 ```bash
@@ -355,16 +211,192 @@ To retire a provider instead, unregister it by `.cdpk` filename (REST): `.../cus
 > **What just happened.** Registration extracts your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/` and validates it by starting the provider with the bundled Node runtime. The server places the files automatically — you don't copy anything manually. The `git clone` in your home directory and the `.cdpk` were just staging artifacts.
 >
 > **After registration — every time:**
-> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one — the extraction overwrites it. (The `.env` in your home-dir clone is not used at runtime.) This needs `sudo` — see the [user-context callout](#setup). **Prefer `.databrickscfg` + `init_user_param.sh`** (Steps 2 and 5) over a provider-dir `.env`, precisely because those survive re-registration.
+> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one — the extraction overwrites it. (The `.env` in your home-dir clone is not used at runtime.) This needs `sudo` — see the [user-context callout](#setup). **Prefer `.databrickscfg` + `init_user_param.sh`** (Steps 3 and 5) over a provider-dir `.env`, precisely because those survive re-registration.
 > 2. **Restart ArcGIS Server** (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`) so the new code loads.
 
-## 5. Production hardening (recommended)
+### Step 3 — Configure the Databricks connection
+
+The provider authenticates to Databricks with a **`.databrickscfg` profile** — the same file the Databricks CLI uses. Place it where the `arcgis` OS user (the account ArcGIS Server runs as) can read it, at **`/home/arcgis/.databrickscfg`**:
+
+```bash
+sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
+sudo chmod 600 /home/arcgis/.databrickscfg
+```
+
+Name your workspace section `[DEFAULT]` so services use it without a `workspace` parameter (this is what the [Step 4](#step-4--publish-your-feature-services) wizard expects). A PAT profile:
+
+```ini
+[DEFAULT]
+host  = your-workspace.cloud.databricks.com
+token = dapi_your_pat_here
+```
+
+For a service principal (OAuth M2M, recommended for production) or multiple workspaces, see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) just below.
+
+**Single-workspace `.env` alternative.** For a quick single-workspace PAT setup you can instead put three values in the provider's `.env` (secondary to `.databrickscfg`):
+
+```bash
+cp .env.example .env
+```
+
+```bash
+DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here
+```
+
+Other env vars in [`.env.example`](nodejs-provider/.env.example) (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
+
+#### Multiple Workspaces or OAuth M2M
+
+*Optional — skip this whole section if you only need one workspace and you're happy using a PAT.* The `[DEFAULT]` profile above already covers you; continue to [Step 4](#step-4--publish-your-feature-services) (or the Lakebase note below if you'll use the Lakebase backend).
+
+Use this section if you need either of:
+- **Multiple Databricks workspaces** served by the same ArcGIS Server (one Feature Service per workspace, with isolated connection pools per workspace), OR
+- **Service-principal OAuth M2M auth** (recommended for production — a machine identity with `client_id`+`client_secret` that auto-refreshes tokens, instead of a long-lived PAT tied to a user).
+
+Both modes work for Lakehouse and Lakebase. You configure them through a `.databrickscfg` file — the same one the Databricks CLI uses.
+
+##### `.databrickscfg` profiles
+
+The provider reads `~/.databrickscfg` (or the path in `DATABRICKS_CONFIG_FILE`) — same format used by the Databricks CLI / Asset Bundles / dbt. See [`.databrickscfg.example`](nodejs-provider/.databrickscfg.example) for a copy-paste template.
+
+```ini
+# PAT (Personal Access Token)
+[WORKSPACE_A]
+host  = workspace-a.cloud.databricks.com
+token = dapiXXXXXXXXXXXXXXXXX
+
+# OAuth M2M (service principal — recommended for production)
+[WORKSPACE_B]
+host          = workspace-b.cloud.databricks.com
+client_id     = <service-principal-client-id>
+client_secret = <service-principal-secret>
+```
+
+- Each profile uses **one** auth mode — either `token` (PAT) **or** `client_id` + `client_secret` (OAuth M2M). Mixing both in one profile errors at request time.
+- Different profiles can use different auth modes independently — all-PAT, all-OAuth M2M, or any mix.
+- Add a profile per workspace.
+
+##### Default profile resolution
+
+When a service is created **without** a `workspace` parameter:
+
+1. If a `[DEFAULT]` profile exists in `.databrickscfg`, it's used.
+2. Otherwise, env vars (`DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`) form a synthesized default.
+3. If neither is set, the service errors at request time.
+
+If you go all-in on `.databrickscfg`, leave the `DATABRICKS_*` credential env vars in `.env` empty (or delete those lines) — the resolver picks `.databrickscfg` `[DEFAULT]` first, and empty/missing env vars avoid any chance of mismatched credentials.
+
+##### Example: services pointing at different workspaces
+
+Using the two profiles from the snippets above (`[WORKSPACE_A]` PAT and `[WORKSPACE_B]` OAuth M2M), here's how a Lakehouse service and a Lakebase service register against different workspaces — full createService payloads are in [Manual service creation](#manual-service-creation-admin-rest-api--reference) below.
+
+```json
+// Lakehouse service → workspace A (PAT)
+"serviceParameters": {
+  "workspace": "WORKSPACE_A",
+  "warehouseHttpPath": "/sql/1.0/warehouses/aaaa",
+  "tableName": "catalog_a.geo.cells",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+
+// Lakebase service → workspace B (OAuth M2M)
+"serviceParameters": {
+  "workspace": "WORKSPACE_B",
+  "lakebaseHost": "instance-bbbb.database.cloud.databricks.com",
+  "lakebasePort": "5432",
+  "lakebaseDatabase": "geospatial",
+  "lakebaseTable": "buildings",
+  "geometryColumn": "geometry",
+  "idField": "id"
+}
+```
+
+For OAuth M2M Lakebase services, the provider exchanges `client_id`/`client_secret` at the workspace's `/oidc/v1/token` endpoint, then uses that token to call `/api/2.0/database/credentials` for the Lakebase OAuth token. Auto-refreshes ~5 minutes before expiry.
+
+##### Service principal setup (OAuth M2M)
+
+Per workspace, in the Databricks account console:
+
+1. Create a service principal (or reuse an existing one).
+2. Assign the SP to the workspace.
+3. Generate an OAuth secret — save the `client_id` and `client_secret`.
+4. Grant the SP `CAN_USE` on the SQL warehouse.
+5. For Lakebase: grant the SP database-level access on the Lakebase instance.
+
+Reference: [Authorize service principal access with OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
+
+##### `.databrickscfg` location on ArcGIS Server
+
+ArcGIS Server runs as the `arcgis` OS user and reads `~/.databrickscfg`, so put the file at **`/home/arcgis/.databrickscfg`** and make it readable by that user:
+
+```bash
+sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
+sudo chmod 600 /home/arcgis/.databrickscfg
+```
+
+If the `arcgis` user has no home directory on your system, put the file anywhere `arcgis` can read and set `DATABRICKS_CONFIG_FILE` to that path in [`init_user_param.sh`](#set-environment-variables-in-init_user_paramsh).
+
+##### Verifying it works
+
+Provider logs (append `/logz` to the app URL, or tail `/opt/arcgis/server/usr/logs/*/server/server-*.log`) will show distinct connection pools per workspace:
+
+```
+[Pool WORKSPACE_A|/sql/1.0/warehouses/abc123] Initialized (min: 2, max: 10)
+[Pool WORKSPACE_B|/sql/1.0/warehouses/xyz789] Initialized (min: 2, max: 10)
+```
+
+##### Multi-workspace troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `Databricks workspace profile "X" not found` | Profile name typo (case-sensitive), wrong `DATABRICKS_CONFIG_FILE`, or file isn't readable by the `arcgis` user |
+| `Profile [X] is ambiguous: defines both PAT and OAuth M2M` | Pick one — comment out either `token` OR `client_id`+`client_secret` |
+| `OAuth M2M token endpoint returned 401` | SP `client_id`/`client_secret` is wrong/revoked, or SP isn't assigned to the workspace |
+| `No Lakebase instance found with hostname X in workspace Y` | The `lakebaseHost` belongs to a different workspace than the `workspace` profile points at |
+| `Source IP address X is blocked by Databricks IP ACL` | The ArcGIS Server's outbound IP isn't on that workspace's IP allowlist (workspace-level setting in Databricks, separate from CDF) |
+| Single-workspace deployment regressed after upgrade | Env vars `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN` missing from init script |
+
+#### If you'll use the Lakebase backend
+
+Skip this if you only need Lakehouse (read-only SQL Warehouse) services.
+
+**One-time Lakebase database setup:** enable PostGIS on each database the provider will use — `CREATE EXTENSION IF NOT EXISTS postgis;`. The provider's Lakebase queries and edits rely on PostGIS geometry types and ST_* functions; without it the first query fails with `function st_intersects does not exist`.
+
+> **Heads-up if your Lakebase table is populated via Databricks Synced Tables** (the reverse-ETL feature that copies a Unity Catalog table into Lakebase): Databricks Sync **does not carry GEOMETRY or GEOGRAPHY columns** — the sync will fail if your source Delta table has them. The fix is to store geometry as WKT in a STRING column on the Databricks side, sync that, and either convert at query time or via a generated column on the Lakebase side. Full details and the workaround SQL are in [Known Limitations → Lakebase Synced Tables](#lakebase-synced-tables-geometrygeography-types-not-supported). If you're creating your Lakebase table directly (not via sync), ignore this — native PostGIS geometry works fine.
+
+No extra provider-side config is needed for Lakebase. Per-table connection details (`lakebaseHost`, `lakebaseDatabase`, etc.) go on each Feature Service when you create it (the [Step 4](#step-4--publish-your-feature-services) wizard prompts for them). Authentication is automatic — the provider uses your PAT (or the resolved workspace profile in multi-workspace setups) to mint short-lived Lakebase OAuth tokens, auto-refreshing them before expiry.
+
+To bypass automatic token minting and use a fixed credential (testing, CI), set `LAKEBASE_PASSWORD` in `.env`. Other Lakebase tuning vars (`LAKEBASE_POOL_MIN/MAX`, `LAKEBASE_SSL_VERIFY`) are documented in [`.env.example`](nodejs-provider/.env.example).
+
+### Step 4 — Publish your feature services
+
+This is what you do for **each** Databricks table you want to expose as a Feature Service. The **[`publish-service.sh`](publish-service.sh)** wizard is the recommended way — it builds the `createService` payload for you, so there's no JSON to hand-edit and no admin token to mint yourself.
+
+Run it **on the ArcGIS Server box**, as **root** (simplest) or the `arcgis` user:
+
+```bash
+sudo bash publish-service.sh
+```
+
+It:
+- **Preflights** the environment and stops with a clear message if the provider isn't registered ([Step 2](#step-2--register-the-provider)) or the config isn't in place ([Step 3](#step-3--configure-the-databricks-connection)).
+- **Auto-detects** the registered provider and lists your `.databrickscfg` profiles to pick from.
+- Lets you choose the **backend** — Lakehouse (SQL Warehouse, read-only) or Lakebase (Postgres + PostGIS, read/write with editing).
+- Asks for the connection, workspace, and warehouse (or Lakebase instance) **once**, then **loops per table** — after each service it asks whether to publish another from the same source.
+- Leaves the geometry format on **auto-detect** unless you override it, shows a **review summary** before creating, then **creates → starts → verifies** each service with a live query and prints its FeatureServer URL.
+
+Prefer to script the payload yourself, or need to understand every parameter? See [Manual service creation (Admin REST API)](#manual-service-creation-admin-rest-api--reference). To publish from Databricks Playground or Claude instead, see [Section 7](#7-agent-driven-publishing-mcp-server).
+
+### Step 5 — Harden for production
 
 These steps harden the deployment for production. Skip if you're just trying the provider locally — Steps 1-4 alone will work.
 
 > **Where things live on the ArcGIS Server box.** A Linux install lands under `/opt/arcgis/server/` by default; on Windows the equivalent is typically `C:\Program Files\ArcGIS\Server\`. Substitute your install root if it's elsewhere. The paths in the rest of this section assume the Linux default. Edits to files under `/opt/arcgis/` need `sudo`, and any change requires a server restart (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`). If you want to verify the install state before/after changes, jump to the [sanity-check block](#troubleshooting) at the top of Troubleshooting.
 
-### Set environment variables in `init_user_param.sh`
+#### Set environment variables in `init_user_param.sh`
 
 ArcGIS Server reads a startup script (typically at `/opt/arcgis/server/usr/init_user_param.sh` on Linux) and exports anything in it as environment variables for the embedded Node.js runtime. Put Databricks credentials here for production rather than only in the provider's `.env` — `init_user_param.sh` is the most reliable channel into the JVM-hosted runtime.
 
@@ -377,11 +409,11 @@ export DATABRICKS_ACCESS_TOKEN=dapi...
 
 When you use a `.databrickscfg`, it lives at `/home/arcgis/.databrickscfg` (`chmod 600`, `chown arcgis:arcgis`) so only the `arcgis` OS user (the one ArcGIS Server runs as) can read it — see [`.databrickscfg` location on ArcGIS Server](#databrickscfg-location-on-arcgis-server). Restart ArcGIS Server after editing `init_user_param.sh`.
 
-### Admin token binding: `requestip` vs `referer`
+#### Admin token binding: `requestip` vs `referer`
 
 When you call `generateToken`, the `client` parameter decides what the token is bound to. The two practical options:
 
-- **`client=requestip` (recommended for the admin calls in this guide).** The token is tied to the IP that requested it, so no `Referer` header is needed on the `/arcgis/admin/...` calls (upload, register, createService, start) — simplest and least error-prone when running curl on the box against `localhost`. This is what [Step 4](#4-package-and-register-provider) uses.
+- **`client=requestip` (recommended for the admin calls in this guide).** The token is tied to the IP that requested it, so no `Referer` header is needed on the `/arcgis/admin/...` calls (upload, register, createService, start) — simplest and least error-prone when running curl on the box against `localhost`. This is what [Step 2](#step-2--register-the-provider) uses.
 - **`client=referer`.** The token is tied to a referer URL, and *every* subsequent `/arcgis/admin/...` call must send a `Referer` header that matches the `referer=` value you passed at generation time. Any mismatch returns `HTTP 498 — "Invalid token, ClientID does not match"`, or a JSON error object with no `token` key (which breaks `json.load(...)["token"]` parsing). Use this only if your environment can't rely on a stable request IP.
 
 > **Querying a feature service is different.** The public feature-service `/query` endpoint validates tokens more strictly and may reject a `requestip` token with `HTTP 498`. Query it with a `referer`-bound token **plus a matching `Referer` header** — the [`publish-service.sh` wizard](#quick-start--easy-deploy-recommended) does exactly this for its verification step.
@@ -413,13 +445,21 @@ curl -sk -H "Referer: https://your-server:6443" \
   "https://your-server:6443/arcgis/admin/services?token=$TOKEN&f=json"
 ```
 
-## 6. Create your first Feature Service
+---
 
-> **Wizard shortcut:** [`publish-service.sh`](#quick-start--easy-deploy-recommended) does everything in this section interactively — prompts per field, builds the JSON, and creates + starts + verifies. This section is the manual/reference route for scripting the payload yourself.
+> ### Installation complete
+>
+> With the provider registered and at least one Feature Service created, you have a working deployment. **Everything below this point is reference material** — supported query parameters, performance benchmarks, geometry format details, environment-variable reference, and troubleshooting. Skim or skip ahead as needed.
 
-> **Agent shortcut:** the [MCP server's](#7-agent-driven-publishing-mcp-server) `publish_layer` tool does everything in this section from one sentence — it inspects the table, derives all service parameters (geometry column/format, SRID, a validated id field), creates the service, and smoke-tests it live.
+---
 
-In [Step 4](#4-package-and-register-provider) you registered the provider — that was a one-time install. **This step is what you do every time you want to expose a new Databricks table as a Feature Service**: a separate REST call per table, against a different admin endpoint (`/createService` instead of `/customdataproviders/register`). Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend (Lakehouse or Lakebase) is used.
+## Manual service creation (Admin REST API) — reference
+
+The [`publish-service.sh` wizard](#step-4--publish-your-feature-services) (Step 4) is the recommended way to create services — it builds and submits the payload below for you. This section documents the raw Admin REST API `createService` call for scripting it yourself or understanding every parameter.
+
+> **Agent shortcut:** the [MCP server's](#7-agent-driven-publishing-mcp-server) `publish_layer` tool does everything here from one sentence — it inspects the table, derives all service parameters (geometry column/format, SRID, a validated id field), creates the service, and smoke-tests it live.
+
+In [Step 2](#step-2--register-the-provider) you registered the provider — that was a one-time install. **Creating a Feature Service is a separate REST call per table**, against a different admin endpoint (`/createService` instead of `/customdataproviders/register`). Each service points at one table via service parameters, and the presence of `lakebaseHost` determines which backend (Lakehouse or Lakebase) is used.
 
 > **Before you start — your source table must satisfy:**
 >
@@ -468,7 +508,7 @@ Editing is enabled at the provider level (`editingEnabled: true` in [`cdconfig.j
 
 Create services via the **Admin REST API** (`createService` endpoint). All service parameters from `cdconfig.json` must be included — use empty strings for parameters that don't apply.
 
-> **Note:** There is no `cdf create-service` CLI command. Services are created through the [`publish-service.sh` wizard](#quick-start--easy-deploy-recommended), the Admin REST API, or the ArcGIS Server Admin Directory UI. Services may be created in a STOPPED state — start them via the Admin API (`services/<name>.FeatureServer/start`) or the ArcGIS Server Manager UI.
+> **Note:** There is no `cdf create-service` CLI command. Services are created through the [`publish-service.sh` wizard](#step-4--publish-your-feature-services), the Admin REST API, or the ArcGIS Server Admin Directory UI. Services may be created in a STOPPED state — start them via the Admin API (`services/<name>.FeatureServer/start`) or the ArcGIS Server Manager UI.
 
 #### Lakehouse service (read-only)
 
@@ -557,19 +597,11 @@ getData(req) → lakebaseHost set? → YES: PostgreSQL path / NO: Databricks SQL
 editData(req) → Always Lakebase (Lakehouse is read-only)
 ```
 
----
-
-> ### Installation complete
->
-> With the provider registered and at least one Feature Service created, you have a working deployment. **Everything below this point is reference material** — supported query parameters, performance benchmarks, geometry format details, environment-variable reference, and troubleshooting. Skim or skip ahead as needed.
-
----
-
 ## 7. Agent-driven publishing (`mcp-server/`)
 
 ![status: Beta](https://img.shields.io/badge/status-Beta-yellow) — the provider above is the mature component; this MCP layer is newer (core flows tested end-to-end against a live ArcGIS Server; see its [README](mcp-server/README.md) for the current status).
 
-An MCP server that turns provider setup **and** per-layer publishing (sections 3–6) into a conversation. Instead of hand-building `createService` JSON, an agent inspects the Unity Catalog table (geometry column/format, SRID, int32-safe unique id, time column — all derived automatically), publishes it as a feature service, smoke-tests it live, and returns the FeatureServer URL. Given a built `.cdpk`, it also installs and upgrades the provider itself — with environment config **baked into the package**, so the ".cdpk update wiped my `.env`" failure mode (section 6 warning) can't happen.
+An MCP server that turns provider setup **and** per-layer publishing into a conversation. Instead of hand-building `createService` JSON, an agent inspects the Unity Catalog table (geometry column/format, SRID, int32-safe unique id, time column — all derived automatically), publishes it as a feature service, smoke-tests it live, and returns the FeatureServer URL. Given a built `.cdpk`, it also installs and upgrades the provider itself — with environment config **baked into the package**, so the ".cdpk update wiped my `.env`" failure mode (see the update warning in [Step 2](#step-2--register-the-provider)) can't happen.
 
 ### Quickstart (local, Claude Code / Claude Desktop)
 
@@ -814,7 +846,7 @@ This dumps everything that matters — provider directory contents, env vars, mu
 </details>
 
 **Register/update fails: `Failed to start '/opt/arcgis/.../customdata/app/src/index.js'`**
-- Tail the server log for the real module error. If it shows `Cannot find module '../adapters/process.env'`, your `.cdpk` was built with an overbroad exclude (e.g. `-x '*.env*'`) that stripped `node_modules` files whose names contain `.env`. Rebuild with the exact excludes from [Step 4(a)](#4-package-and-register-provider): `-x '.env' '.env.*' 'test/*' '*.md'`.
+- Tail the server log for the real module error. If it shows `Cannot find module '../adapters/process.env'`, your `.cdpk` was built with an overbroad exclude (e.g. `-x '*.env*'`) that stripped `node_modules` files whose names contain `.env`. Rebuild with the exact excludes from [Step 1](#step-1--get-the-code-and-build-the-provider-package): `-x '.env' '.env.*' 'test/*' '*.md'`.
 - **A failed `update` deletes the live provider directory** and your CDF services 404 until a good package is in. Upload a correctly-built `.cdpk` and run `update` again, then recreate `.env` and restart.
 
 **Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
