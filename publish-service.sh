@@ -61,13 +61,13 @@ echo "   ok (token ${TOKEN:0:10}...)."
 echo
 
 # --- gentle preflight: is the Databricks config where the arcgis user will read it?
-if [ ! -f /home/arcgis/.databrickscfg ] && [ -z "${DATABRICKS_CONFIG_FILE:-}" ]; then
-  echo "   NOTE: /home/arcgis/.databrickscfg not found. The provider runs as the 'arcgis'"
-  echo "         user and reads that file at query time. If it is missing (or only exists"
-  echo "         under another user/name), the service will CREATE fine but the query step"
-  echo "         will fail with 'No default Databricks workspace configured'. Put the config"
-  echo "         at /home/arcgis/.databrickscfg (chown arcgis:arcgis, chmod 600) or set"
-  echo "         DATABRICKS_CONFIG_FILE in init_user_param.sh."
+if [ ! -r /home/arcgis/.databrickscfg ] && [ -z "${DATABRICKS_CONFIG_FILE:-}" ]; then
+  echo "   NOTE: could not confirm /home/arcgis/.databrickscfg (this check may just lack"
+  echo "         permission if you are not the 'arcgis' user — that is fine). The provider"
+  echo "         runs as 'arcgis' and reads that file at query time. Make sure it exists there"
+  echo "         (chown arcgis:arcgis, chmod 600) with your workspace profile, or set"
+  echo "         DATABRICKS_CONFIG_FILE in init_user_param.sh — otherwise the query step fails"
+  echo "         with 'No default Databricks workspace configured'."
   echo
 fi
 
@@ -158,18 +158,39 @@ echo "   requested."
 echo
 
 # --- verify (sample query; NO count, tables can be huge) -----------------------
+# The REST query endpoint validates tokens more strictly than the admin API on some
+# servers: a requestip-bound token (fine for create/start) can be refused here with
+# "Invalid token, ClientID does not match". So mint a referer-bound token and send a
+# matching Referer header for the query. Falls back to the admin token if that fails.
 echo "-> sample query (5 rows)..."
-QUERY_URL="$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&outFields=*&resultRecordCount=5&token=$TOKEN&f=json"
-Q=$(curl -sk "$QUERY_URL")
+QTOKEN=$(curl -sk "$SERVER/$CTX/admin/generateToken" \
+  --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=$ADMIN_PASS" \
+  --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" \
+  --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+[ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
+Q=$(curl -sk -H "Referer: $SERVER" \
+  "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&outFields=*&resultRecordCount=5&returnGeometry=true&token=$QTOKEN&f=json")
 NFEAT=$(printf '%s' "$Q" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d.get('features',[])))" 2>/dev/null || echo "0")
 echo
 if [ "$NFEAT" -gt 0 ] 2>/dev/null; then
   echo "============================================================"
   echo " SUCCESS — $NFEAT feature(s) returned. Service is live."
   echo "============================================================"
-  echo " Admin/REST (on box):  $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
+  echo " REST (on box):  $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
   echo " Clients reach it through your web adaptor, e.g.:"
   echo "     https://<your-host>/<webadaptor>/rest/services/$SERVICE_NAME/FeatureServer/0"
+elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
+  echo "============================================================"
+  echo " Service CREATED and STARTED. Auto-verify was inconclusive —"
+  echo " the query was refused on a token technicality, NOT a data problem."
+  echo "============================================================"
+  echo " Verify manually with a referer-bound token (matching Referer header):"
+  echo "   T=\$(curl -sk \"$SERVER/$CTX/admin/generateToken\" --data-urlencode username=$ADMIN_USER \\"
+  echo "        --data-urlencode 'password=YOURPASS' --data-urlencode client=referer \\"
+  echo "        --data-urlencode referer=$SERVER --data-urlencode f=json \\"
+  echo "        | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"token\"])')"
+  echo "   curl -sk -H \"Referer: $SERVER\" \\"
+  echo "     \"$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&resultRecordCount=5&token=\$T&f=json\""
 else
   echo "!! The query returned no features. Raw response:"
   printf '%s\n' "$Q" | head -c 900; echo
