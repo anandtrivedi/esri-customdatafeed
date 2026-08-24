@@ -72,11 +72,15 @@ fi
 echo "   ok (token ${TOKEN:0:10}...)."
 echo
 
-# --- detect the registered CDF provider(s) -------------------------------------
-# One provider -> use it automatically. Several -> pick. None/parse fail -> keep default.
-echo "-> checking registered custom data providers..."
+# --- PREFLIGHT: verify prerequisites before asking for any service details -----
+# Runs on invoke. Hard-stops on things that guarantee failure (no provider
+# registered); warns on things it cannot fully confirm (config file permissions).
+echo "== Preflight =="
+echo "  [ok]   ArcGIS admin reachable, token acquired"
+
 PROV_JSON=$(curl -sk "$SERVER/$CTX/admin/services/types/customdataproviders" \
   --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+PROV_PARSE_OK=$(printf '%s' "$PROV_JSON" | python3 -c "import sys,json; json.load(sys.stdin); print('yes')" 2>/dev/null)
 PROVS=()
 while IFS= read -r line; do [ -n "$line" ] && PROVS+=("$line"); done < <(printf '%s' "$PROV_JSON" | python3 -c "
 import sys,json
@@ -91,30 +95,34 @@ if isinstance(d,dict):
 " 2>/dev/null)
 if [ "${#PROVS[@]}" -eq 1 ]; then
   PROVIDER_NAME="${PROVS[0]}"
-  echo "   using provider: $PROVIDER_NAME"
+  echo "  [ok]   CDF provider registered: $PROVIDER_NAME"
 elif [ "${#PROVS[@]}" -gt 1 ]; then
-  echo "   multiple providers registered:"
-  i=1; for p in "${PROVS[@]}"; do echo "     $i) $p"; i=$((i+1)); done
-  ask "   choose a number" "1" PPICK
+  echo "  [ok]   multiple CDF providers registered:"
+  i=1; for p in "${PROVS[@]}"; do echo "           $i) $p"; i=$((i+1)); done
+  ask "         which provider to use" "1" PPICK
   if printf '%s' "$PPICK" | grep -qE '^[0-9]+$' && [ "$PPICK" -ge 1 ] && [ "$PPICK" -le "${#PROVS[@]}" ]; then
     PROVIDER_NAME="${PROVS[$((PPICK-1))]}"
   fi
-  echo "   using provider: $PROVIDER_NAME"
+  echo "         using: $PROVIDER_NAME"
+elif [ "$PROV_PARSE_OK" = "yes" ]; then
+  echo "  [NOT READY] No custom data provider is registered on this ArcGIS Server."
+  echo "              Register the .cdpk first (Server Manager > Server Configuration >"
+  echo "              Custom Data Feeds > Add Custom Data Provider), then re-run this."
+  exit 1
 else
-  echo "   (could not list providers — using default: $PROVIDER_NAME)"
+  echo "  [warn] could not list providers (unexpected response) — proceeding with default"
+  echo "         '$PROVIDER_NAME'. If publishing fails with 'provider not found', register it."
+fi
+
+CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
+if [ -r "$CFG" ]; then
+  echo "  [ok]   Databricks config readable: $CFG"
+else
+  echo "  [warn] could not read $CFG (may just be a permissions/other-user check — often fine)."
+  echo "         The provider runs as 'arcgis' and reads it at query time; ensure it exists there"
+  echo "         (chown arcgis:arcgis, chmod 600) or set DATABRICKS_CONFIG_FILE in init_user_param.sh."
 fi
 echo
-
-# --- gentle preflight: is the Databricks config where the arcgis user will read it?
-if [ ! -r /home/arcgis/.databrickscfg ] && [ -z "${DATABRICKS_CONFIG_FILE:-}" ]; then
-  echo "   NOTE: could not confirm /home/arcgis/.databrickscfg (this check may just lack"
-  echo "         permission if you are not the 'arcgis' user — that is fine). The provider"
-  echo "         runs as 'arcgis' and reads that file at query time. Make sure it exists there"
-  echo "         (chown arcgis:arcgis, chmod 600) with your workspace profile, or set"
-  echo "         DATABRICKS_CONFIG_FILE in init_user_param.sh — otherwise the query step fails"
-  echo "         with 'No default Databricks workspace configured'."
-  echo
-fi
 
 # --- service parameters --------------------------------------------------------
 echo "-- Service definition --"
@@ -230,8 +238,9 @@ CREATE=$(curl -sk "$SERVER/$CTX/admin/services/createService" \
 STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
 if [ "$STATUS" = "success" ]; then
   echo "   created."
-elif printf '%s' "$CREATE" | grep -qi "already exist"; then
-  echo "   already exists — continuing to start/verify."
+elif printf '%s' "$CREATE" | grep -qiE "already exist|exists in folder|exists in"; then
+  echo "   a service named '$SERVICE_NAME' already exists — continuing to start + verify."
+  echo "   (If you meant to change its settings, delete it first and re-run.)"
 else
   echo "!! createService did not succeed. Response:"
   printf '%s\n' "$CREATE"
@@ -286,8 +295,11 @@ else
   printf '%s\n' "$Q" | head -c 900; echo
   echo
   echo "   Map the error to the layer it comes from:"
+  echo "   - 404 / 'Service not found' => the service did not start — usually a wrong tableName or"
+  echo "       geometryColumn, or the provider errored initializing it (e.g. the table/column does"
+  echo "       not exist, so geometry auto-detect failed). Fix the value and re-run; check ArcGIS logs."
   echo "   - 'No default Databricks workspace configured' => .databrickscfg not found/valid for the"
-  echo "       arcgis user (see the NOTE above), or profile name != '$WORKSPACE'. Restart the server"
+  echo "       arcgis user, or workspace != '${WORKSPACE:-(env-var default)}'. Restart the server"
   echo "       after fixing, since profiles are cached per process."
   echo "   - invalid_client / 401 => service-principal creds wrong, or the OIDC endpoint is unreachable."
   echo "   - SSL / certificate    => trust the enclave CA via NODE_EXTRA_CA_CERTS in init_user_param.sh."
