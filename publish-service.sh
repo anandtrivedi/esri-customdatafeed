@@ -167,6 +167,34 @@ print(json.dumps(svc))
 PY
 }
 
+# --- helper: guess "geometryColumn idField" from `databricks tables get` JSON ---
+# Prints two space-separated tokens ('_' when unknown). Best-effort suggestions only.
+guess_cols() {
+python3 -c "
+import sys,json
+try: d=json.load(sys.stdin)
+except Exception: print('_ _'); sys.exit()
+cols=[(c.get('name'),(c.get('type_name') or c.get('type_text') or '').upper()) for c in d.get('columns',[]) if c.get('name')]
+geom=''
+for n,t in cols:
+    if t.startswith('GEOMETRY') or t.startswith('GEOGRAPHY'): geom=n; break
+if not geom:
+    for h in ['geometry','geog','geom','shape','wkt','wkb','geojson','the_geom','location','point']:
+        m=[n for n,_ in cols if h in n.lower()]
+        if m: geom=m[0]; break
+ints=[n for n,t in cols if any(t.startswith(x) for x in ('INT','LONG','BIGINT','SMALLINT'))]
+low={n.lower():n for n in ints}
+idc=''
+for pref in ('objectid','id'):
+    if pref in low: idc=low[pref]; break
+if not idc:
+    m=[n for n in ints if n.lower().endswith('_id')]
+    if m: idc=m[0]
+if not idc and ints: idc=ints[0]
+print((geom or '_')+' '+(idc or '_'))
+"
+}
+
 # --- choose backend -----------------------------------------------------------
 echo "-- Backend --"
 echo "  1) Lakehouse  (Databricks SQL Warehouse — read-only, large-scale query)"
@@ -207,13 +235,44 @@ else
   ask "Databricks workspace profile" "DEFAULT" WORKSPACE
 fi
 echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
+
+# --- optional Databricks CLI auto-detect (graceful fallback when absent) -------
+# If the `databricks` CLI is on PATH and the chosen profile authenticates, use it to
+# pick a warehouse by name and to suggest the geometry/id columns. Otherwise, manual.
+CLI_OK=0
+[ -r "$CFG" ] && export DATABRICKS_CONFIG_FILE="$CFG"
+if command -v databricks >/dev/null 2>&1 && [ -n "$WORKSPACE" ]; then
+  if databricks current-user me --profile "$WORKSPACE" -o json >/dev/null 2>&1; then
+    CLI_OK=1
+    echo "  [ok]   Databricks CLI detected + authenticated (profile '$WORKSPACE') — auto-detect on"
+  fi
+fi
+
 if [ "$BACKEND" = "lakehouse" ]; then
-  while :; do
+  WAREHOUSE_PATH=""
+  if [ "$CLI_OK" = 1 ]; then
+    WIDS=(); WNAMES=()
+    while IFS=$'\t' read -r wid wname; do [ -n "$wid" ] && WIDS+=("$wid") && WNAMES+=("$wname"); done < <(databricks warehouses list --profile "$WORKSPACE" -o json 2>/dev/null | python3 -c "
+import sys,json
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for w in (d if isinstance(d,list) else []):
+    if w.get('id'): print(w['id']+'\t'+(w.get('name') or ''))
+" 2>/dev/null)
+    if [ "${#WIDS[@]}" -gt 0 ]; then
+      echo "  SQL Warehouses (from the Databricks CLI):"
+      i=1; for w in "${WNAMES[@]}"; do echo "    $i) $w"; i=$((i+1)); done
+      echo "    0) type the http path manually"
+      ask "  choose a number" "1" WPICK
+      if printf '%s' "$WPICK" | grep -qE '^[0-9]+$' && [ "$WPICK" -ge 1 ] && [ "$WPICK" -le "${#WIDS[@]}" ]; then
+        WAREHOUSE_PATH="/sql/1.0/warehouses/${WIDS[$((WPICK-1))]}"
+        echo "  -> $WAREHOUSE_PATH"
+      fi
+    fi
+  fi
+  while [ -z "$WAREHOUSE_PATH" ]; do
     ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
-    case "$WAREHOUSE_PATH" in
-      ""|*/) echo "   !! Incomplete — include the warehouse id, e.g. /sql/1.0/warehouses/abc123def456." ;;
-      *) break ;;
-    esac
+    case "$WAREHOUSE_PATH" in ""|*/) echo "   !! Incomplete — include the warehouse id, e.g. /sql/1.0/warehouses/abc123def456."; WAREHOUSE_PATH="";; esac
   done
 else
   while :; do ask "Lakebase host (…database.<region>.cloud.databricks.com)" "" LB_HOST; [ -n "$LB_HOST" ] && break; echo "   !! Lakebase host is required."; done
@@ -238,13 +297,20 @@ while true; do
       if printf '%s' "$TABLE" | grep -qE '^[^[:space:].]+\.[^[:space:].]+\.[^[:space:].]+$'; then break; fi
       echo "   !! Use a 3-part Unity Catalog name: catalog.schema.table — try again."
     done
-    while :; do ask "Geometry column" "" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
+    SUG_GEOM=""; SUG_ID=""
+    if [ "$CLI_OK" = 1 ]; then
+      read -r SUG_GEOM SUG_ID < <(databricks tables get "$TABLE" --profile "$WORKSPACE" -o json 2>/dev/null | guess_cols) || true
+      [ "$SUG_GEOM" = "_" ] && SUG_GEOM=""
+      [ "$SUG_ID" = "_" ] && SUG_ID=""
+      [ -n "$SUG_GEOM$SUG_ID" ] && echo "  (auto-detected from the table — geometry: '${SUG_GEOM:-?}', id: '${SUG_ID:-?}'; press Enter to accept)"
+    fi
+    while :; do ask "Geometry column" "$SUG_GEOM" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
     echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
     ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
     case "$GF" in
       1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
     esac
-    while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "$SUG_ID" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
     ask "SRID" "4326" SRID
     ask "Time column (optional; blank if none)" "" TIME_COL
     ask "Max record count per page" "2000" MAXREC
