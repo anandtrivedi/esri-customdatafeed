@@ -77,7 +77,33 @@ ask "Service name (letters/digits/_ , must start with a letter)" "" SERVICE_NAME
 if ! printf '%s' "$SERVICE_NAME" | grep -qE '^[A-Za-z][A-Za-z0-9_]{0,63}$'; then
   echo "!! '$SERVICE_NAME' is not a valid service name."; exit 1
 fi
-ask "Databricks workspace profile (.databrickscfg section name)" "DEFAULT" WORKSPACE
+# Workspace profile: offer a pick-list read from the SAME .databrickscfg the provider
+# uses. Pure grep of the [section] headers — no guessing. Degrades to free-text if the
+# file can't be read (e.g., running as a user without access to the arcgis-owned file).
+CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
+PROFILES=""
+[ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]')
+if [ -n "$PROFILES" ]; then
+  echo "  Workspace profiles found in $CFG:"
+  declare -a PROFARR=(); n=1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    echo "    $n) $p"; PROFARR[$n]="$p"; n=$((n+1))
+  done <<< "$PROFILES"
+  echo "    0) type a different name / use env-var default"
+  ask "choose a number" "1" PICK
+  if printf '%s' "$PICK" | grep -qE '^[0-9]+$' && [ -n "${PROFARR[$PICK]:-}" ]; then
+    WORKSPACE="${PROFARR[$PICK]}"
+  else
+    ask "Workspace profile name (blank = env-var default)" "" WORKSPACE
+  fi
+else
+  echo "  (could not read $CFG to list profiles — enter it manually. Use the exact name"
+  echo "   inside the brackets in .databrickscfg, DEFAULT if it has a [DEFAULT] section,"
+  echo "   or leave blank to use the env-var default workspace.)"
+  ask "Databricks workspace profile" "DEFAULT" WORKSPACE
+fi
+echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
 ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
 ask "Table (catalog.schema.table)" "" TABLE
 ask "Geometry column" "" GEOM_COL
