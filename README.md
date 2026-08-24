@@ -13,7 +13,29 @@ One provider is registered once; each Feature Service picks its backend via serv
 >
 > Manual setup is **6 steps** — [get the code](#1-get-the-code-and-install-dependencies), [configure Databricks](#2-configure-databricks-connection), [Lakebase (optional)](#3-configure-lakebase-optional), [package & register the provider](#4-package-and-register-provider), [harden](#5-production-hardening-recommended), [publish your first service](#6-create-your-first-feature-service). You're done at the **"Installation complete"** marker; everything after is reference (query params, performance, geometry, env vars, troubleshooting).
 >
-> **Prefer to skip most of that?** [Section 7](#7-agent-driven-publishing-mcp-server) does the provider install and publishing through an MCP agent (Claude or Databricks Playground) — only the ArcGIS Server itself and hardening stay manual.
+> **Prefer not to hand-build any of that?** The **[Easy Deploy quick start](#quick-start--easy-deploy-recommended)** below uses the `publish-service.sh` wizard — no JSON to edit, no manual token — and is the recommended way to publish. [Section 7](#7-agent-driven-publishing-mcp-server) does the same through an MCP agent (Claude or Databricks Playground) where that's available.
+
+## Quick Start — Easy Deploy (recommended)
+
+Esri offers **no GUI** to publish a feature service from a custom data provider — the only supported way is the Admin REST API `createService` call with a 15-field JSON payload. The **`publish-service.sh`** wizard does that for you: it prompts one field at a time, mints the admin token itself, lists your workspace profiles, builds the JSON correctly, and creates → starts → verifies the service. Only three one-time setup steps come first.
+
+**1. Register the provider — GUI, one-time.** In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, upload the `.cdpk`. (No `.cdpk` yet? Build one per [Section 4](#4-package-and-register-provider).)
+
+**2. Place the Databricks config where the provider reads it.** The provider runs as the **`arcgis`** OS user and reads `~/.databrickscfg` at query time:
+```bash
+sudo cp your-databrickscfg /home/arcgis/.databrickscfg
+sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
+sudo chmod 600 /home/arcgis/.databrickscfg
+```
+Each `[Profile]` section is one workspace (PAT or OAuth M2M — see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m)). Name a section `[DEFAULT]` if you want services to work without a `workspace` parameter; otherwise each service references its profile by name. (Alternatively, set `DATABRICKS_CONFIG_FILE` in [`init_user_param.sh`](#set-environment-variables-in-init_user_paramsh) to any path the `arcgis` user can read.)
+
+**3. Run the wizard on the box.** Download [`publish-service.sh`](publish-service.sh), then:
+```bash
+sudo bash publish-service.sh
+```
+Run it **on the ArcGIS Server host**, as **root** (simplest) or the `arcgis` user — root is fine, the script only makes authenticated admin-API calls and can read the config to show the profile pick-list. It auto-detects the registered provider, lists your `.databrickscfg` profiles to pick from, lets you leave the geometry format on **auto-detect**, shows a review summary, and on confirm prints the live FeatureServer URL. **Re-run it once per table** you want to publish.
+
+That's the whole path. The **6-step manual guide below** is the reference/advanced route — hand-built `createService` JSON — for scripting the payload yourself or understanding every parameter. [Section 7](#7-agent-driven-publishing-mcp-server) covers the MCP-agent path.
 
 ## Overview
 

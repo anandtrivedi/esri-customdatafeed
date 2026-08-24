@@ -9,7 +9,19 @@
 # so no quoting/missing-key mistakes), then creates -> starts -> verifies the service
 # and prints the FeatureServer URL. Every failure prints what went wrong in plain English.
 #
-# Usage:   bash publish-service.sh
+# HOW TO RUN
+#   Run it ON the ArcGIS Server box, as root (simplest) or as the arcgis user:
+#       sudo bash publish-service.sh          # or, if already root:  bash publish-service.sh
+#   Root is fine — the script only makes authenticated HTTPS calls to the ArcGIS admin
+#   API (token auth, no OS privileges needed), and as root it can also read the
+#   arcgis-owned .databrickscfg to offer the workspace-profile pick-list. Running as a
+#   plain non-root user still works, but the pick-list falls back to typing the name.
+#
+#   The PROVIDER runs as the 'arcgis' user and reads ~/.databrickscfg at query time, so
+#   make sure the config lives where arcgis can read it:
+#       sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
+#       sudo chmod 600 /home/arcgis/.databrickscfg
+#   (or set DATABRICKS_CONFIG_FILE in init_user_param.sh to a path arcgis can read).
 #
 set -uo pipefail   # deliberately NOT -e: we handle and explain errors ourselves.
 
@@ -60,6 +72,39 @@ fi
 echo "   ok (token ${TOKEN:0:10}...)."
 echo
 
+# --- detect the registered CDF provider(s) -------------------------------------
+# One provider -> use it automatically. Several -> pick. None/parse fail -> keep default.
+echo "-> checking registered custom data providers..."
+PROV_JSON=$(curl -sk "$SERVER/$CTX/admin/services/types/customdataproviders" \
+  --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+PROVS=()
+while IFS= read -r line; do [ -n "$line" ] && PROVS+=("$line"); done < <(printf '%s' "$PROV_JSON" | python3 -c "
+import sys,json
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+if isinstance(d,dict):
+    for entries in d.values():
+        if isinstance(entries,list):
+            for e in entries:
+                if isinstance(e,dict) and e.get('type')=='provider' and e.get('name'):
+                    print(e['name'])
+" 2>/dev/null)
+if [ "${#PROVS[@]}" -eq 1 ]; then
+  PROVIDER_NAME="${PROVS[0]}"
+  echo "   using provider: $PROVIDER_NAME"
+elif [ "${#PROVS[@]}" -gt 1 ]; then
+  echo "   multiple providers registered:"
+  i=1; for p in "${PROVS[@]}"; do echo "     $i) $p"; i=$((i+1)); done
+  ask "   choose a number" "1" PPICK
+  if printf '%s' "$PPICK" | grep -qE '^[0-9]+$' && [ "$PPICK" -ge 1 ] && [ "$PPICK" -le "${#PROVS[@]}" ]; then
+    PROVIDER_NAME="${PROVS[$((PPICK-1))]}"
+  fi
+  echo "   using provider: $PROVIDER_NAME"
+else
+  echo "   (could not list providers — using default: $PROVIDER_NAME)"
+fi
+echo
+
 # --- gentle preflight: is the Databricks config where the arcgis user will read it?
 if [ ! -r /home/arcgis/.databrickscfg ] && [ -z "${DATABRICKS_CONFIG_FILE:-}" ]; then
   echo "   NOTE: could not confirm /home/arcgis/.databrickscfg (this check may just lack"
@@ -107,15 +152,34 @@ echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
 ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
 ask "Table (catalog.schema.table)" "" TABLE
 ask "Geometry column" "" GEOM_COL
-echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)"
-ask "  choose 1-4" "4" GF
+echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
+ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
 case "$GF" in
-  1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; *) GEOM_FORMAT=GEOMETRY;;
+  1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
 esac
 ask "ID field (must be a UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD
 ask "SRID" "4326" SRID
 ask "Time column (optional; blank if none)" "" TIME_COL
 ask "Max record count per page" "2000" MAXREC
+echo
+
+# --- review + confirm before creating anything ---------------------------------
+echo
+echo "-- Review --"
+printf "  %-13s %s\n" "Service name" "$SERVICE_NAME"
+printf "  %-13s %s\n" "Provider"     "$PROVIDER_NAME"
+printf "  %-13s %s\n" "Workspace"    "${WORKSPACE:-(env-var default)}"
+printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
+printf "  %-13s %s\n" "Table"        "$TABLE"
+printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
+printf "  %-13s %s\n" "Geometry fmt" "${GEOM_FORMAT:-(auto-detect)}"
+printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
+printf "  %-13s %s\n" "SRID"         "$SRID"
+printf "  %-13s %s\n" "Time column"  "${TIME_COL:-(none)}"
+printf "  %-13s %s\n" "Max records"  "$MAXREC"
+echo
+ask "Proceed and create the service? (y/n)" "y" GO
+case "$GO" in y|Y|yes|YES) ;; *) echo "Aborted — nothing was created."; exit 0;; esac
 echo
 
 # --- build createService JSON with python3 (no quoting traps) ------------------
