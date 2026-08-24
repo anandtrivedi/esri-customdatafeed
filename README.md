@@ -286,90 +286,77 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 
 This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Creating individual Feature Services against the registered provider is the next step: [Step 6](#6-create-your-first-feature-service).
 
-You package the provider as a `.cdpk` file (just a zip archive with a different extension), upload it, and register it. Recommended path uses the standard Admin REST API and works on any ArcGIS Server install:
-
-> **Fresh server vs. reused server.** On a server with **no CDF provider registered yet**, the steps below just work. If a Databricks CDF provider is *already* registered (pre-baked or reused AMI), know that `register` is strictly first-install — ArcGIS Server refuses any `register` call for a provider name that's already registered (*"Custom data provider with name '...' is already registered"*). Your options:
-> - **Same provider name, new code** (the upgrade case) — use the **`update`** operation instead of `register`; see "Upgrading the provider later" below the commands.
-> - **Retire the old one** — list what's registered, then unregister by `.cdpk` filename:
->   ```bash
->   # list registered providers
->   curl -sk "https://localhost:6443/arcgis/admin/services/types/customdataproviders?token=$TOKEN&f=json"
->   # unregister one (also deletes its extracted provider directory)
->   curl -sk -X POST "https://localhost:6443/arcgis/admin/services/types/customdataproviders/unregister?token=$TOKEN&f=json" \
->     --data-urlencode "customdataFilename=old-provider-name.cdpk"
->   ```
-> Either way, restart the server (below) afterward so everything reloads cleanly.
-
-> **Where does `TOKEN` come from?** It's an **ArcGIS Server admin token** — *not* your Databricks PAT. You mint it from ArcGIS Server with your `siteadmin` credentials, and every `/arcgis/admin/...` call below reuses it. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer) for the difference between the two binding modes and when to use each.
-
-All four commands below are part of this step — run them in order on the server. (The letters (a)–(d) are deliberate: they are sub-commands of this step, not the README's numbered install Steps.)
+**First, build the `.cdpk`** (a zip archive with a different extension) — every registration method below uses it. Run this on the server, from inside the `nodejs-provider/` directory where you ran `npm install`:
 
 ```bash
-# (a) Build the .cdpk — from inside the nodejs-provider/ directory (where you ran npm install)
-#     Keep the .env excludes EXACTLY as written. A wildcard like '*.env*' would
-#     also strip node_modules files whose names contain ".env" (e.g.
-#     @dabh/diagnostics/adapters/process.env.js, a transitive dep of
-#     @databricks/sql) — the broken package then fails provider validation at
-#     register time with "Cannot find module '../adapters/process.env'".
+# Keep the .env excludes EXACTLY as written. A wildcard like '*.env*' would also strip
+# node_modules files whose names contain ".env" (e.g. @dabh/diagnostics/adapters/process.env.js,
+# a transitive dep of @databricks/sql) — the broken package then fails provider validation at
+# register time with "Cannot find module '../adapters/process.env'".
 cd esri-customdatafeed/nodejs-provider   # if not already there
 zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '.env' '.env.*' 'test/*' '*.md'
+```
 
-# (b) Get an ArcGIS admin token (siteadmin login). client=requestip binds the
-#     token to your IP — no Referer header to keep in sync. Run this on the box
-#     (or replace localhost with the server host) and use your real password.
+Then register it with **one** of the three methods below — pick the first that fits your environment.
+
+#### Method 1 — Server Manager GUI (recommended)
+
+No token, no curl. In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, browse to the `databricks-geospatial-provider.cdpk` you built and register it. It appears in the Custom Data Feeds list (the **Name** column is the provider name you'll reference when publishing). This is the easiest path and what the [Quick Start](#quick-start--easy-deploy-recommended) assumes.
+
+#### Method 2 — ArcGIS Enterprise SDK `cdf` CLI
+
+If the GUI isn't available, install the [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/) (it ships the `cdf` command-line tool) and run:
+
+```bash
+cdf register databricks-geospatial-provider.cdpk https://your-server:6443/arcgis/admin
+```
+
+It prompts for your `siteadmin` credentials and handles the upload + register in one step — no admin token to mint yourself. For self-signed certs, set `NODE_EXTRA_CA_CERTS=/path/to/cert.pem` (or `NODE_TLS_REJECT_UNAUTHORIZED=0`) first.
+
+#### Method 3 — Admin REST API
+
+The scripted, no-GUI, no-SDK fallback (automation, locked-down boxes). It's the most manual because you mint an ArcGIS admin token yourself — the step users most often trip on. Run these in order on the server:
+
+> **`TOKEN` is an ArcGIS Server admin token — *not* your Databricks PAT.** You mint it from ArcGIS Server with your `siteadmin` credentials. `client=requestip` binds it to your IP so no `Referer` header is needed on these admin calls; if token minting misbehaves, see [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer).
+
+```bash
+# (a) Mint the admin token (siteadmin login; run on the box, use your real password).
 TOKEN=$(curl -sk -X POST 'https://localhost:6443/arcgis/admin/generateToken?f=json' \
   --data-urlencode 'username=siteadmin' \
   --data-urlencode 'password=...' \
   --data-urlencode 'client=requestip' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 
-# (c) Upload the .cdpk. The response contains an itemID — copy it, the next
-#     command needs it. Do NOT skip this even if you skipped optional steps.
+# (b) Upload the .cdpk. The response contains an itemID — copy it for the next command.
 curl -k "https://localhost:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
   -F "itemFile=@databricks-geospatial-provider.cdpk"
 # Returns: {"status":"success","item":{"itemID":"i273bb53a-..."}}   <-- copy this itemID
 
-# (d) Register the upload — paste the itemID from (c)'s response. This itemID
-#     always comes from the upload above; it has nothing to do with Lakebase.
-#     register is for FIRST install only — see the upgrade note below.
+# (c) Register the upload — paste the itemID from (b). register is FIRST install only.
 curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
   --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
 ```
 
-**Upgrading the provider later** (new code, same provider name): `register` will refuse with *"Custom data provider with name '...' is already registered"*. Build and upload the new `.cdpk` exactly as in (a)–(c), then call **`update`** instead of `register`:
+> **Agent shortcut:** with a built `.cdpk`, the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool performs this upload/register/update flow for you — including baking `.env` config into the package so upgrades can't wipe it.
+
+**Upgrading the provider later** (new code, same provider name): all three methods refuse a plain re-register — *"Custom data provider with name '...' is already registered"*. Rebuild the `.cdpk`, then in the GUI use the provider's **edit/update** action, or via REST upload the new `.cdpk` and call **`update`** instead of `register`:
 
 ```bash
 curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/update?token=$TOKEN&f=json" \
   --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
 ```
 
-> ⚠️ **Back up `.env` before running `update`.** The update extracts the new `.cdpk` over the provider directory (wiping any `.env` you added), and if the new package fails validation the runtime **deletes the provider directory entirely** — your services stay down until a good `.cdpk` is updated in. Back up first: `sudo cp <provider-dir>/.env /tmp/cdf.env.bak`.
+To retire a provider instead, unregister it by `.cdpk` filename (REST): `.../customdataproviders/unregister` with `--data-urlencode "customdataFilename=old-provider-name.cdpk"`. Restart the server afterward either way.
 
-> **What just happened.** The `register` (or `update`) call triggers ArcGIS Server to extract your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/`, then validates it by starting the provider with the bundled Node runtime. The server handles the placement automatically — you do not copy or move files manually. The `git clone` in your home directory and the `.cdpk` archive were just staging artifacts; the live install is what's now under `/opt/arcgis/...`.
+> ⚠️ **Back up `.env` before any update.** The update extracts the new `.cdpk` over the provider directory (wiping any `.env` you added), and if the new package fails validation the runtime **deletes the provider directory entirely** — services stay down until a good `.cdpk` is in. Back up first: `sudo cp /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env /tmp/cdf.env.bak`.
+
+> **What just happened.** Registration extracts your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/` and validates it by starting the provider with the bundled Node runtime. The server places the files automatically — you don't copy anything manually. The `git clone` in your home directory and the `.cdpk` were just staging artifacts.
 >
-> **Before updating (skip on first install):** if you've already registered once and added a `.env` to the live provider directory, **back it up first** — the `.cdpk` extraction wipes the directory (and a *failed* update deletes it entirely):
-> ```bash
-> sudo cp /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env /tmp/cdf.env.bak
-> ```
->
-> **After registration — two things to do every time:**
-> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one. The `.cdpk` extraction overwrites whatever was there, so any local `.env` you had under `/opt/arcgis/...` is gone. (The `.env` in your home-dir clone is not used at runtime.) Restore from your backup if you made one. This is one of the cases where you need `sudo` — see the [user-context callout](#setup) at the top of Setup.
+> **After registration — every time:**
+> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one — the extraction overwrites it. (The `.env` in your home-dir clone is not used at runtime.) This needs `sudo` — see the [user-context callout](#setup). **Prefer `.databrickscfg` + `init_user_param.sh`** (Steps 2 and 5) over a provider-dir `.env`, precisely because those survive re-registration.
 > 2. **Restart ArcGIS Server** (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`) so the new code loads.
-
-<details>
-<summary>Alternative: CDF CLI from the ArcGIS Enterprise SDK</summary>
-
-If you have the [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/) installed and prefer its CLI:
-
-```bash
-cdf export databricks-geospatial-provider
-cdf register databricks-geospatial-provider https://your-server/arcgis/admin TOKEN
-```
-
-For self-signed certs, set `NODE_TLS_REJECT_UNAUTHORIZED=0` or `NODE_EXTRA_CA_CERTS=/path/to/cert.pem`. If you hit "Invalid token, ClientID does not match", fall back to the REST API above — the CDF CLI uses `Authorization: Bearer` which conflicts with ArcGIS's referer-based tokens.
-</details>
 
 ## 5. Production hardening (recommended)
 
