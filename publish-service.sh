@@ -124,75 +124,9 @@ else
 fi
 echo
 
-# --- service parameters --------------------------------------------------------
-echo "-- Service definition --"
-ask "Service name (letters/digits/_ , must start with a letter)" "" SERVICE_NAME
-if ! printf '%s' "$SERVICE_NAME" | grep -qE '^[A-Za-z][A-Za-z0-9_]{0,63}$'; then
-  echo "!! '$SERVICE_NAME' is not a valid service name."; exit 1
-fi
-# Workspace profile: offer a pick-list read from the SAME .databrickscfg the provider
-# uses. Pure grep of the [section] headers — no guessing. Degrades to free-text if the
-# file can't be read (e.g., running as a user without access to the arcgis-owned file).
-CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
-PROFILES=""
-[ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]')
-if [ -n "$PROFILES" ]; then
-  echo "  Workspace profiles found in $CFG:"
-  declare -a PROFARR=(); n=1
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    echo "    $n) $p"; PROFARR[$n]="$p"; n=$((n+1))
-  done <<< "$PROFILES"
-  echo "    0) type a different name / use env-var default"
-  ask "choose a number" "1" PICK
-  if printf '%s' "$PICK" | grep -qE '^[0-9]+$' && [ -n "${PROFARR[$PICK]:-}" ]; then
-    WORKSPACE="${PROFARR[$PICK]}"
-  else
-    ask "Workspace profile name (blank = env-var default)" "" WORKSPACE
-  fi
-else
-  echo "  (could not read $CFG to list profiles — enter it manually. Use the exact name"
-  echo "   inside the brackets in .databrickscfg, DEFAULT if it has a [DEFAULT] section,"
-  echo "   or leave blank to use the env-var default workspace.)"
-  ask "Databricks workspace profile" "DEFAULT" WORKSPACE
-fi
-echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
-ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
-ask "Table (catalog.schema.table)" "" TABLE
-ask "Geometry column" "" GEOM_COL
-echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
-ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
-case "$GF" in
-  1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
-esac
-ask "ID field (must be a UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD
-ask "SRID" "4326" SRID
-ask "Time column (optional; blank if none)" "" TIME_COL
-ask "Max record count per page" "2000" MAXREC
-echo
-
-# --- review + confirm before creating anything ---------------------------------
-echo
-echo "-- Review --"
-printf "  %-13s %s\n" "Service name" "$SERVICE_NAME"
-printf "  %-13s %s\n" "Provider"     "$PROVIDER_NAME"
-printf "  %-13s %s\n" "Workspace"    "${WORKSPACE:-(env-var default)}"
-printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
-printf "  %-13s %s\n" "Table"        "$TABLE"
-printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
-printf "  %-13s %s\n" "Geometry fmt" "${GEOM_FORMAT:-(auto-detect)}"
-printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
-printf "  %-13s %s\n" "SRID"         "$SRID"
-printf "  %-13s %s\n" "Time column"  "${TIME_COL:-(none)}"
-printf "  %-13s %s\n" "Max records"  "$MAXREC"
-echo
-ask "Proceed and create the service? (y/n)" "y" GO
-case "$GO" in y|Y|yes|YES) ;; *) echo "Aborted — nothing was created."; exit 0;; esac
-echo
-
-# --- build createService JSON with python3 (no quoting traps) ------------------
-export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC PROVIDER_NAME
-SVC=$(python3 - <<'PY'
+# --- helper: build the createService JSON for the current per-table variables --
+build_service_json() {
+python3 - <<'PY'
 import os, json
 params = {
     "workspace":         os.environ["WORKSPACE"],
@@ -227,82 +161,146 @@ svc = {
 }
 print(json.dumps(svc))
 PY
-)
+}
 
-# --- create --------------------------------------------------------------------
-echo "-> creating service '$SERVICE_NAME'..."
-CREATE=$(curl -sk "$SERVER/$CTX/admin/services/createService" \
-  --data-urlencode "service=$SVC" \
-  --data-urlencode "token=$TOKEN" \
-  --data-urlencode "f=json")
-STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
-if [ "$STATUS" = "success" ]; then
-  echo "   created."
-elif printf '%s' "$CREATE" | grep -qiE "already exist|exists in folder|exists in"; then
-  echo "   a service named '$SERVICE_NAME' already exists — continuing to start + verify."
-  echo "   (If you meant to change its settings, delete it first and re-run.)"
+# --- data source: pick workspace + warehouse ONCE (shared for every table) -----
+echo "-- Data source (used for every table you publish this session) --"
+# Workspace profile pick-list read from the SAME .databrickscfg the provider uses.
+CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
+PROFILES=""
+[ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]')
+if [ -n "$PROFILES" ]; then
+  echo "  Workspace profiles found in $CFG:"
+  declare -a PROFARR=(); n=1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    echo "    $n) $p"; PROFARR[$n]="$p"; n=$((n+1))
+  done <<< "$PROFILES"
+  echo "    0) type a different name / use env-var default"
+  ask "choose a number" "1" PICK
+  if printf '%s' "$PICK" | grep -qE '^[0-9]+$' && [ -n "${PROFARR[$PICK]:-}" ]; then
+    WORKSPACE="${PROFARR[$PICK]}"
+  else
+    ask "Workspace profile name (blank = env-var default)" "" WORKSPACE
+  fi
 else
-  echo "!! createService did not succeed. Response:"
-  printf '%s\n' "$CREATE"
-  echo "   (Common: a service parameter is wrong, or the name is taken. Fix and re-run.)"
-  exit 1
+  echo "  (could not read $CFG to list profiles — enter it manually. Use the exact name"
+  echo "   inside the brackets in .databrickscfg, DEFAULT if it has a [DEFAULT] section,"
+  echo "   or leave blank to use the env-var default workspace.)"
+  ask "Databricks workspace profile" "DEFAULT" WORKSPACE
 fi
+echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
+ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
 echo
 
-# --- start ---------------------------------------------------------------------
-echo "-> starting service..."
-curl -sk "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
-  --data-urlencode "token=$TOKEN" --data-urlencode "f=json" >/dev/null
-echo "   requested."
-echo
+# --- publish loop: one table per pass, reusing connection/workspace/warehouse --
+while true; do
+  echo "------------------------------------------------------------"
+  echo " New feature service"
+  echo "------------------------------------------------------------"
+  ask "Service name (letters/digits/_ , must start with a letter)" "" SERVICE_NAME
+  if ! printf '%s' "$SERVICE_NAME" | grep -qE '^[A-Za-z][A-Za-z0-9_]{0,63}$'; then
+    echo "!! '$SERVICE_NAME' is not a valid service name — try again."
+    continue
+  fi
+  ask "Table (catalog.schema.table)" "" TABLE
+  ask "Geometry column" "" GEOM_COL
+  echo "  Geometry storage format:  1) WKT   2) WKB   3) GEOJSON   4) GEOMETRY (native)   5) auto-detect"
+  ask "  choose 1-5 (5 lets the provider infer it from the column)" "5" GF
+  case "$GF" in
+    1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
+  esac
+  ask "ID field (must be a UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD
+  ask "SRID" "4326" SRID
+  ask "Time column (optional; blank if none)" "" TIME_COL
+  ask "Max record count per page" "2000" MAXREC
 
-# --- verify (sample query; NO count, tables can be huge) -----------------------
-# The REST query endpoint validates tokens more strictly than the admin API on some
-# servers: a requestip-bound token (fine for create/start) can be refused here with
-# "Invalid token, ClientID does not match". So mint a referer-bound token and send a
-# matching Referer header for the query. Falls back to the admin token if that fails.
-echo "-> sample query (5 rows)..."
-QTOKEN=$(curl -sk "$SERVER/$CTX/admin/generateToken" \
-  --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=$ADMIN_PASS" \
-  --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" \
-  --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
-[ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
-Q=$(curl -sk -H "Referer: $SERVER" \
-  "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&outFields=*&resultRecordCount=5&returnGeometry=true&token=$QTOKEN&f=json")
-NFEAT=$(printf '%s' "$Q" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d.get('features',[])))" 2>/dev/null || echo "0")
-echo
-if [ "$NFEAT" -gt 0 ] 2>/dev/null; then
-  echo "============================================================"
-  echo " SUCCESS — $NFEAT feature(s) returned. Service is live."
-  echo "============================================================"
-  echo " REST (on box):  $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
-  echo " Clients reach it through your web adaptor, e.g.:"
-  echo "     https://<your-host>/<webadaptor>/rest/services/$SERVICE_NAME/FeatureServer/0"
-elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
-  echo "============================================================"
-  echo " Service CREATED and STARTED. Auto-verify was inconclusive —"
-  echo " the query was refused on a token technicality, NOT a data problem."
-  echo "============================================================"
-  echo " Verify manually with a referer-bound token (matching Referer header):"
-  echo "   T=\$(curl -sk \"$SERVER/$CTX/admin/generateToken\" --data-urlencode username=$ADMIN_USER \\"
-  echo "        --data-urlencode 'password=YOURPASS' --data-urlencode client=referer \\"
-  echo "        --data-urlencode referer=$SERVER --data-urlencode f=json \\"
-  echo "        | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"token\"])')"
-  echo "   curl -sk -H \"Referer: $SERVER\" \\"
-  echo "     \"$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&resultRecordCount=5&token=\$T&f=json\""
-else
-  echo "!! The query returned no features. Raw response:"
-  printf '%s\n' "$Q" | head -c 900; echo
   echo
-  echo "   Map the error to the layer it comes from:"
-  echo "   - 404 / 'Service not found' => the service did not start — usually a wrong tableName or"
-  echo "       geometryColumn, or the provider errored initializing it (e.g. the table/column does"
-  echo "       not exist, so geometry auto-detect failed). Fix the value and re-run; check ArcGIS logs."
-  echo "   - 'No default Databricks workspace configured' => .databrickscfg not found/valid for the"
-  echo "       arcgis user, or workspace != '${WORKSPACE:-(env-var default)}'. Restart the server"
-  echo "       after fixing, since profiles are cached per process."
-  echo "   - invalid_client / 401 => service-principal creds wrong, or the OIDC endpoint is unreachable."
-  echo "   - SSL / certificate    => trust the enclave CA via NODE_EXTRA_CA_CERTS in init_user_param.sh."
-  echo "   - SELECT / column error => tableName / geometryColumn / idField wrong, or the SP lacks"
-  echo "       USE CATALOG + USE SCHEMA + SELECT on the table."
-fi
+  echo "-- Review --"
+  printf "  %-13s %s\n" "Service name" "$SERVICE_NAME"
+  printf "  %-13s %s\n" "Provider"     "$PROVIDER_NAME"
+  printf "  %-13s %s\n" "Workspace"    "${WORKSPACE:-(env-var default)}"
+  printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
+  printf "  %-13s %s\n" "Table"        "$TABLE"
+  printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
+  printf "  %-13s %s\n" "Geometry fmt" "${GEOM_FORMAT:-(auto-detect)}"
+  printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
+  printf "  %-13s %s\n" "SRID"         "$SRID"
+  printf "  %-13s %s\n" "Time column"  "${TIME_COL:-(none)}"
+  printf "  %-13s %s\n" "Max records"  "$MAXREC"
+  echo
+  ask "Proceed and create this service? (y/n)" "y" GO
+  case "$GO" in
+    y|Y|yes|YES) : ;;
+    *) echo "Skipped — '$SERVICE_NAME' not created."
+       ask "Publish another table from the same warehouse? (y/n)" "n" MORE
+       case "$MORE" in y|Y|yes|YES) echo; continue;; *) break;; esac ;;
+  esac
+  echo
+
+  export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC PROVIDER_NAME
+  SVC=$(build_service_json)
+
+  echo "-> creating service '$SERVICE_NAME'..."
+  CREATE=$(curl -sk "$SERVER/$CTX/admin/services/createService" \
+    --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+  STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+  OK=0
+  if [ "$STATUS" = "success" ]; then
+    echo "   created."; OK=1
+  elif printf '%s' "$CREATE" | grep -qiE "already exist|exists in folder|exists in"; then
+    echo "   a service named '$SERVICE_NAME' already exists — continuing to start + verify."
+    echo "   (If you meant to change its settings, delete it first and re-run.)"; OK=1
+  else
+    echo "!! createService did not succeed. Response:"
+    printf '%s\n' "$CREATE"
+    echo "   (Common: a service parameter is wrong, or the name is taken.)"
+  fi
+
+  if [ "$OK" = "1" ]; then
+    echo
+    echo "-> starting service..."
+    curl -sk "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
+      --data-urlencode "token=$TOKEN" --data-urlencode "f=json" >/dev/null
+    echo "   requested."
+    echo
+    # REST query validates tokens more strictly than admin on some servers: a requestip
+    # token (fine for create/start) can be refused with "ClientID does not match". Mint a
+    # referer-bound token + matching Referer header for the query; fall back to admin token.
+    echo "-> sample query (5 rows)..."
+    QTOKEN=$(curl -sk "$SERVER/$CTX/admin/generateToken" \
+      --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=$ADMIN_PASS" \
+      --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" \
+      --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+    [ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
+    Q=$(curl -sk -H "Referer: $SERVER" \
+      "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&outFields=*&resultRecordCount=5&returnGeometry=true&token=$QTOKEN&f=json")
+    NFEAT=$(printf '%s' "$Q" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d.get('features',[])))" 2>/dev/null || echo "0")
+    echo
+    if [ "$NFEAT" -gt 0 ] 2>/dev/null; then
+      echo "  ============================================================"
+      echo "   SUCCESS — $NFEAT feature(s). '$SERVICE_NAME' is live."
+      echo "  ============================================================"
+      echo "   REST (on box): $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
+      echo "   Via web adaptor: https://<your-host>/<webadaptor>/rest/services/$SERVICE_NAME/FeatureServer/0"
+    elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
+      echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
+      echo "  Verify manually with a referer-bound token + a matching 'Referer: $SERVER' header on the query."
+    else
+      echo "!! The query returned no features. Raw response:"
+      printf '%s\n' "$Q" | head -c 700; echo
+      echo "   - 404 / 'Service not found' => service did not start: wrong tableName/geometryColumn, or the"
+      echo "       provider errored initializing it (table/column missing). Fix the value and re-run."
+      echo "   - 'No default Databricks workspace configured' => .databrickscfg/workspace issue"
+      echo "       (workspace='${WORKSPACE:-(env-var default)}'); restart the server after fixing (profiles cache)."
+      echo "   - invalid_client / 401 => SP creds or OIDC unreachable.  SSL => NODE_EXTRA_CA_CERTS in init_user_param.sh."
+      echo "   - SELECT / column error => tableName/geometryColumn/idField wrong, or SP lacks USE + SELECT grants."
+    fi
+  fi
+
+  echo
+  ask "Publish another table from the same warehouse? (y/n)" "n" MORE
+  case "$MORE" in y|Y|yes|YES) echo;; *) break;; esac
+done
+echo
+echo "Done."
