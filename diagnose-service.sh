@@ -29,10 +29,24 @@ done
 # loopback-safe curl: skip proxy for localhost, skip cert check (ArcGIS self-signed), timeouts
 CURL=(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30)
 
+# Password is written to a mode-600 temp file and passed to curl via password@file, so it never
+# appears in this process's argv (a concurrent `ps`/`/proc/<pid>/cmdline` can't read it). The
+# trap shreds the file on any exit, including Ctrl-C. (Matches publish-service.sh / register-provider.sh.)
+_tmppass=""
+_cleanup() { rm -f "${_tmppass}"; }
+trap _cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 ask() {
   local prompt="$1" def="$2" __var="$3" ans=""
-  if [ -n "$def" ]; then read -r -p "  $prompt [$def]: " ans; ans="${ans:-$def}"
-  else read -r -p "  $prompt: " ans; fi
+  # EOF / closed stdin must abort, not silently take the default.
+  if [ -n "$def" ]; then
+    if ! read -r -p "  $prompt [$def]: " ans; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+    ans="${ans:-$def}"
+  else
+    if ! read -r -p "  $prompt: " ans; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+  fi
   printf -v "$__var" '%s' "$ans"
 }
 # jget <json> <python-expr using d>  -> prints the value (empty on any error)
@@ -47,16 +61,25 @@ echo "============================================================"
 ask "Admin URL" "https://localhost:6443" SERVER
 ask "URL context" "arcgis" CTX
 ask "Admin username" "siteadmin" ADMINUSER
-read -rs -p "  Admin password: " PW; echo
+if ! read -rs -p "  Admin password: " PW; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi; echo
 ask "Service name (use folder/name if it's in a folder)" "TEST_FeatureService_Databricks" SVC
 echo
 
-# --- mint admin token -----------------------------------------------------------
+# --- mint admin (requestip) + query (referer) tokens ----------------------------
+# Password goes via a temp file (never argv). Mint BOTH tokens now, while we have the password:
+#  - admin token (requestip): the admin API calls below.
+#  - query token (referer + matching Referer header): the feature-service /query smoke test,
+#    which validates tokens more strictly and rejects a requestip token with HTTP 498.
+_tmppass=$(mktemp); chmod 600 "$_tmppass"; printf '%s' "$PW" > "$_tmppass"; unset PW
 TRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/generateToken" \
-  --data-urlencode "username=$ADMINUSER" --data-urlencode "password=$PW" \
+  --data-urlencode "username=$ADMINUSER" --data-urlencode "password@$_tmppass" \
   --data-urlencode "client=requestip" --data-urlencode "f=json")
-unset PW
+QRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/generateToken" \
+  --data-urlencode "username=$ADMINUSER" --data-urlencode "password@$_tmppass" \
+  --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" --data-urlencode "f=json")
+rm -f "$_tmppass"; _tmppass=""
 TOKEN=$(jget "$TRESP" 'd.get("token") or ""')
+QTOKEN=$(jget "$QRESP" 'd.get("token") or ""'); [ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
 if [ -z "$TOKEN" ]; then
   echo "!! Could not mint an admin token. The server said:"
   printf '%s\n' "$TRESP" | head -c 600; echo
@@ -79,6 +102,9 @@ echo
 # --- registered CDF providers ---------------------------------------------------
 echo "-- Registered CDF providers --"
 PRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/types/customdataproviders?token=$TOKEN&f=json")
+# Did the provider list actually parse? A transient error / bad token / HTML proxy response
+# yields empty PROVS that must NOT be read as "no providers registered".
+PROV_PARSE_OK=$(RESP="$PRESP" python3 -c "import os,json;json.loads(os.environ['RESP']);print('yes')" 2>/dev/null)
 PROVS=$(RESP="$PRESP" python3 <<'PY' 2>/dev/null || true
 import os,json
 d=json.loads(os.environ["RESP"]); found=[]
@@ -160,6 +186,72 @@ STATS_NUM=0
 if printf '%s' "${FREE_TOTAL:-}" | grep -qE '^[0-9]+$' && printf '%s' "${BUSY_TOTAL:-}" | grep -qE '^[0-9]+$'; then STATS_NUM=1; fi
 echo
 
+# --- live read-only query smoke test --------------------------------------------
+# The single most decisive check: does the service actually RETURN data? Admin metadata can look
+# perfect (STARTED, provider registered) while every query 404s because the provider failed to
+# initialize (bad Databricks creds, missing UC grants, wrong table/geometry column, TLS). This
+# does a real, read-only /query with a referer-bound token (never changes anything).
+echo "-- Live query smoke test (read-only — returns at most 1 row, changes nothing) --"
+# Query up to 4 times, ~6s apart. This separates the two 404 flavors that look identical from
+# one shot: a min=0 service with no warm instance can 404 on the FIRST hit then succeed as the
+# instance spins up (the classic "404, works on refresh") — vs a PERSISTENT 404, which is a real
+# failure (bad Databricks creds, missing grants, wrong table/column, provider init crash).
+SMOKE="skipped"; SMOKE_FIRST=""; SMOKE_RECOVERED="no"
+smoke_query() {
+  local r
+  r=$("${CURL[@]}" -G -H "Referer: $SERVER" \
+    "$SERVER/$CTX/rest/services/$SVC/FeatureServer/0/query" \
+    --data-urlencode "where=1=1" --data-urlencode "resultRecordCount=1" \
+    --data-urlencode "returnGeometry=false" \
+    --data-urlencode "token=$QTOKEN" --data-urlencode "f=json")
+  RESP="$r" python3 -c "
+import os,json
+try: d=json.loads(os.environ['RESP'])
+except Exception: print('unparseable'); raise SystemExit
+if isinstance(d,dict) and 'error' in d:
+    e=d['error'] if isinstance(d['error'],dict) else {}
+    print('error:%s:%s' % (e.get('code',''), str(e.get('message',d['error']))[:160]))
+elif isinstance(d,dict) and 'features' in d:
+    print('ok:%d' % len(d['features']))
+else:
+    print('unknown')
+" 2>/dev/null || echo "unparseable"
+}
+if [ "$FOUND" = "yes" ]; then
+  for _q in 1 2 3 4; do
+    SMOKE=$(smoke_query)
+    [ -z "$SMOKE_FIRST" ] && SMOKE_FIRST="$SMOKE"
+    case "$SMOKE" in
+      ok:*) [ "$_q" -gt 1 ] && SMOKE_RECOVERED="yes"; break ;;              # succeeded (eventually)
+      error:498:*|error:499:*) break ;;                                     # token issue — retrying won't help
+    esac
+    # Keep retrying only while it still looks like a not-yet-available/starting service.
+    case "$SMOKE" in
+      error:404:*|*Service\ not\ found*|*not\ available*|unparseable|unknown)
+        [ "$_q" -lt 4 ] && { echo "  (no data yet — retry $_q/4, giving a min=0 instance time to start)"; sleep 6; } ;;
+      *) break ;;                                                            # a definite data error — stop
+    esac
+  done
+  if [ "$SMOKE_RECOVERED" = "yes" ]; then
+    echo "  [!] INTERMITTENT 404 CONFIRMED — the first query 404'd, a retry then SUCCEEDED"
+    echo "      (features=${SMOKE#ok:}). This is the min=0 'no warm instance' cold-start: set"
+    echo "      minInstancesPerNode=1 / maxInstancesPerNode>=2 to keep one warm and stop the 404s."
+  else
+    case "$SMOKE" in
+      ok:*)      echo "  [ok] query returned data (features=${SMOKE#ok:}) — the provider is serving rows." ;;
+      error:498:*|error:499:*) echo "  [info] query rejected the token (${SMOKE#error:}). On a FEDERATED site /query"
+                 echo "         needs a PORTAL token, not this admin token — a token technicality, not a data"
+                 echo "         failure. Verify from a portal/browser client." ;;
+      error:*)   echo "  [PROBLEM] query FAILED (persisted across retries): ${SMOKE#error:}" ;;
+      unparseable) echo "  [info] query returned a non-JSON response (login redirect / HTML / proxy?) — inconclusive." ;;
+      *)         echo "  [info] query result inconclusive." ;;
+    esac
+  fi
+else
+  echo "  (skipped — service definition was not found above.)"
+fi
+echo
+
 # --- ASSESSMENT -----------------------------------------------------------------
 echo "============================================================"
 echo " ASSESSMENT — likely problem(s) and what to do"
@@ -179,12 +271,17 @@ else
     echo "     -> Start it (Server Manager ▶, or admin /start)."
     PROBLEMS=$((PROBLEMS+1))
   fi
-  # service references a CDF provider that isn't registered -> guaranteed failure
-  if [ -n "$DPNAME" ] && ! printf '%s' "$PROVS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$DPNAME"; then
+  # service references a CDF provider that isn't registered -> guaranteed failure.
+  # Only assert absence when the provider list ACTUALLY parsed — otherwise a transient error
+  # would wrongly be reported as "guaranteed failure".
+  if [ "$PROV_PARSE_OK" = "yes" ] && [ -n "$DPNAME" ] && ! printf '%s' "$PROVS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$DPNAME"; then
     echo " * Service references CDF provider '$DPNAME', which is NOT in the registered list above."
     echo "     -> Guaranteed failure. Register that provider (register-provider.sh), or fix the"
     echo "        service's dataProviderName to match a registered provider."
     PROBLEMS=$((PROBLEMS+1))
+  elif [ "$PROV_PARSE_OK" != "yes" ] && [ -n "$DPNAME" ]; then
+    echo " * NOTE: could not read the registered-provider list (transient error / bad token / proxy)."
+    echo "        Cannot confirm whether provider '$DPNAME' is registered — re-run to verify."
   fi
   # not a CDF service -> some advice may not apply
   if [ -n "${PROVIDER:-}" ] && [ "$PROVIDER" != "CUSTOMDATA" ]; then
@@ -194,9 +291,10 @@ else
   # min=0 -> POSSIBLE intermittent-404 cause; escalate only when corroborated (multi-machine)
   if [ "$MININST" = "0" ]; then
     if [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
-      echo " * minInstancesPerNode=0 on a MULTI-machine site ($MACHINE_COUNT) -> likely the intermittent"
-      echo "     404 cause: a round-robin node with no resident instance 404s while another serves."
-      echo "     -> Fix: minInstancesPerNode=1, maxInstancesPerNode>=2 (a warm instance on every node)."
+      echo " * minInstancesPerNode=0 on a MULTI-machine site ($MACHINE_COUNT) -> a plausible intermittent-"
+      echo "     404 cause: a round-robin node with no resident instance can 404 while another serves."
+      echo "     Confirm against the live query above / the per-machine lines / the log before changing it."
+      echo "     -> If corroborated: minInstancesPerNode=1, maxInstancesPerNode>=2 (a warm instance per node)."
       PROBLEMS=$((PROBLEMS+1))
     else
       echo " * minInstancesPerNode=0 -> no instance is kept resident. This CAN cause intermittent"
@@ -230,11 +328,32 @@ else
     echo "     -> If it repeats (e.g. mmsi on a raw event table) features silently collide/drop"
     echo "        in clients — that is NOT a 404, but corrupts the map. Use a unique row id/view."
   fi
-  if [ "$PROBLEMS" -eq 0 ]; then
-    echo " * No blocking ArcGIS-side config problem found (service STARTED; provider registered)."
-    echo "     -> If you still get errors: a federated /query needs a PORTAL token (a server/admin"
-    echo "        token returns 'Invalid token', not a 404), and provider-side Databricks errors"
-    echo "        show up in the 'Custom_data_feeds' log lines."
+  # Final verdict is anchored on the LIVE query, not just config — config can be perfect while
+  # the provider fails to initialize.
+  if [ "$SMOKE_RECOVERED" = "yes" ]; then
+    echo " * INTERMITTENT 404 CONFIRMED — first query 404'd, a retry succeeded. Root cause is the"
+    echo "     min=0 'no warm instance' gap, not a data problem."
+    echo "     -> Fix: set minInstancesPerNode=1, maxInstancesPerNode>=2 (per-service) to keep one warm."
+    PROBLEMS=$((PROBLEMS+1))
+  elif [ "$PROBLEMS" -eq 0 ]; then
+    case "$SMOKE" in
+      ok:*)
+        echo " * HEALTHY — service STARTED, provider registered, and a live read-only query SUCCEEDED"
+        echo "     (features=${SMOKE#ok:}). This service is serving data right now." ;;
+      error:498:*|error:499:*)
+        echo " * Config looks correct; the live query only needs a portal/referer token (a token"
+        echo "     technicality on federated sites, not a data problem). Verify from a portal client." ;;
+      error:*)
+        echo " * WARNING: ArcGIS config looks fine, BUT the live query FAILED (${SMOKE#error:})."
+        echo "     -> THIS is the real failure — provider init / Databricks auth / missing UC grants /"
+        echo "        wrong table or geometry column. Tail the log for 'Custom_data_feeds' lines."
+        PROBLEMS=$((PROBLEMS+1)) ;;
+      *)
+        echo " * No blocking ArcGIS-side config problem found (service STARTED; provider registered),"
+        echo "     but the live query was inconclusive. If you still get errors: a federated /query"
+        echo "     needs a PORTAL token, and provider-side Databricks errors show up in the"
+        echo "     'Custom_data_feeds' log lines." ;;
+    esac
   fi
 fi
 echo "============================================================"
