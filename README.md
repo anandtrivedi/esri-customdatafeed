@@ -9,42 +9,18 @@ A Node.js Custom Data Provider that connects Databricks tables to ArcGIS Server 
 
 One provider is registered once; each Feature Service picks its backend via service parameters.
 
-> **How to read this README**
->
-> **Fastest path:** register the provider once, then run the **[`publish-service.sh` wizard](#quick-start--easy-deploy-recommended)** — no JSON to edit, no manual token. This is the recommended way to publish.
->
-> **Doing it by hand?** [Setup](#setup) is five steps — [get the code & build the package](#step-1--get-the-code-and-build-the-provider-package), [register the provider](#step-2--register-the-provider), [configure the Databricks connection](#step-3--configure-the-databricks-connection), [publish your services](#step-4--publish-your-feature-services), [harden for production](#step-5--harden-for-production). [Manual service creation](#manual-service-creation-admin-rest-api--reference) and everything after it is reference (query params, performance, geometry, env vars, troubleshooting).
->
-> **On Databricks Playground or Claude?** [Section 7](#7-agent-driven-publishing-mcp-server) does the same through an MCP agent.
+> **How to use this guide.** It's one linear install, top to bottom — no competing paths to choose between. Do it once on the ArcGIS Server host and you'll have a live Feature Service. Everything past the [Installation complete](#installation-complete) marker is reference (query params, performance, geometry, env vars, troubleshooting) you can skip until you need it.
 
-## Quick Start — Easy Deploy (recommended)
+**The install, end to end — all of it runs on the ArcGIS Server host:**
 
-Publishing a feature service from a custom data provider isn't yet exposed in the ArcGIS Server Manager GUI — the supported path is the Admin REST API `createService` call with a 15-field JSON payload. The **`publish-service.sh`** wizard does that for you: it prompts one field at a time, mints the admin token itself, lists your workspace profiles, builds the JSON correctly, and creates → starts → verifies the service. Only three one-time setup steps come first.
+- **[Prerequisites](#prerequisites)** — an ArcGIS Server, a Databricks SQL Warehouse, network access, a Databricks token, and (recommended) the Databricks CLI.
+- **[Step 1 — Build the provider package](#step-1--get-the-code-and-build-the-provider-package)** (`.cdpk`) on the server.
+- **[Step 2 — Register the provider](#step-2--register-the-provider)** once, in the ArcGIS Server Manager GUI.
+- **[Step 3 — Create your Databricks credential file](#step-3--configure-the-databricks-connection)** (`.databrickscfg`).
+- **[Step 4 — Publish each table](#step-4--publish-your-feature-services)** as a Feature Service with the `publish-service.sh` wizard.
+- **[Step 5 — Harden for production](#step-5--harden-for-production)**.
 
-**1. Register the provider — GUI, one-time.** In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, upload the `.cdpk`. (No `.cdpk` yet? Build one per [Step 1](#step-1--get-the-code-and-build-the-provider-package).)
-
-**2. Place the Databricks config where the provider reads it.** The provider runs as the **`arcgis`** OS user and reads `~/.databrickscfg` at query time:
-```bash
-sudo cp your-databrickscfg /home/arcgis/.databrickscfg
-sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
-sudo chmod 600 /home/arcgis/.databrickscfg
-```
-Name your workspace section `[DEFAULT]`. Its contents are your workspace host plus either a PAT or an OAuth M2M service principal — see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) for the exact profile format (and for serving more than one workspace).
-
-**3. Run the wizard on the box.** Download [`publish-service.sh`](publish-service.sh), then:
-```bash
-sudo bash publish-service.sh
-```
-Run it **on the ArcGIS Server host**, as **root** (simplest) or the `arcgis` user — root is fine, the script only makes authenticated admin-API calls and can read the config to show the profile pick-list. It runs a preflight (and stops with a clear message if the provider isn't registered or the config isn't in place), auto-detects the registered provider, lists your `.databrickscfg` profiles to pick from, lets you leave the geometry format on **auto-detect**, and shows a review summary before creating. It asks for the connection, workspace, and warehouse **once**, then **publishes as many tables as you want in one session** — after each it asks whether to publish another from the same warehouse — verifying each with a live query and printing its FeatureServer URL.
-
-> **Optional — easier value lookup with the Databricks CLI.** Not required, but if you put the [Databricks CLI](https://github.com/databricks/cli/releases) on the box (a single Go binary — gov/air-gapped sites can mirror the GitHub release through Artifactory), it makes gathering the values the wizard asks for much easier. Using the **same `.databrickscfg` profile** the provider uses:
-> ```bash
-> databricks current-user me --profile DEFAULT                  # confirm the profile authenticates
-> databricks warehouses list --profile DEFAULT                  # find the SQL Warehouse id -> warehouseHttpPath is /sql/1.0/warehouses/<id>
-> databricks tables get catalog.schema.table --profile DEFAULT  # see the geometry column and a numeric id candidate
-> ```
-
-That's the whole path. [Setup](#setup) below documents each stage manually, and [Manual service creation](#manual-service-creation-admin-rest-api--reference) covers the hand-built `createService` JSON for scripting the payload yourself or understanding every parameter. [Section 7](#7-agent-driven-publishing-mcp-server) covers the MCP-agent path.
+Publishing a Feature Service from a custom data provider isn't yet exposed in the ArcGIS Server Manager GUI — the supported path is the Admin REST API `createService` call with a 15-field JSON payload. Step 4's **`publish-service.sh`** wizard does that for you: it prompts one field at a time, mints the admin token itself, lists your workspace profiles, builds the JSON correctly, and creates → starts → verifies the service. Prefer to script the JSON yourself? [Manual service creation](#manual-service-creation-admin-rest-api--reference) documents the raw call. On Databricks Playground or Claude? [Section 7](#7-agent-driven-publishing-mcp-server) does it through an MCP agent.
 
 ## Overview
 
@@ -93,29 +69,46 @@ mcp-server/                   # MCP server: publish/manage CDF feature services 
 
 ## Setup
 
-> **Used the [Quick Start wizard](#quick-start--easy-deploy-recommended)?** You still need [Prerequisites](#prerequisites), [Step 1](#step-1--get-the-code-and-build-the-provider-package) (build the `.cdpk`), [Step 2](#step-2--register-the-provider) (register it), and [Step 3](#step-3--configure-the-databricks-connection) (place `.databrickscfg`). The wizard is [Step 4](#step-4--publish-your-feature-services); it replaces the hand-built [`createService`](#manual-service-creation-admin-rest-api--reference) route.
-
-**Every command in this guide runs on the ArcGIS Server host itself — not on your laptop.** SSH into the box first and stay there for the whole install. That's why the `curl` examples target `https://localhost:6443/...`: `localhost` *is* the ArcGIS Server, because you're already logged into it. (The exceptions are the Enterprise SDK `cdf` CLI and the `referer` token flow, which use `your-server` as a placeholder for the box's external hostname, for the rare case you run them from elsewhere.)
+Work through the five steps in order. They're all done **on the ArcGIS Server host** — the machine where ArcGIS Server is installed. SSH into it first and stay there for the whole install; that's why the occasional `curl` example targets `https://localhost:6443/...` — `localhost` *is* the ArcGIS Server, because you're logged into it.
 
 > **Which user runs what:**
-> - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build, package, and upload work — `git clone`, `npm install`, `zip`, and the `curl` calls to the Admin REST API.
+> - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build and packaging work — `git clone`, `npm install`, `zip`, and `databricks configure`.
 > - **`sudo` is required** for anything that reads or writes under `/opt/arcgis/` (the ArcGIS Server install tree). Editing `init_user_param.sh`, placing `.databrickscfg`, recreating `.env` after a `.cdpk` re-extraction, and tailing logs all need `sudo`.
 > - **`sudo -u arcgis`** is used to start, stop, or restart ArcGIS Server itself, because the server processes run as the `arcgis` OS user. Example: `sudo -u arcgis /opt/arcgis/server/startserver.sh`.
 > - Files you create under `/opt/arcgis/...` should be `chown arcgis:arcgis` so the server can read them.
 
 ### Prerequisites
 
-- **ArcGIS Server 11.4 or later** with Custom Data Feeds enabled. ArcGIS Server includes a Node.js runtime — you do not need to install Node separately. ArcGIS Server 12.0+ is recommended if you want feature editing.
-- **A Databricks SQL Warehouse** with geospatial functions enabled.
-- **Network access from the ArcGIS Server box to your Databricks workspace.** Open these outbound ports from the ArcGIS Server's network (firewall / VPC security group / on-prem ACL):
+Have these five things ready before you start. Each says how to get it.
+
+**1. An ArcGIS Server, version 11.4 or later, with Custom Data Feeds enabled.** ArcGIS Server ships with its own Node.js runtime, so you don't install Node separately. If you want feature *editing* (not just read-only maps), use 12.0 or later.
+
+**2. A Databricks SQL Warehouse.** In your Databricks workspace, go to **SQL Warehouses** in the left sidebar and note (or create) a running warehouse. This is what the provider queries. *(A Lakebase instance is optional — you only need one for very low-latency maps or feature editing. Everything works with just a SQL Warehouse.)*
+
+**3. A Databricks access token (PAT).** This is how the provider logs in to Databricks. You don't need to be a Databricks admin to create one — it's tied to your own account:
+
+   - In your Databricks workspace, click your **name/avatar (top-right) → Settings → Developer**.
+   - Next to **Access tokens**, click **Manage → Generate new token**.
+   - Give it a name (e.g. `arcgis-cdf`), leave the default lifetime, and click **Generate**.
+   - **Copy the token now** (it starts with `dapi…`) — Databricks shows it only once. You'll paste it in Step 3.
+
+**4. Network access from the ArcGIS Server to Databricks.** The ArcGIS Server needs to reach your workspace outbound. If it already has general internet access, you're fine — otherwise ask whoever manages your firewall / VPC / security group to open:
 
   | Destination | Port | Protocol | Used for |
   |---|---|---|---|
-  | `<workspace>.cloud.databricks.com` | 443 | HTTPS | SQL Warehouse queries + all Databricks REST API calls (token mint, Lakebase credential mint, etc.) |
-  | `<lakebase-instance>.database.cloud.databricks.com` | 5432 | PostgreSQL over TLS | Lakebase queries and edits (only if you use the Lakebase backend) |
+  | `<workspace>.cloud.databricks.com` | 443 | HTTPS | SQL Warehouse queries + Databricks API calls |
+  | `<lakebase-instance>.database.cloud.databricks.com` | 5432 | PostgreSQL over TLS | Lakebase queries and edits (only if you use Lakebase) |
 
-  Nothing needs to be opened *inbound* on the Databricks side — Databricks already listens on these ports and gates access via IP allowlists. If your workspace has [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list) enabled, allowlist the ArcGIS Server's outbound IP — otherwise the first query returns `HTTP 403` with no clear error in the ArcGIS Server UI. Apply this **per workspace** if you're connecting to more than one.
-- **Optional:** A Databricks Lakebase instance — only needed for low-latency serving or feature editing.
+  Nothing needs to be opened *inbound* to Databricks. If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add the ArcGIS Server's outbound IP to the allowlist — otherwise the first query fails with `HTTP 403`.
+
+**5. The Databricks CLI (recommended).** A single self-contained program that (a) writes your credential file for you in [Step 3](#step-3--configure-the-databricks-connection) so you never hand-edit config, and (b) makes it easy to look up the values the publish wizard asks for. Install it **on the ArcGIS Server host**:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+  databricks version    # confirm it installed
+  ```
+
+  > **No internet on the server?** The CLI is one static binary with no dependencies. On any connected machine, download the release for the server's OS/architecture from [the CLI releases page](https://github.com/databricks/cli/releases) — or have your platform team mirror that release through your internal artifact repository (Artifactory, Nexus, etc.) — copy the file to the server, unzip it, and move the `databricks` binary somewhere on the `PATH` (e.g. `/usr/local/bin`).
 
 ### Step 1 — Get the code and build the provider package
 
@@ -155,29 +148,29 @@ You now have `databricks-geospatial-provider.cdpk` ready to register.
 
 This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Publishing individual Feature Services against the registered provider is [Step 4](#step-4--publish-your-feature-services).
 
-> **Agent shortcut:** the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool performs the upload/register/update flow for you — including baking `.env` config into the package so upgrades can't wipe it.
+Do this in the **ArcGIS Server Manager** web app — the same admin site you use to manage your server. It needs no command line and no tokens:
 
-Register the `.cdpk` you built in [Step 1](#step-1--get-the-code-and-build-the-provider-package) with **one** of the three methods below — pick the first that fits your environment.
+1. Open **ArcGIS Server Manager** and sign in.
+2. Go to **Site (Server Configuration) → Custom Data Feeds**.
+3. Click **Add Custom Data Provider** and browse to the `databricks-geospatial-provider.cdpk` you built in Step 1.
+4. Confirm. The provider now appears in the Custom Data Feeds list.
 
-#### Method 1 — Server Manager GUI (recommended)
+The **Name** shown in that list — `databricks-geospatial-provider` — is the provider name you'll point Feature Services at later. That's all Step 2 requires.
 
-No token, no curl. In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, browse to the `databricks-geospatial-provider.cdpk` you built and register it. It appears in the Custom Data Feeds list (the **Name** column is the provider name you'll reference when publishing). This is the easiest path and what the [Quick Start](#quick-start--easy-deploy-recommended) assumes.
+<details>
+<summary><b>No access to Server Manager? (advanced alternatives)</b></summary>
 
-#### Method 2 — ArcGIS Enterprise SDK `cdf` CLI
+If you can't use the GUI (automation, or a locked-down box with no admin site), register from the command line instead — pick one:
 
-If the GUI isn't available, install the [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/) (it ships the `cdf` command-line tool) and run:
+**ArcGIS Enterprise SDK `cdf` CLI** — install the [ArcGIS Enterprise SDK](https://developers.arcgis.com/enterprise-sdk/) (it ships the `cdf` tool), then:
 
 ```bash
 cdf register databricks-geospatial-provider.cdpk https://your-server:6443/arcgis/admin
 ```
 
-It prompts for your `siteadmin` credentials and handles the upload + register in one step — no admin token to mint yourself. For self-signed certs, set `NODE_EXTRA_CA_CERTS=/path/to/cert.pem` (or `NODE_TLS_REJECT_UNAUTHORIZED=0`) first.
+It prompts for your `siteadmin` credentials and does the upload + register in one step. For self-signed certs, set `NODE_EXTRA_CA_CERTS=/path/to/cert.pem` (or `NODE_TLS_REJECT_UNAUTHORIZED=0`) first.
 
-#### Method 3 — Admin REST API
-
-The scripted, no-GUI, no-SDK fallback (automation, locked-down boxes). It's the most manual because you mint an ArcGIS admin token yourself — the step users most often trip on. Run these in order on the server:
-
-> **`TOKEN` is an ArcGIS Server admin token — *not* your Databricks PAT.** You mint it from ArcGIS Server with your `siteadmin` credentials. `client=requestip` binds it to your IP so no `Referer` header is needed on these admin calls; if token minting misbehaves, see [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer).
+**Admin REST API** — the fully scripted path. Here `TOKEN` is an *ArcGIS Server admin token* (not your Databricks PAT); `client=requestip` binds it to your IP so no `Referer` header is needed (see [Admin token binding](#admin-token-binding-requestip-vs-referer) if minting misbehaves):
 
 ```bash
 # (a) Mint the admin token (siteadmin login; run on the box, use your real password).
@@ -197,7 +190,11 @@ curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/
   --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
 ```
 
-**Upgrading the provider later** (new code, same provider name): all three methods refuse a plain re-register — *"Custom data provider with name '...' is already registered"*. Rebuild the `.cdpk`, then in the GUI use the provider's **edit/update** action, or via REST upload the new `.cdpk` and call **`update`** instead of `register`:
+**From an agent:** the [MCP server's](#7-agent-driven-publishing-mcp-server) `register_provider` tool does the upload/register/update flow for you — and can bake `.env` config into the package so upgrades can't wipe it.
+
+</details>
+
+**Upgrading the provider later** (new code, same provider name): registering again is refused — *"Custom data provider with name '...' is already registered"*. Rebuild the `.cdpk`, then in the GUI use the provider's **edit/update** action, or via REST upload the new `.cdpk` and call **`update`** instead of `register`:
 
 ```bash
 curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/update?token=$TOKEN&f=json" \
@@ -216,14 +213,34 @@ To retire a provider instead, unregister it by `.cdpk` filename (REST): `.../cus
 
 ### Step 3 — Configure the Databricks connection
 
-The provider authenticates to Databricks with a **`.databrickscfg` profile** — the same file the Databricks CLI uses. Place it where the `arcgis` OS user (the account ArcGIS Server runs as) can read it, at **`/home/arcgis/.databrickscfg`**:
+The provider logs in to Databricks by reading a small credential file called **`.databrickscfg`** — the standard Databricks config file. You don't have to write it by hand: the Databricks CLI from [Prerequisites](#prerequisites) creates it for you.
+
+**Create the file with the CLI.** On the server, run:
 
 ```bash
+databricks configure --token
+```
+
+It asks two questions:
+
+- **Databricks Host** — your workspace URL, e.g. `https://your-workspace.cloud.databricks.com`.
+- **Personal Access Token** — paste the `dapi…` token you generated in [Prerequisites step 3](#prerequisites).
+
+That writes a file named `.databrickscfg` in your home directory with a section called `[DEFAULT]` — exactly what the publish wizard expects. To confirm it works:
+
+```bash
+databricks current-user me    # prints your username if the token and host are good
+```
+
+**Move it where ArcGIS Server can read it.** ArcGIS Server runs as a separate OS user called `arcgis`, which reads the file from its *own* home directory. Copy your file there and lock down its permissions:
+
+```bash
+sudo cp ~/.databrickscfg /home/arcgis/.databrickscfg
 sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
 sudo chmod 600 /home/arcgis/.databrickscfg
 ```
 
-Name your workspace section `[DEFAULT]` so services use it without a `workspace` parameter (this is what the [Step 4](#step-4--publish-your-feature-services) wizard expects). A PAT profile:
+That's Step 3 done. The file looks like this — if you'd rather create it by hand, this is all it needs:
 
 ```ini
 [DEFAULT]
@@ -231,21 +248,7 @@ host  = your-workspace.cloud.databricks.com
 token = dapi_your_pat_here
 ```
 
-For a service principal (OAuth M2M, recommended for production) or multiple workspaces, see [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) just below.
-
-**Single-workspace `.env` alternative.** For a quick single-workspace PAT setup you can instead put three values in the provider's `.env` (secondary to `.databrickscfg`):
-
-```bash
-cp .env.example .env
-```
-
-```bash
-DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
-DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-DATABRICKS_ACCESS_TOKEN=dapi_your_pat_here
-```
-
-Other env vars in [`.env.example`](nodejs-provider/.env.example) (pool sizes, query timeouts, audit log) are operational tuning — leave them at defaults unless you have a reason.
+> **More than one workspace, or a production service principal?** The same file can hold multiple named profiles and supports OAuth machine-to-machine auth instead of a personal token. See [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) below — otherwise skip it; the single `[DEFAULT]` profile is all most deployments need.
 
 #### Multiple Workspaces or OAuth M2M
 
@@ -416,7 +419,7 @@ When you call `generateToken`, the `client` parameter decides what the token is 
 - **`client=requestip` (recommended for the admin calls in this guide).** The token is tied to the IP that requested it, so no `Referer` header is needed on the `/arcgis/admin/...` calls (upload, register, createService, start) — simplest and least error-prone when running curl on the box against `localhost`. This is what [Step 2](#step-2--register-the-provider) uses.
 - **`client=referer`.** The token is tied to a referer URL, and *every* subsequent `/arcgis/admin/...` call must send a `Referer` header that matches the `referer=` value you passed at generation time. Any mismatch returns `HTTP 498 — "Invalid token, ClientID does not match"`, or a JSON error object with no `token` key (which breaks `json.load(...)["token"]` parsing). Use this only if your environment can't rely on a stable request IP.
 
-> **Querying a feature service is different.** The public feature-service `/query` endpoint validates tokens more strictly and may reject a `requestip` token with `HTTP 498`. Query it with a `referer`-bound token **plus a matching `Referer` header** — the [`publish-service.sh` wizard](#quick-start--easy-deploy-recommended) does exactly this for its verification step.
+> **Querying a feature service is different.** The public feature-service `/query` endpoint validates tokens more strictly and may reject a `requestip` token with `HTTP 498`. Query it with a `referer`-bound token **plus a matching `Referer` header** — the [`publish-service.sh` wizard](#step-4--publish-your-feature-services) does exactly this for its verification step.
 
 ```bash
 # requestip — token bound to your IP; no Referer header on these admin calls
@@ -860,7 +863,7 @@ This dumps everything that matters — provider directory contents, env vars, mu
 
 **`HTTP 498 — "Invalid token, ClientID does not match"`**
 - **On admin calls:** you minted the token with `client=referer` but a subsequent admin call sent a missing or mismatched `Referer` header — every call must repeat `-H "Referer: https://your-server:6443"` matching the `referer=` value you passed at generation time. The simplest fix is to mint the token with `client=requestip`, which needs no `Referer` header on the admin calls. See [Admin token binding: `requestip` vs `referer`](#admin-token-binding-requestip-vs-referer).
-- **On a feature-service `/query`:** the query endpoint validates more strictly and rejects `requestip` tokens here. Query with a `referer`-bound token plus a matching `Referer` header (the [`publish-service.sh` wizard](#quick-start--easy-deploy-recommended) handles this for you).
+- **On a feature-service `/query`:** the query endpoint validates more strictly and rejects `requestip` tokens here. Query with a `referer`-bound token plus a matching `Referer` header (the [`publish-service.sh` wizard](#step-4--publish-your-feature-services) handles this for you).
 
 **`HTTP 403` on first query — telling the two flavors apart**
 - `Source IP address X is blocked by Databricks IP ACL` → the workspace's IP access list doesn't include the ArcGIS Server's outbound IP. Fix in the Databricks account console (Workspaces → your workspace → IP access lists). See [Prerequisites](#prerequisites).
