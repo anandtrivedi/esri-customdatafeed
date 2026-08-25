@@ -109,6 +109,87 @@ run_as_arcgis() {
   if [ "$(id -un 2>/dev/null)" = "arcgis" ]; then "$@"; else sudo -u arcgis "$@"; fi
 }
 
+# GovCloud OAuth allowlist domains added to the @databricks/sql driver — the only GovCloud
+# Databricks host suffixes. Widening the allowlist is OUTBOUND-only (it broadens the set of
+# Databricks-owned hosts the driver will OAuth to; it never makes the driver connect anywhere on
+# its own — that's your workspace config), so it broadens a trusted-host set, not attack surface.
+GOVCLOUD_DOMAINS="'.cloud.databricks.mil', '.cloud.databricks.us'"
+
+# All OAuth-allowlist files in a node_modules tree (there can be >1 — cjs/esm copies). No `head`
+# (SIGPIPE under pipefail) — the caller loops.
+find_oauth_managers() {   # $1 = node_modules dir
+  find "$1/@databricks/sql" -type f -name OAuthManager.js -path '*DatabricksOAuth*' 2>/dev/null
+}
+
+# Report one file's awsDomains state by actually PARSING the array (portable, python3-only):
+#   OK       = parses AND contains BOTH GovCloud domains
+#   MISSING  = parses but a GovCloud domain is absent
+#   BADPARSE = the array literal doesn't parse (e.g. sed produced invalid JS)
+#   NOFIND   = no `const awsDomains = [...]` in the file (driver layout changed)
+# re's [^\]]* spans newlines, so multi-line arrays are detected too (sed just won't edit them —
+# then state stays MISSING and the guard fails closed, never a silent bad package).
+_awsdomains_state() {   # $1 = file
+  F="$1" python3 -c "
+import os, re, ast
+s = open(os.environ['F']).read()
+m = re.search(r'const awsDomains = (\[[^\]]*\])', s)
+if not m: print('NOFIND'); raise SystemExit
+try: arr = ast.literal_eval(m.group(1))   # single-quoted JS string array parses as a python list
+except Exception: print('BADPARSE'); raise SystemExit
+need = {'.cloud.databricks.mil', '.cloud.databricks.us'}
+print('OK' if need.issubset(set(arr)) else 'MISSING')
+" 2>/dev/null || echo "BADPARSE"
+}
+
+# Reapply the GovCloud allowlist widening to EVERY allowlist file. Idempotent (skips files already
+# OK) and guarded (only edits a single-line `const awsDomains = [...]`; verifies the result parses
+# with both domains). A plain npm install overwrites node_modules and drops the edit, so this MUST
+# run on every build — guard_govcloud_oauth then proves it took before packaging.
+patch_govcloud_oauth() {   # $1 = node_modules dir
+  local f st any=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    any=1; st=$(_awsdomains_state "$f")
+    case "$st" in
+      OK)      echo "   [ok] GovCloud allowlist already present in ${f#"$1/"}" ;;
+      MISSING)
+        sed -i.govbak "s/\(const awsDomains = \[[^]]*\)\]/\1, ${GOVCLOUD_DOMAINS}]/" "$f" && rm -f "$f.govbak"
+        if [ "$(_awsdomains_state "$f")" = "OK" ]; then echo "   [ok] widened OAuth allowlist (.mil/.us) in ${f#"$1/"}"
+        else echo "   [warn] could not widen ${f#"$1/"} cleanly — the build guard will stop packaging."; fi ;;
+      NOFIND)  echo "   [warn] no 'const awsDomains' in ${f#"$1/"} — driver layout changed; not edited." ;;
+      *)       echo "   [warn] could not read the allowlist in ${f#"$1/"}." ;;
+    esac
+  done <<EOF
+$(find_oauth_managers "$1")
+EOF
+  [ "$any" = "1" ] || echo "   [warn] no @databricks/sql OAuthManager.js found — GovCloud OAuth not applied."
+}
+
+# Fail-loud guard, run right before packaging. Every allowlist file must parse with BOTH GovCloud
+# domains, else the patch was dropped or the layout changed — FAIL rather than ship a .cdpk that
+# breaks OAuth on .mil/.us. If NO allowlist file is found we can't verify: warn loudly but don't
+# block (a commercial or PAT deploy is unaffected; only GovCloud-OAuth from this .cdpk is at risk).
+guard_govcloud_oauth() {   # $1 = node_modules dir
+  local f any=0 bad=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    any=1
+    [ "$(_awsdomains_state "$f")" = "OK" ] || { echo "!! BUILD GUARD FAILED: ${f#"$1/"} — awsDomains must contain BOTH .cloud.databricks.mil and .cloud.databricks.us."; bad=1; }
+  done <<EOF
+$(find_oauth_managers "$1")
+EOF
+  if [ "$bad" = "1" ]; then
+    echo "   This .cdpk would fail OAuth M2M on GovCloud (.mil/.us). NOT packaging. If @databricks/sql"
+    echo "   changed its allowlist layout, patch_govcloud_oauth() needs updating."
+    exit 1
+  fi
+  if [ "$any" = "0" ]; then
+    echo "   [warn] could not locate the @databricks/sql OAuth allowlist to verify GovCloud support —"
+    echo "          build continues (commercial/PAT unaffected), but GovCloud OAuth from this .cdpk is"
+    echo "          UNVERIFIED. Check the driver, or use a PAT on GovCloud."
+  fi
+}
+
 # Where this script lives (repo root); the provider source is under nodejs-provider/.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 NODEJS_DIR="$SCRIPT_DIR/nodejs-provider"
@@ -205,6 +286,34 @@ PY
     echo "   [warn] could not read cdconfig.json from '$CDPK_PATH' — using '$PROVIDER_NAME'."
     echo "          If that's wrong, the register-vs-update choice below may be incorrect."
   fi
+  # Warn-only: does this prebuilt package carry the GovCloud OAuth allowlist? (We don't edit a
+  # package someone handed us — just flag it so a .mil/.us deploy isn't surprised.)
+  _gov=$(python3 - "$CDPK_PATH" <<'PY' 2>/dev/null || true
+import sys, re, ast, zipfile
+try:
+    z = zipfile.ZipFile(sys.argv[1])
+    files = [n for n in z.namelist() if n.endswith('OAuthManager.js') and 'DatabricksOAuth' in n]
+    if not files:
+        print('unknown'); raise SystemExit
+    need = {'.cloud.databricks.mil', '.cloud.databricks.us'}
+    ok = True
+    for n in files:
+        m = re.search(r'const awsDomains = (\[[^\]]*\])', z.read(n).decode('utf-8', 'replace'))
+        try: arr = set(ast.literal_eval(m.group(1))) if m else set()
+        except Exception: arr = set()
+        if not need.issubset(arr): ok = False
+    print('yes' if ok else 'no')
+except Exception:
+    print('unknown')
+PY
+)
+  case "$_gov" in
+    no)      echo "   [info] this .cdpk does NOT carry the GovCloud OAuth allowlist (both .mil AND .us) —"
+             echo "          OAuth M2M will fail on GovCloud hosts. Fine for commercial hosts or PAT auth;"
+             echo "          to target GovCloud with OAuth, rebuild with option 1 (which adds it)." ;;
+    unknown) echo "   [info] could not verify the GovCloud OAuth allowlist in this .cdpk (no allowlist file"
+             echo "          found, or unreadable). If deploying to GovCloud with OAuth, rebuild via option 1." ;;
+  esac
 else
   # --- build the .cdpk ----------------------------------------------------------
   command -v zip >/dev/null 2>&1 || { echo "!! 'zip' is required to build a .cdpk (choose option 2 to register a prebuilt one instead)."; exit 1; }
@@ -233,6 +342,13 @@ else
     fi
   fi
   [ "$_npm_ok" = "1" ] || { echo "!! Could not run 'npm install' with either the bundled Node or system npm. Install deps manually, then re-run and choose option 2."; exit 1; }
+
+  # npm install just (re)wrote node_modules, dropping any prior driver edit. Reapply the GovCloud
+  # OAuth allowlist and then verify it before packaging — this is what makes a build work on
+  # .mil/.us and prevents silently shipping a GovCloud-broken .cdpk. Harmless for commercial.
+  echo "-> ensuring GovCloud OAuth allowlist (.mil/.us) in @databricks/sql..."
+  patch_govcloud_oauth "$NODEJS_DIR/node_modules"
+  guard_govcloud_oauth "$NODEJS_DIR/node_modules"
 
   # Keep the .env excludes EXACTLY as written. A wildcard like '*.env*' would also strip
   # node_modules files whose names contain ".env" (e.g. @dabh/diagnostics/.../process.env.js),
