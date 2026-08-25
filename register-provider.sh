@@ -259,6 +259,24 @@ if [ "$PKGMODE" = "2" ]; then
     *.cdpk) : ;;
     *) echo "   [warn] '$CDPK_PATH' does not end in .cdpk — continuing anyway." ;;
   esac
+  # If a checksum file sits next to the package (build-release.sh / a GitHub Release ships one),
+  # verify integrity automatically — a truncated or tampered download would register as a broken
+  # provider. Read-only; no flag needed.
+  if [ -f "$CDPK_PATH.sha256" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then _got=$(sha256sum "$CDPK_PATH" | awk '{print $1}')
+    else _got=$(shasum -a 256 "$CDPK_PATH" 2>/dev/null | awk '{print $1}'); fi
+    _want=$(awk '{print $1}' "$CDPK_PATH.sha256" | head -1)
+    if [ -n "$_got" ] && [ "$_got" = "$_want" ]; then
+      echo "   [ok] sha256 verified against $(basename "$CDPK_PATH").sha256"
+    elif [ -n "$_got" ]; then
+      echo "   !! sha256 MISMATCH — '$CDPK_PATH' does not match its .sha256 (corrupt/tampered download?)."
+      echo "      got : $_got"
+      echo "      want: $_want"
+      echo "      Aborting."; exit 1
+    else
+      echo "   [warn] no sha256sum/shasum available — skipping the integrity check."
+    fi
+  fi
   # The SELECTED package's own cdconfig.json is the source of truth for the provider name — the
   # repo's cdconfig.json (read earlier) may differ or be absent. Reading it from the archive
   # keeps the register-vs-update decision, the provider directory, and the outage warnings
