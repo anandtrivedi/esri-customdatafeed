@@ -129,7 +129,7 @@ elif [ "${#PROVS[@]}" -gt 1 ]; then
   i=1; for p in "${PROVS[@]}"; do echo "           $i) $p"; i=$((i+1)); done
   echo "           0) type a name manually"
   ask "         which provider to use" "1" PPICK
-  if printf '%s' "$PPICK" | grep -qE '^[0-9]+$' && [ "$PPICK" -ge 1 ] && [ "$PPICK" -le "${#PROVS[@]}" ]; then
+  if printf '%s' "$PPICK" | grep -qE '^[1-9][0-9]*$' && [ "$PPICK" -ge 1 ] && [ "$PPICK" -le "${#PROVS[@]}" ]; then
     PROVIDER_NAME="${PROVS[$((PPICK-1))]}"
   else
     ask "         Provider name" "$PROVIDER_NAME" PROVIDER_NAME
@@ -291,7 +291,10 @@ echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
 # If the `databricks` CLI is on PATH and the chosen profile authenticates, use it to
 # pick a warehouse by name and to suggest the geometry/id columns. Otherwise, manual.
 CLI_OK=0
-[ -r "$CFG" ] && export DATABRICKS_CONFIG_FILE="$CFG"
+# Point the CLI at the same config the provider uses. Export when the file EXISTS
+# (even if unreadable by the current user) so the CLI reports a clear "permission
+# denied" instead of silently falling back to its own default config location.
+[ -f "$CFG" ] && export DATABRICKS_CONFIG_FILE="$CFG"
 if command -v databricks >/dev/null 2>&1 && [ -n "$WORKSPACE" ]; then
   if timeout 15 databricks current-user me --profile "$WORKSPACE" -o json >/dev/null 2>&1; then
     CLI_OK=1
@@ -373,6 +376,7 @@ while true; do
     while :; do ask "Lakebase table name" "" LB_TABLE; [ -n "$LB_TABLE" ] && break; echo "   !! Table name is required."; done
     while :; do ask "Geometry column" "" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
     while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    ask "SRID" "4326" SRID
     ask "Enable editing (add / update / delete)? (y/n)" "y" ED
     case "$ED" in y|Y|yes|YES) EDITING="true"; CAPABILITIES="Query,Editing";; *) EDITING="false"; CAPABILITIES="Query";; esac
   fi
@@ -397,6 +401,7 @@ while true; do
     printf "  %-13s %s\n" "Schema.table" "$LB_SCHEMA.$LB_TABLE"
     printf "  %-13s %s\n" "Geometry col" "$GEOM_COL"
     printf "  %-13s %s\n" "ID field"     "$ID_FIELD"
+    printf "  %-13s %s\n" "SRID"         "$SRID"
     printf "  %-13s %s\n" "Editing"      "$EDITING"
   fi
   echo

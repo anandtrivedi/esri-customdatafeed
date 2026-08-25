@@ -5,13 +5,13 @@ A Node.js Custom Data Provider that connects Databricks tables to ArcGIS Server 
 | Backend | Engine | Best for | Capabilities |
 |---------|--------|----------|-------------|
 | **Lakehouse** | Databricks SQL Warehouse | Large-scale analytics, complex queries across massive tables | Query |
-| **Lakebase** | Databricks Managed PostgreSQL + PostGIS | Low-latency serving (14–16ms), interactive maps, feature editing | Query + Editing |
+| **Lakebase** | Databricks Managed PostgreSQL + PostGIS | Low-latency serving (sub-200ms spatial queries), interactive maps, feature editing | Query + Editing |
 
 One provider is registered once; each Feature Service picks its backend via service parameters.
 
 > **How to use this guide.** It's one linear install, top to bottom — no competing paths to choose between. Do it once on the ArcGIS Server host and you'll have a live Feature Service. Everything past the [Installation complete](#installation-complete) marker is reference (query params, performance, geometry, env vars, troubleshooting) you can skip until you need it.
 
-**The install, end to end — all of it runs on the ArcGIS Server host:**
+**The install, end to end — everything runs on the ArcGIS Server host, except registering the provider in the browser-based Server Manager (Step 2):**
 
 - **[Prerequisites](#prerequisites)** — an ArcGIS Server, a Databricks SQL Warehouse, network access, a Databricks token, and (recommended) the Databricks CLI.
 - **[Step 1 — Build the provider package](#step-1--get-the-code-and-build-the-provider-package)** (`.cdpk`) on the server.
@@ -69,7 +69,7 @@ mcp-server/                   # MCP server: publish/manage CDF feature services 
 
 ## Setup
 
-Work through the five steps in order. They're all done **on the ArcGIS Server host** — the machine where ArcGIS Server is installed. SSH into it first and stay there for the whole install; that's why the occasional `curl` example targets `https://localhost:6443/...` — `localhost` *is* the ArcGIS Server, because you're logged into it.
+Work through the five steps in order. Almost everything runs **on the ArcGIS Server host** — the machine where ArcGIS Server is installed — so SSH into it first and stay there. (The one exception is registering the provider in Step 2, which you do in the browser-based Server Manager; if that browser is on a different machine, Step 2 tells you how to get the file there.) That's why the occasional `curl` example targets `https://localhost:6443/...` — `localhost` *is* the ArcGIS Server, because you're logged into it.
 
 > **Which user runs what:**
 > - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build and packaging work — `git clone`, `npm install`, `zip`, and `databricks configure`.
@@ -147,7 +147,7 @@ Then package the provider as a **`.cdpk`** (a zip archive with a different exten
 # node_modules files whose names contain ".env" (e.g. @dabh/diagnostics/adapters/process.env.js,
 # a transitive dep of @databricks/sql) — the broken package then fails provider validation at
 # register time with "Cannot find module '../adapters/process.env'".
-cd esri-customdatafeed/nodejs-provider   # if not already there
+# Run this from the nodejs-provider directory — the same one where you just ran npm install.
 zip -r databricks-geospatial-provider.cdpk \
   cdconfig.json package.json package-lock.json src/ node_modules/ \
   -x '.env' '.env.*' 'test/*' '*.md'
@@ -167,6 +167,8 @@ Do this in the **ArcGIS Server Manager** web app — the same admin site you use
 4. Confirm. The provider now appears in the Custom Data Feeds list.
 
 The **Name** shown in that list — `databricks-geospatial-provider` — is the provider name you'll point Feature Services at later. That's all Step 2 requires.
+
+> **Opening Server Manager from your laptop, not the server?** That's normal — Server Manager is a web app. But its **Add Custom Data Provider** file picker sees only the machine the *browser* runs on, and you built the `.cdpk` on the server in Step 1. Copy it down to that machine first, e.g. `scp user@arcgis-host:~/esri-customdatafeed/nodejs-provider/databricks-geospatial-provider.cdpk .`, then browse to the local copy. (No browser access at all? Use the command-line alternatives below.)
 
 <details>
 <summary><b>No access to Server Manager? (advanced alternatives)</b></summary>
@@ -250,7 +252,7 @@ sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
 sudo chmod 600 /home/arcgis/.databrickscfg
 ```
 
-That's Step 3 done. The file looks like this — if you'd rather create it by hand, this is all it needs:
+That's the PAT path done. The file looks like this — if you'd rather create it by hand, this is all a PAT profile needs:
 
 ```ini
 [DEFAULT]
@@ -258,7 +260,18 @@ host  = your-workspace.cloud.databricks.com
 token = dapi_your_pat_here
 ```
 
-> **More than one workspace, or a production service principal?** The same file can hold multiple named profiles and supports OAuth machine-to-machine auth instead of a personal token. See [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) below — otherwise skip it; the single `[DEFAULT]` profile is all most deployments need.
+**Chose a service principal (Prerequisites Option B) instead of a PAT?** Everything above is identical — same file at `/home/arcgis/.databrickscfg`, same `chown`/`chmod` — only the profile *contents* differ. `databricks configure --token` is PAT-only, so hand-write the `[DEFAULT]` section with your `client_id`/`client_secret` in place of `token`:
+
+```ini
+[DEFAULT]
+host          = your-workspace.cloud.databricks.com
+client_id     = <service-principal-client-id>
+client_secret = <service-principal-secret>
+```
+
+Either way, verify before moving on: `databricks current-user me` (add `--profile DEFAULT` if it doesn't pick up the default automatically). That's Step 3 done.
+
+> **More than one workspace?** The same file can hold multiple named profiles, and each Feature Service picks one via a `workspace` parameter. See [Multiple Workspaces or OAuth M2M](#multiple-workspaces-or-oauth-m2m) below — otherwise skip it; a single `[DEFAULT]` profile is all most deployments need.
 
 #### Multiple Workspaces or OAuth M2M
 
@@ -388,9 +401,10 @@ To bypass automatic token minting and use a fixed credential (testing, CI), set 
 
 This is what you do for **each** Databricks table you want to expose as a Feature Service. The **[`publish-service.sh`](publish-service.sh)** wizard is the recommended way — it builds the `createService` payload for you, so there's no JSON to hand-edit and no admin token to mint yourself.
 
-Run it **on the ArcGIS Server box**, as **root** (simplest) or the `arcgis` user:
+Run it **on the ArcGIS Server box**, as **root** (simplest) or the `arcgis` user. The script lives at the **repository root** — not in the `nodejs-provider/` subdirectory you were in for Steps 1–2 — so `cd` back up first:
 
 ```bash
+cd ~/esri-customdatafeed        # the repo root you cloned in Step 1
 sudo bash publish-service.sh
 ```
 
