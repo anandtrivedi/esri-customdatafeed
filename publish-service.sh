@@ -78,12 +78,29 @@ trap 'exit 143' TERM
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
   local prompt="$1" def="$2" __var="$3" ans=""
+  # A failed read means EOF / closed stdin (Ctrl-D, a pipe that ran dry, or a non-interactive
+  # invocation). Do NOT silently fall through to the default — that would let EOF "accept" a
+  # default-yes confirmation and create/modify a service unattended. Abort instead.
   if [ -n "$def" ]; then
-    read -r -p "  $prompt [$def]: " ans; ans="${ans:-$def}"
+    if ! read -r -p "  $prompt [$def]: " ans; then echo; echo "!! Input closed (EOF) — aborting; nothing was changed." >&2; exit 130; fi
+    ans="${ans:-$def}"
   else
-    read -r -p "  $prompt: " ans
+    if ! read -r -p "  $prompt: " ans; then echo; echo "!! Input closed (EOF) — aborting; nothing was changed." >&2; exit 130; fi
   fi
   printf -v "$__var" '%s' "$ans"
+}
+
+# ask for a whole number in [lo,hi]; loops until valid. Prevents junk like SRID=abc or
+# port=5432x from being embedded into the service JSON and failing later with an opaque error.
+ask_int() {   # prompt default varname lo hi
+  local _p="$1" _d="$2" _v="$3" _lo="$4" _hi="$5" _x=""
+  while :; do
+    ask "$_p" "$_d" _x
+    if printf '%s' "$_x" | grep -qE '^[0-9]+$' && [ "$_x" -ge "$_lo" ] && [ "$_x" -le "$_hi" ]; then
+      printf -v "$_v" '%s' "$_x"; return
+    fi
+    echo "   !! Enter a whole number between $_lo and $_hi."
+  done
 }
 
 # --- mint an ArcGIS admin token -------------------------------------------------
@@ -119,7 +136,8 @@ echo "-- ArcGIS connection --"
 ask "Admin URL (on the box use https://localhost:6443)" "https://localhost:6443" SERVER
 ask "URL context (arcgis for :6443; the web-adaptor name otherwise)" "arcgis" CTX
 ask "Admin username" "siteadmin" ADMIN_USER
-read -r -s -p "  Admin password: " ADMIN_PASS; echo
+if ! read -r -s -p "  Admin password: " ADMIN_PASS; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+echo
 echo
 
 # --- get admin token -----------------------------------------------------------
@@ -247,7 +265,11 @@ svc = {
     "serviceName": os.environ["SERVICE_NAME"],
     "type": "FeatureServer", "capabilities": g("CAPABILITIES", "Query"), "provider": "CUSTOMDATA",
     "clusterName": "default",
-    "minInstancesPerNode": 0, "maxInstancesPerNode": 0, "instancesPerContainer": 1,
+    # Per-service instance sizing (chosen interactively; see the "Instance sizing" prompt).
+    # min=0 is a shared pool with no warm instance and can cause an intermittent "404 then
+    # works on refresh"; min>=1 keeps a warm instance per node. Defaults: min=1, max=2.
+    "minInstancesPerNode": int(g("MIN_INST", "1") or 1),
+    "maxInstancesPerNode": int(g("MAX_INST", "2") or 2), "instancesPerContainer": 1,
     "maxWaitTime": 60, "maxStartupTime": 300, "maxIdleTime": 1800, "maxUsageTime": 600,
     "loadBalancing": "ROUND_ROBIN", "isolationLevel": "HIGH",
     "configuredState": "STARTED", "keepAliveInterval": 1800,
@@ -379,7 +401,7 @@ for w in (d if isinstance(d,list) else []):
   done
 else
   while :; do ask "Lakebase host (…database.<region>.cloud.databricks.com)" "" LB_HOST; [ -n "$LB_HOST" ] && break; echo "   !! Lakebase host is required."; done
-  ask "Lakebase port" "5432" LB_PORT
+  ask_int "Lakebase port" "5432" LB_PORT 1 65535
   while :; do ask "Lakebase database name" "" LB_DB; [ -n "$LB_DB" ] && break; echo "   !! Database name is required."; done
 fi
 echo
@@ -505,6 +527,25 @@ offer_lakebase_grants() {
   echo "  (Lakebase is a separate Postgres engine — these are not run by this wizard.)"
 }
 
+# --- instance sizing (per-service; applied to each service published this session) --------
+# minInstancesPerNode / maxInstancesPerNode are PER-SERVICE settings baked into each service's
+# definition — a value here affects ONLY the services you publish now, never other services on
+# the server. Warm-by-default (min=1) avoids the intermittent-404 class; 0 is allowed for a
+# memory-lean shared pool.
+echo "-- Instance sizing (per-service — applies to each service you publish this session) --"
+echo "  min instances = warm instances kept ready on each node:"
+echo "     0 = shared pool, none kept warm (lowest memory; can cause an intermittent"
+echo "         '404, then works on refresh' under load or on multi-node sites)"
+echo "     1 = one warm instance per node (recommended — avoids that 404 class)"
+ask_int "min instances per node (0 or more)" "1" MIN_INST 0 50
+while :; do
+  ask_int "max instances per node (>= min, at least 1)" "2" MAX_INST 1 100
+  [ "$MAX_INST" -ge "$MIN_INST" ] && break
+  echo "   !! max ($MAX_INST) must be >= min ($MIN_INST)."
+done
+echo "  -> min=$MIN_INST  max=$MAX_INST  (per service)"
+echo
+
 # --- publish loop: one table per pass, reusing connection/workspace/warehouse --
 while true; do
   echo "------------------------------------------------------------"
@@ -535,16 +576,16 @@ while true; do
       1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
     esac
     while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "$SUG_ID" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
-    ask "SRID" "4326" SRID
+    ask_int "SRID (EPSG code)" "4326" SRID 1 999999
     ask "Time column (optional; blank if none)" "" TIME_COL
-    ask "Max record count per page" "2000" MAXREC
+    ask_int "Max record count per page" "2000" MAXREC 1 100000
     CAPABILITIES="Query"; EDITING=""
   else
     ask "Lakebase schema" "public" LB_SCHEMA
     while :; do ask "Lakebase table name" "" LB_TABLE; [ -n "$LB_TABLE" ] && break; echo "   !! Table name is required."; done
     while :; do ask "Geometry column" "" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
     while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
-    ask "SRID" "4326" SRID
+    ask_int "SRID (EPSG code)" "4326" SRID 1 999999
     ask "Enable editing (add / update / delete)? (y/n)" "y" ED
     case "$ED" in y|Y|yes|YES) EDITING="true"; CAPABILITIES="Query,Editing";; *) EDITING="false"; CAPABILITIES="Query";; esac
   fi
@@ -554,6 +595,7 @@ while true; do
   printf "  %-13s %s\n" "Service name" "$SERVICE_NAME"
   printf "  %-13s %s\n" "Backend"      "$BACKEND"
   printf "  %-13s %s\n" "Provider"     "$PROVIDER_NAME"
+  printf "  %-13s %s\n" "Instances"    "min=$MIN_INST max=$MAX_INST (per node)"
   printf "  %-13s %s\n" "Workspace"    "${WORKSPACE:-(env-var default)}"
   if [ "$BACKEND" = "lakehouse" ]; then
     printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
@@ -588,7 +630,7 @@ while true; do
   echo
 
   export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC \
-         LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME
+         LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME MIN_INST MAX_INST
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
@@ -701,8 +743,12 @@ print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev
         echo "       readable by anyone who can reach $SERVER. Source-side least-privilege grants"
         echo "       do NOT prevent this. If that exposure is unintended, require authentication in"
         echo "       ArcGIS Server security, or restrict the service/folder permissions, before use."
-      else
+      elif [ "$ANONSTATE" = "protected" ]; then
         echo "   [ok] anonymous query refused — the service requires authentication."
+      else
+        echo "   [info] could not determine anonymous exposure — the token-less probe returned no"
+        echo "          parseable answer (timeout / HTML / redirect). Do NOT assume it's protected;"
+        echo "          verify manually whether the service is readable without a token."
       fi
     elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
       echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
