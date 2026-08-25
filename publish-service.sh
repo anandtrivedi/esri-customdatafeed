@@ -77,7 +77,7 @@ trap 'exit 143' TERM
 
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
-  local prompt="$1" def="$2" __var="$3" ans
+  local prompt="$1" def="$2" __var="$3" ans=""
   if [ -n "$def" ]; then
     read -r -p "  $prompt [$def]: " ans; ans="${ans:-$def}"
   else
@@ -410,29 +410,39 @@ offer_lakehouse_grants() {
     echo "  (Databricks CLI not available — skipping grant help. Grant USE CATALOG / USE SCHEMA /"
     echo "   SELECT on $TABLE to the provider's identity manually; see the README.)"; return; }
 
-  local cat sch tbl safe=1 part
+  # Validate the three identifier parts to a strict charset BEFORE building any SQL. If any
+  # part is outside [A-Za-z0-9_] we emit NO statements at all (an unusual name could carry a
+  # backtick/quote/semicolon; we won't hand the operator injectable SQL to copy or run).
+  local cat sch tbl part
   IFS='.' read -r cat sch tbl <<< "$TABLE"
   for part in "$cat" "$sch" "$tbl"; do
-    printf '%s' "$part" | grep -qE '^[A-Za-z0-9_]+$' || safe=0
+    if ! printf '%s' "$part" | grep -qE '^[A-Za-z0-9_]+$'; then
+      echo "  ($TABLE has characters outside [A-Za-z0-9_]; not generating grant SQL for it."
+      echo "   Grant USE CATALOG / USE SCHEMA / SELECT on it manually via a UC admin.)"
+      return
+    fi
   done
 
   resolve_grant_principal
-  # Must be a single email (user) or a UUID (service-principal app-id). Anything else —
-  # empty, a group name, a list — aborts the offer so we never widen exposure.
-  if ! printf '%s' "$GRANT_PRINCIPAL" | grep -qE '^[^@[:space:],]+@[^@[:space:],]+$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
-    echo "  (Could not resolve a single principal to grant to (got: '${GRANT_PRINCIPAL:-<empty>}')."
+  # Must be a single email (user) or a UUID (service-principal app-id) in a SAFE charset —
+  # no backtick/quote/semicolon/space possible. Anything else (empty, group, list) aborts,
+  # so we never widen exposure or emit injectable SQL.
+  if ! printf '%s' "$GRANT_PRINCIPAL" | grep -qE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+    echo "  (Could not resolve a single well-formed principal to grant to (got: '${GRANT_PRINCIPAL:-<empty>}')."
     echo "   Skipping grant help — grant USE CATALOG / USE SCHEMA / SELECT on $TABLE manually.)"
     return
   fi
+  # Defense in depth: even though the charset forbids it, double any backtick before quoting.
+  local pesc="${GRANT_PRINCIPAL//\`/\`\`}"
 
   # TABLE vs VIEW — reuse the table_type the CLI already exposes.
   local objkind="TABLE" ttype
   ttype=$(timeout 15 databricks tables get "$TABLE" --profile "${WORKSPACE:-DEFAULT}" -o json 2>/dev/null | python3 -c "import sys,json;print((json.load(sys.stdin).get('table_type') or '').upper())" 2>/dev/null)
   case "$ttype" in *VIEW*) objkind="VIEW";; esac
 
-  local g1="GRANT USE CATALOG ON CATALOG \`$cat\` TO \`$GRANT_PRINCIPAL\`;"
-  local g2="GRANT USE SCHEMA ON SCHEMA \`$cat\`.\`$sch\` TO \`$GRANT_PRINCIPAL\`;"
-  local g3="GRANT SELECT ON $objkind \`$cat\`.\`$sch\`.\`$tbl\` TO \`$GRANT_PRINCIPAL\`;"
+  local g1="GRANT USE CATALOG ON CATALOG \`$cat\` TO \`$pesc\`;"
+  local g2="GRANT USE SCHEMA ON SCHEMA \`$cat\`.\`$sch\` TO \`$pesc\`;"
+  local g3="GRANT SELECT ON $objkind \`$cat\`.\`$sch\`.\`$tbl\` TO \`$pesc\`;"
 
   echo
   echo "  -- Least-privilege grants --"
@@ -442,32 +452,46 @@ offer_lakehouse_grants() {
   echo "  Note: the principal also needs CAN USE on the SQL Warehouse — set that in the"
   echo "  warehouse Permissions UI (or permissions API). It is not a SQL grant and is not run here."
 
-  if [ "$safe" != 1 ]; then
-    echo "  (Table name has characters outside [A-Za-z0-9_] — not offering to run these"
-    echo "   automatically; copy them into a Databricks SQL editor or hand to a UC admin.)"
+  # Warehouse id must be a clean token before we'll auto-run against it.
+  local wid="${WAREHOUSE_PATH##*/}"
+  if ! printf '%s' "$wid" | grep -qE '^[A-Za-z0-9]+$'; then
+    echo "  (Warehouse id '$wid' doesn't look valid — not offering to run automatically; apply the statements manually.)"
     return
   fi
 
   ask "Attempt to run these three grants now with your CLI credentials? (y/N)" "n" DOGRANT
   case "$DOGRANT" in y|Y|yes|YES) : ;; *) echo "  (not run — the statements above are yours to apply)"; return;; esac
 
-  local wid="${WAREHOUSE_PATH##*/}" stmt state body
+  local stmt state body
   for stmt in "$g1" "$g2" "$g3"; do
     echo "   -> $stmt"
     body=$(python3 -c "import json,sys;print(json.dumps({'warehouse_id':sys.argv[1],'statement':sys.argv[2],'wait_timeout':'30s'}))" "$wid" "$stmt")
     state=$(timeout 45 databricks api post /api/2.0/sql/statements --profile "${WORKSPACE:-DEFAULT}" --json "$body" 2>/dev/null \
       | python3 -c "import sys,json;print((json.load(sys.stdin).get('status') or {}).get('state') or '')" 2>/dev/null)
-    if [ "$state" = "SUCCEEDED" ]; then
-      echo "      ok"
-    else
-      echo "      !! not applied (state='${state:-error}') — you likely lack GRANT rights on this object."
-      echo "      Hand the statements above to a Unity Catalog admin to run. Continuing."
-      break
-    fi
+    case "$state" in
+      SUCCEEDED)
+        echo "      ok" ;;
+      PENDING|RUNNING)
+        echo "      submitted; final state '$state' not confirmed within the wait window —"
+        echo "      it may still complete. Verify this grant in Unity Catalog. Continuing." ;;
+      *)
+        echo "      !! not applied (state='${state:-error}') — you likely lack GRANT rights on this object."
+        echo "      Hand the statements above to a Unity Catalog admin to run. Continuing."
+        break ;;
+    esac
   done
 }
 
 offer_lakebase_grants() {
+  # Emit-only, but still refuse to build SQL from identifiers outside [A-Za-z0-9_] — an
+  # embedded double-quote would let a copied statement target something unintended.
+  if ! printf '%s' "$LB_SCHEMA" | grep -qE '^[A-Za-z0-9_]+$' || ! printf '%s' "$LB_TABLE" | grep -qE '^[A-Za-z0-9_]+$'; then
+    echo
+    echo "  (Lakebase schema/table name has characters outside [A-Za-z0-9_]; not generating"
+    echo "   grant SQL. Grant USAGE on the schema + SELECT on the table (plus INSERT/UPDATE/DELETE"
+    echo "   if editing) to the provider's Postgres role manually.)"
+    return
+  fi
   echo
   echo "  -- Lakebase grants (emit only — run in the Lakebase SQL editor as the DB owner) --"
   echo "  Replace <role> with the Postgres role the provider connects as:"
@@ -570,9 +594,13 @@ while true; do
   OK=0
   if [ "$STATUS" = "success" ]; then
     echo "   created."; OK=1
-  elif printf '%s' "$CREATE" | grep -qiE "already exists|already exist in"; then
-    echo "   a service named '$SERVICE_NAME' already exists — continuing to start + verify."
-    echo "   (If you meant to change its settings, delete it first and re-run.)"; OK=1
+  elif printf '%s' "$CREATE" | grep -qiE "already exists|exists in folder"; then
+    echo "   !! A service named '$SERVICE_NAME' already exists on this server."
+    echo "      NOT starting or modifying it — it may be an unrelated service pointing at a"
+    echo "      different table, and starting it could expose that data. If you meant to"
+    echo "      republish, delete the existing service first (Server Manager, or the admin"
+    echo "      'delete' endpoint) and re-run, or choose a different name."
+    OK=0
   else
     echo "!! createService did not succeed. Response:"
     printf '%s\n' "$CREATE"
