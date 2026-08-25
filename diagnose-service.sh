@@ -58,10 +58,20 @@ print($2)" 2>/dev/null || true; }
 echo "============================================================"
 echo " ArcGIS CDF service diagnostic (READ-ONLY — makes no changes)"
 echo "============================================================"
-ask "Admin URL" "https://localhost:6443" SERVER
-ask "URL context" "arcgis" CTX
-ask "Admin username" "siteadmin" ADMINUSER
-if ! read -rs -p "  Admin password: " PW; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi; echo
+# Auth-input handoff (used by setup.sh): use the CDF_ADMIN_* env vars if present (password from a
+# mode-600 file, never argv/env) so a router can collect the login once; else prompt as before.
+if [ -n "${CDF_ADMIN_PASSFILE:-}" ] && [ -f "${CDF_ADMIN_PASSFILE:-}" ]; then
+  SERVER="${CDF_ADMIN_URL:-https://localhost:6443}"
+  CTX="${CDF_ADMIN_CTX:-arcgis}"
+  ADMINUSER="${CDF_ADMIN_USER:-siteadmin}"
+  PW="$(cat "$CDF_ADMIN_PASSFILE")"
+  echo "  (using the ArcGIS connection provided by setup.sh: $ADMINUSER @ $SERVER/$CTX)"
+else
+  ask "Admin URL" "https://localhost:6443" SERVER
+  ask "URL context" "arcgis" CTX
+  ask "Admin username" "siteadmin" ADMINUSER
+  if ! read -rs -p "  Admin password: " PW; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi; echo
+fi
 ask "Service name (use folder/name if it's in a folder)" "TEST_FeatureService_Databricks" SVC
 echo
 

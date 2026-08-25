@@ -133,11 +133,22 @@ echo " Databricks CDF — Publish Feature Service"
 echo "============================================================"
 echo
 echo "-- ArcGIS connection --"
-ask "Admin URL (on the box use https://localhost:6443)" "https://localhost:6443" SERVER
-ask "URL context (arcgis for :6443; the web-adaptor name otherwise)" "arcgis" CTX
-ask "Admin username" "siteadmin" ADMIN_USER
-if ! read -r -s -p "  Admin password: " ADMIN_PASS; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
-echo
+# Auth-input handoff (used by setup.sh): if the CDF_ADMIN_* env vars are set, take the connection
+# from them (password from a mode-600 file, never argv/env) instead of prompting — so a router can
+# collect the admin login ONCE. Unset => prompt exactly as before (standalone use is unchanged).
+if [ -n "${CDF_ADMIN_PASSFILE:-}" ] && [ -f "${CDF_ADMIN_PASSFILE:-}" ]; then
+  SERVER="${CDF_ADMIN_URL:-https://localhost:6443}"
+  CTX="${CDF_ADMIN_CTX:-arcgis}"
+  ADMIN_USER="${CDF_ADMIN_USER:-siteadmin}"
+  ADMIN_PASS="$(cat "$CDF_ADMIN_PASSFILE")"
+  echo "  (using the ArcGIS connection provided by setup.sh: $ADMIN_USER @ $SERVER/$CTX)"
+else
+  ask "Admin URL (on the box use https://localhost:6443)" "https://localhost:6443" SERVER
+  ask "URL context (arcgis for :6443; the web-adaptor name otherwise)" "arcgis" CTX
+  ask "Admin username" "siteadmin" ADMIN_USER
+  if ! read -r -s -p "  Admin password: " ADMIN_PASS; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+  echo
+fi
 echo
 
 # --- get admin token -----------------------------------------------------------
