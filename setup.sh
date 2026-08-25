@@ -61,6 +61,14 @@ jget() { RESP="$1" python3 -c "import os,json
 try: d=json.loads(os.environ['RESP'])
 except Exception: raise SystemExit
 print($2)" 2>/dev/null || true; }
+ask_int() {   # prompt default varname lo hi
+  local _p="$1" _d="$2" _v="$3" _lo="$4" _hi="$5" _x=""
+  while :; do
+    ask "$_p" "$_d" _x
+    if printf '%s' "$_x" | grep -qE '^[0-9]+$' && [ "$_x" -ge "$_lo" ] && [ "$_x" -le "$_hi" ]; then printf -v "$_v" '%s' "$_x"; return; fi
+    echo "   !! enter a whole number between $_lo and $_hi."
+  done
+}
 
 echo "============================================================"
 echo " Databricks CDF — guided setup for ArcGIS Server"
@@ -295,7 +303,14 @@ toggle_privacy() {
   st=$(jget "$resp" 'd.get("status") or ""')
   if [ "$st" = "success" ]; then
     [ "$isallowed" = "false" ] && echo "  [ok] '$svc' set PRIVATE (anonymous denied)." || echo "  [ok] '$svc' set PUBLIC (anonymous allowed)."
-    [ "$FED_STATE" = "federated" ] && echo "  [note] federated server — Portal item sharing is the authoritative control; set it there too."
+    if [ "$FED_STATE" = "federated" ]; then
+      echo "  [!] FEDERATED server — this server-level change is NOT the authoritative control here."
+      echo "      To actually change visibility, set the Portal item's sharing:"
+      echo "      In Portal ($FED_URL): Content > the '$svc' item > Share >"
+      [ "$isallowed" = "false" ] && echo "        UNCHECK 'Everyone (public)' (and 'All org' for fully private)." \
+                                 || echo "        CHECK 'Everyone (public)' to make it publicly visible."
+      echo "      (Menu option 'F' prints these steps again anytime.)"
+    fi
     # confirm with a token-less probe
     local anon as
     anon=$("${CURL[@]}" --max-time 20 -G "$ADMIN_URL/$ADMIN_CTX/rest/services/$svc/FeatureServer/0/query" --data-urlencode "where=1=1" --data-urlencode "resultRecordCount=1" --data-urlencode "f=json")
@@ -304,6 +319,77 @@ toggle_privacy() {
   else
     echo "  !! could not change permissions (status='${st:-error}'): $(printf '%s' "$resp" | head -c 200)"
   fi
+}
+
+# --- edit an existing service's instance sizing IN PLACE (no delete/republish) ---
+# Changes minInstancesPerNode / maxInstancesPerNode / maxIdleTime via the admin 'edit' endpoint,
+# preserving the service's identity, URL, and Portal item — the safe way to fix the min=0
+# intermittent-404 or tune warm capacity on an already-published service.
+edit_sizing() {
+  local svc cur found cmin cmax cidle nmin nmax nidle newjson resp st
+  ask "Service name to resize (folder/name if foldered)" "" svc
+  [ -n "$svc" ] || { echo "  (no service name — skipped)"; return; }
+  mint_admin_token
+  cur=$("${CURL[@]}" --max-time 30 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+  found=$(jget "$cur" "'no' if (not isinstance(d,dict) or d.get('status')=='error' or 'error' in d) else 'yes'")
+  [ "$found" = "yes" ] || { echo "  !! service '$svc' not found (or unreadable): $(jget "$cur" 'd.get("messages") or (d.get("error") or {}).get("message") or "?"')"; return; }
+  cmin=$(jget "$cur" 'd.get("minInstancesPerNode")'); cmax=$(jget "$cur" 'd.get("maxInstancesPerNode")'); cidle=$(jget "$cur" 'd.get("maxIdleTime")')
+  echo "  current: minInstancesPerNode=$cmin  maxInstancesPerNode=$cmax  maxIdleTime=${cidle}s"
+  ask_int "new min instances per node (0 = shared pool; 1+ keeps a warm instance)" "${cmin:-1}" nmin 0 50
+  while :; do ask_int "new max instances per node (>= min, at least 1)" "${cmax:-2}" nmax 1 100; [ "$nmax" -ge "$nmin" ] && break; echo "   !! max must be >= min ($nmin)."; done
+  ask_int "maxIdleTime seconds (how long a warm instance survives idle)" "${cidle:-1800}" nidle 60 86400
+  # Modify the FULL service JSON and POST it back to /edit (the endpoint replaces the definition).
+  newjson=$(CUR="$cur" NMIN="$nmin" NMAX="$nmax" NIDLE="$nidle" python3 -c "
+import os,json
+d=json.loads(os.environ['CUR'])
+for k in ('status','permissions','iteminfo'):    # drop read-only echoes the edit endpoint rejects
+    d.pop(k, None)
+d['minInstancesPerNode']=int(os.environ['NMIN']); d['maxInstancesPerNode']=int(os.environ['NMAX']); d['maxIdleTime']=int(os.environ['NIDLE'])
+print(json.dumps(d))" 2>/dev/null)
+  [ -n "$newjson" ] || { echo "  !! could not build the edited definition."; return; }
+  echo "  applying: min=$nmin max=$nmax maxIdleTime=${nidle}s ..."
+  resp=$("${CURL[@]}" --max-time 60 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/edit" \
+    --data-urlencode "service=$newjson" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+  st=$(jget "$resp" 'd.get("status") or ""')
+  if [ "$st" = "success" ]; then
+    # read back to confirm the change took (the edit usually restarts the service to apply it)
+    local vr
+    vr=$("${CURL[@]}" --max-time 30 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+    echo "  [ok] edited — now: min=$(jget "$vr" 'd.get("minInstancesPerNode")') max=$(jget "$vr" 'd.get("maxInstancesPerNode")') maxIdleTime=$(jget "$vr" 'd.get("maxIdleTime")')s"
+    echo "  (identity/URL/Portal item are unchanged — no republish needed.)"
+  else
+    echo "  !! edit did not succeed (status='${st:-error}'): $(printf '%s' "$resp" | head -c 300)"
+    echo "  Manual fallback: in Server Manager, open $svc > Pooling, set Min/Max instances, Save."
+  fi
+}
+
+# --- federated help: exact steps when the automated verify/lock-down can't apply -
+federated_help() {
+  echo
+  echo "== Federated ArcGIS Enterprise — specific steps =="
+  echo "  This server is federated to Portal: ${FED_URL:-<owningSystemUrl>}"
+  echo "  On a federated server two things differ from standalone, and the automated checks here"
+  echo "  can't fully cover them — do these by hand:"
+  echo
+  echo "  1) VERIFY a service actually serves data (REST /query needs a PORTAL token, not the"
+  echo "     server admin token this tool mints). Either:"
+  echo "     a) In Portal ($FED_URL): Content > find the service item > open it > add to a new Map."
+  echo "        If the layer draws, the service works."
+  echo "     b) Or mint a Portal token and query with it (run on the box; use a PORTAL account):"
+  echo "        PT=\$(curl -sk '$FED_URL/sharing/rest/generateToken' \\"
+  echo "              --data-urlencode 'username=<portalUser>' --data-urlencode 'password=<pw>' \\"
+  echo "              --data-urlencode 'referer=$FED_URL' --data-urlencode 'f=json' \\"
+  echo "              | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"token\"])')"
+  echo "        curl -sk '$ADMIN_URL/$ADMIN_CTX/rest/services/<svc>/FeatureServer/0/query' \\"
+  echo "              --data-urlencode 'where=1=1' --data-urlencode 'resultRecordCount=1' \\"
+  echo "              --data-urlencode \"token=\$PT\" --data-urlencode 'f=json'"
+  echo
+  echo "  2) Make a service PRIVATE. On federated, access is governed by PORTAL ITEM SHARING —"
+  echo "     the server-level 'esriEveryone' deny (menu option 6) is NOT authoritative here."
+  echo "     In Portal ($FED_URL): Content > find the service item > Share >"
+  echo "     UNCHECK 'Everyone (public)' (and 'All org' if it should be private). That is the"
+  echo "     authoritative control on a federated server."
+  echo
 }
 
 # --- main loop -------------------------------------------------------------------
@@ -323,7 +409,8 @@ while true; do
   echo "  4) Diagnose a feature service (read-only)"
   echo "  5) Full first-time setup (configure -> register -> publish)$local_note"
   echo "  6) Make an existing service private / public"
-  echo "  7) Re-run detection      8) Re-enter the ArcGIS admin login"
+  echo "  9) Change a service's instance sizing (min/max/idle) — no republish"
+  echo "  7) Re-run detection      8) Re-enter the ArcGIS admin login$( [ "$FED_STATE" = federated ] && echo '      F) Federated: how to verify / lock down a service' )"
   echo "  q) Quit"
   echo "  (Any step failing? Each maps to a script you can run directly — see the message it prints —"
   echo "   and to a matching manual step in the repo README.)"
@@ -349,8 +436,10 @@ while true; do
        run_child publish-service.sh      || echo "-> publish did not complete — run publish-service.sh again, or see the README's Step 4."
        detect ;;
     6) toggle_privacy; detect ;;
+    9) edit_sizing; detect ;;
     7) detect ;;
     8) relogin; detect ;;
+    F|f) federated_help ;;
     q|Q|quit|exit) break ;;
     *) echo "  (unrecognized choice)";;
   esac
