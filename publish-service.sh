@@ -165,6 +165,14 @@ fi
 echo "   ok (token ${TOKEN:0:10}...)."
 echo
 
+# Detect federation. A federated ArcGIS Server has owningSystemUrl set — and on a federated
+# server, service access is governed by PORTAL item sharing, NOT the server's esriEveryone
+# principal. This changes what the 'private' Advanced option can actually guarantee (below).
+FEDERATED=0
+FEDINFO=$("${CURL[@]}" --max-time 20 "$SERVER/$CTX/rest/info" --data-urlencode "f=json" -G 2>/dev/null)
+OWNING=$(printf '%s' "$FEDINFO" | python3 -c "import sys,json;print((json.load(sys.stdin).get('owningSystemUrl') or '').strip())" 2>/dev/null)
+if [ -n "$OWNING" ]; then FEDERATED=1; echo "   [info] federated ArcGIS Enterprise detected (Portal: $OWNING)"; echo; fi
+
 # --- PREFLIGHT: verify prerequisites before asking for any service details -----
 # Runs on invoke. Hard-stops on things that guarantee failure (no provider
 # registered); warns on things it cannot fully confirm (config file permissions).
@@ -269,11 +277,26 @@ svc = {
     # min=0 is a shared pool with no warm instance and can cause an intermittent "404 then
     # works on refresh"; min>=1 keeps a warm instance per node. Defaults: min=1, max=2.
     "minInstancesPerNode": int(g("MIN_INST", "1") or 1),
-    "maxInstancesPerNode": int(g("MAX_INST", "2") or 2), "instancesPerContainer": 1,
-    "maxWaitTime": 60, "maxStartupTime": 300, "maxIdleTime": 1800, "maxUsageTime": 600,
+    "maxInstancesPerNode": int(g("MAX_INST", "2") or 2),
+    # maxIdleTime is operator-tunable via Advanced options; default 1800s.
+    "maxIdleTime": int(g("MAX_IDLE", "1800") or 1800),
+    # NOTE: the 'private' field here is IGNORED by ArcGIS createService (verified live — it echoes
+    # back false regardless). Anonymous access is controlled AFTER creation via the permissions
+    # API (deny esriEveryone); publish-service.sh does that when Advanced -> private is chosen.
+    "private": False,
+    # --- LOCKED: tested provider defaults — NOT exposed in the wizard. Changing them ranges from
+    #     unsupported to silently harmful, with no operator upside:
+    #       disableCaching="true"    false => ArcGIS caches responses => "live" data served STALE
+    #       instancesPerContainer=1  the CDF Node provider is single-threaded per instance
+    #       isolationLevel="HIGH"    keeps clean per-service process isolation (LOW shares one
+    #                                process across instances => cross-service state/global bugs)
+    #       loadBalancing            CDF has no clean sticky-session support
+    #       forwardUserIdentity      provider authenticates as its own .databrickscfg identity
+    "instancesPerContainer": 1,
+    "maxWaitTime": 60, "maxStartupTime": 300, "maxUsageTime": 600,
     "loadBalancing": "ROUND_ROBIN", "isolationLevel": "HIGH",
-    "configuredState": "STARTED", "keepAliveInterval": 1800,
-    "private": False, "isDefault": False,
+    "configuredState": g("CREATE_STATE", "STARTED"), "keepAliveInterval": 1800,
+    "isDefault": False,
     "properties": {"disableCaching": "true"},
     "jsonProperties": {"customDataProviderInfo": {
         "forwardUserIdentity": False,
@@ -546,6 +569,30 @@ done
 echo "  -> min=$MIN_INST  max=$MAX_INST  (per service)"
 echo
 
+# --- advanced options (opt-in; defaults reproduce current behavior) --------------
+# Progressive disclosure: the happy path is the prompts above. Only two extra knobs are safe to
+# expose — both are OPERATIONAL policy the operator owns and that fail visibly when wrong:
+#   private     — list/expose the service or not (a security lever; the post-publish anonymous
+#                 probe remains the source of truth, since server + folder security also matter).
+#   maxIdleTime — how long a warm instance survives idle before shutdown (pairs with min/max).
+# Everything else in the createService envelope is a provider runtime CONTRACT — see the locked
+# block in build_service_json(). Applied to each service published this session.
+PRIVATE="false"; MAX_IDLE="1800"
+ask "Configure advanced options (visibility, idle timeout)? (y/N)" "n" ADV
+case "$ADV" in
+  y|Y|yes|YES)
+    echo "  'private' hides the service from anonymous listing/use. NOTE: this is one lever —"
+    echo "  server-wide security and folder permissions also apply, so always confirm with the"
+    echo "  anonymous-access check printed after publishing."
+    ask "Mark each service PRIVATE (require authentication)? (y/N)" "n" PRIV
+    case "$PRIV" in y|Y|yes|YES) PRIVATE="true";; *) PRIVATE="false";; esac
+    ask_int "maxIdleTime — seconds a warm instance survives idle before shutdown" "1800" MAX_IDLE 60 86400
+    echo "  -> private=$PRIVATE  maxIdleTime=${MAX_IDLE}s"
+    ;;
+  *) echo "  -> using defaults (public listing, maxIdleTime=1800s)";;
+esac
+echo
+
 # --- publish loop: one table per pass, reusing connection/workspace/warehouse --
 while true; do
   echo "------------------------------------------------------------"
@@ -596,6 +643,7 @@ while true; do
   printf "  %-13s %s\n" "Backend"      "$BACKEND"
   printf "  %-13s %s\n" "Provider"     "$PROVIDER_NAME"
   printf "  %-13s %s\n" "Instances"    "min=$MIN_INST max=$MAX_INST (per node)"
+  printf "  %-13s %s\n" "Visibility"   "$([ "$PRIVATE" = "true" ] && echo "private (auth required)" || echo "public") | maxIdleTime=${MAX_IDLE}s"
   printf "  %-13s %s\n" "Workspace"    "${WORKSPACE:-(env-var default)}"
   if [ "$BACKEND" = "lakehouse" ]; then
     printf "  %-13s %s\n" "Warehouse"    "$WAREHOUSE_PATH"
@@ -629,8 +677,13 @@ while true; do
   if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; else offer_lakebase_grants; fi
   echo
 
+  # Fail-closed privacy: a PRIVATE service is created STOPPED, anonymous access is denied and
+  # verified, and only THEN is it started — so it is never both running and world-readable.
+  # Public services create STARTED as before.
+  if [ "$PRIVATE" = "true" ]; then CREATE_STATE="STOPPED"; else CREATE_STATE="STARTED"; fi
   export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC \
-         LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME MIN_INST MAX_INST
+         LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME MIN_INST MAX_INST \
+         PRIVATE MAX_IDLE CREATE_STATE
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
@@ -655,6 +708,39 @@ while true; do
 
   if [ "$OK" = "1" ]; then
     echo
+    # FAIL-CLOSED PRIVACY: a private service was created STOPPED. Deny anonymous access and verify
+    # it BEFORE starting, so there is never a window where it is running and world-readable. The
+    # createService 'private' field is ignored by ArcGIS; denying the esriEveryone principal is the
+    # real lever on a standalone server. If the deny fails, we DO NOT start it (fail closed).
+    if [ "$PRIVATE" = "true" ]; then
+      echo "-> restricting access before start (denying anonymous 'esriEveryone')..."
+      PERM=$("${CURL[@]}" --max-time 30 -X POST "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/permissions/add" \
+        --data-urlencode "principal=esriEveryone" --data-urlencode "isAllowed=false" \
+        --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+      PERM_STATUS=$(printf '%s' "$PERM" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status') or '')" 2>/dev/null)
+      if [ "$PERM_STATUS" = "success" ]; then
+        echo "   [ok] anonymous ('esriEveryone') access denied."
+        echo "   [note] this ONLY removes anonymous access — it does not grant your users. Grant the"
+        echo "          authorized ArcGIS roles/users access separately (Server Manager, or"
+        echo "          permissions/add with isAllowed=true)."
+        if [ "$FEDERATED" = "1" ]; then
+          echo "   [!] FEDERATED server: the authoritative access control here is PORTAL ITEM SHARING,"
+          echo "       not this server-level deny. Set the service's Portal item to NOT shared with"
+          echo "       'Everyone (public)'. Note: a federated server's /query requires a token"
+          echo "       regardless, so the anonymous check below will say 'protected' either way —"
+          echo "       that does NOT confirm your Portal sharing is correct. Verify in Portal."
+        fi
+      else
+        echo "   !! FAILED to restrict access (status='${PERM_STATUS:-?}'): $(printf '%s' "$PERM" | head -c 300)"
+        echo "      You requested PRIVATE, so the service is being LEFT STOPPED (not published publicly)."
+        echo "      Fix access in Server Manager (deny 'esriEveryone'), then start it — or delete and re-run."
+        OK=0
+      fi
+      echo
+    fi
+  fi
+
+  if [ "$OK" = "1" ]; then
     echo "-> starting service..."
     START_RESP=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
       --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
@@ -739,12 +825,25 @@ except Exception: print('unknown'); sys.exit()
 print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev/null || echo "unknown")
       if [ "$ANONSTATE" = "open" ]; then
         echo
-        echo "   !!  ANONYMOUS ACCESS: this service answered a query with NO token — its rows are"
-        echo "       readable by anyone who can reach $SERVER. Source-side least-privilege grants"
-        echo "       do NOT prevent this. If that exposure is unintended, require authentication in"
-        echo "       ArcGIS Server security, or restrict the service/folder permissions, before use."
+        if [ "$PRIVATE" = "true" ]; then
+          echo "   !!!  YOU REQUESTED PRIVATE, BUT THE SERVICE IS STILL ANONYMOUSLY READABLE with NO"
+          echo "        token. The esriEveryone deny did not fully take effect — most likely a FOLDER or"
+          echo "        root-level grant is re-opening it. Check the folder's permissions in Server"
+          echo "        Manager and deny 'esriEveryone' there too. Do NOT treat this service as private."
+        else
+          echo "   !!  ANONYMOUS ACCESS: this service answered a query with NO token — its rows are"
+          echo "       readable by anyone who can reach $SERVER. Source-side least-privilege grants"
+          echo "       do NOT prevent this. If that exposure is unintended, re-run with Advanced ->"
+          echo "       private, or restrict the service/folder permissions in ArcGIS Server security."
+        fi
       elif [ "$ANONSTATE" = "protected" ]; then
-        echo "   [ok] anonymous query refused — the service requires authentication."
+        if [ "$PRIVATE" = "true" ] && [ "$FEDERATED" = "1" ]; then
+          echo "   [ok] anonymous query refused — BUT this is a federated server, where /query needs a"
+          echo "        token regardless, so this does NOT confirm your deny worked. Verify the item's"
+          echo "        Portal sharing is not public."
+        else
+          echo "   [ok] anonymous query refused — the service requires authentication."
+        fi
       else
         echo "   [info] could not determine anonymous exposure — the token-less probe returned no"
         echo "          parseable answer (timeout / HTML / redirect). Do NOT assume it's protected;"
