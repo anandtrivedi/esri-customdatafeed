@@ -415,12 +415,23 @@ ArcGIS Server reads a startup script (typically at `/opt/arcgis/server/usr/init_
 
 ```bash
 # /opt/arcgis/server/usr/init_user_param.sh
-export DATABRICKS_CONFIG_FILE=/home/arcgis/.databrickscfg   # explicit path to credentials
-export DATABRICKS_MAX_RECORD_COUNT=2000                      # optional tuning
-export ENABLE_AUDIT_LOG=false                                # optional tuning
+
+# Path to the Databricks credential file (host + token or OAuth M2M).
+# Required if the arcgis user's home directory isn't /home/arcgis.
+export DATABRICKS_CONFIG_FILE=/home/arcgis/.databrickscfg
+
+# Default SQL Warehouse HTTP path.
+# Required unless every Feature Service sets warehouseHttpPath explicitly
+# (the publish-service.sh wizard sets it per-service, so this is a fallback).
+export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+
+# Optional tuning (leave at defaults unless you have a reason to change)
+# export DATABRICKS_MAX_RECORD_COUNT=2000
+# export DATABRICKS_QUERY_TIMEOUT=120000
+# export ENABLE_AUDIT_LOG=false
 ```
 
-Restart ArcGIS Server after editing `init_user_param.sh`. Credentials themselves (host, token, warehouse path) belong in `.databrickscfg` — not here — so they're in one place and never duplicated.
+Restart ArcGIS Server after editing `init_user_param.sh`. Host and token credentials stay in `.databrickscfg` — not here — so they're in one place and never duplicated across config files.
 
 #### Admin token binding: `requestip` vs `referer`
 
