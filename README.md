@@ -85,12 +85,23 @@ Have these five things ready before you start. Each says how to get it.
 
 **2. A Databricks SQL Warehouse.** In your Databricks workspace, go to **SQL Warehouses** in the left sidebar and note (or create) a running warehouse. This is what the provider queries. *(A Lakebase instance is optional — you only need one for very low-latency maps or feature editing. Everything works with just a SQL Warehouse.)*
 
-**3. A Databricks access token (PAT).** This is how the provider logs in to Databricks. You don't need to be a Databricks admin to create one — it's tied to your own account:
+**3. Databricks credentials — PAT or Service Principal (pick one).**
+
+*Option A — Personal Access Token (PAT).* Simplest for a single-person deployment. Tied to your own account — no admin rights needed:
 
    - In your Databricks workspace, click your **name/avatar (top-right) → Settings → Developer**.
    - Next to **Access tokens**, click **Manage → Generate new token**.
    - Give it a name (e.g. `arcgis-cdf`), leave the default lifetime, and click **Generate**.
    - **Copy the token now** (it starts with `dapi…`) — Databricks shows it only once. You'll paste it in Step 3.
+
+*Option B — Service Principal (SP) with OAuth M2M.* Recommended for production and shared deployments — a machine identity that doesn't depend on any individual's account and auto-refreshes its tokens:
+
+   - In the **Databricks account console**, go to **Service Principals** and create a new SP (or use an existing one).
+   - Assign the SP to your workspace and generate an **OAuth secret** — note the `client_id` and `client_secret`.
+   - Grant the SP **CAN USE** on the SQL Warehouse.
+   - You'll enter `client_id` and `client_secret` instead of a token in Step 3.
+
+If you're not sure which to use, start with a PAT — it's easier to set up and you can switch to a service principal later without changing any Feature Service definitions.
 
 **4. Network access from the ArcGIS Server to Databricks.** The ArcGIS Server needs to reach your workspace outbound. If it already has general internet access, you're fine — otherwise ask whoever manages your firewall / VPC / security group to open:
 

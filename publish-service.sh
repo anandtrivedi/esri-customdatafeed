@@ -25,7 +25,16 @@
 #
 set -uo pipefail   # deliberately NOT -e: we handle and explain errors ourselves.
 
+# --- verify required tools are present (air-gapped: no external downloads) ----
+for _tool in python3 curl; do
+  command -v "$_tool" >/dev/null 2>&1 || { echo "!! Required tool '$_tool' not found. Install it before running this script."; exit 1; }
+done
+
 PROVIDER_NAME="databricks-geospatial-provider"
+
+# Always clean up password temp files, even on Ctrl-C or kill.
+_tmppass=""; _tmppass2=""
+trap 'rm -f "${_tmppass}" "${_tmppass2}"' EXIT INT TERM
 
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
@@ -50,16 +59,24 @@ read -r -s -p "  Admin password: " ADMIN_PASS; echo
 echo
 
 # --- get admin token -----------------------------------------------------------
+# NOTE: curl uses -k (skip TLS cert verification) because ArcGIS Server ships with a
+# self-signed cert by default. When run as documented — on the box against localhost:6443
+# — this is safe (loopback, no network path to intercept). If you run this script from a
+# remote host against a routed network address, supply --cacert /path/to/arcgis-ca.pem
+# and remove -k for those calls. The admin password itself never appears in process args
+# (it goes via a temp file), but an unverified TLS connection can expose it in transit.
 echo "-> requesting admin token (client=requestip)..."
-TOKEN_RESP=$(curl -sk "$SERVER/$CTX/admin/generateToken" \
+_tmppass=$(mktemp); chmod 600 "$_tmppass"; printf '%s' "$ADMIN_PASS" > "$_tmppass"
+TOKEN_RESP=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
   --data-urlencode "username=$ADMIN_USER" \
-  --data-urlencode "password=$ADMIN_PASS" \
+  --data-urlencode "password@$_tmppass" \
   --data-urlencode "client=requestip" \
   --data-urlencode "f=json")
-TOKEN=$(printf '%s' "$TOKEN_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+rm -f "$_tmppass"
+TOKEN=$(printf '%s' "$TOKEN_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
   echo "!! No token was returned. The server said:"
-  printf '%s\n' "$TOKEN_RESP" | head -c 700; echo
+  printf '%s\n' "$TOKEN_RESP" | head -c 2000; echo
   echo
   echo "   Common causes:"
   echo "   - HTML / 'Could not access any server machines' / a redirect  => you went through the"
@@ -78,7 +95,7 @@ echo
 echo "== Preflight =="
 echo "  [ok]   ArcGIS admin reachable, token acquired"
 
-PROV_JSON=$(curl -sk "$SERVER/$CTX/admin/services/types/customdataproviders" \
+PROV_JSON=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
   --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 PROV_PARSE_OK=$(printf '%s' "$PROV_JSON" | python3 -c "import sys,json; json.load(sys.stdin); print('yes')" 2>/dev/null)
 PROVS=()
@@ -99,9 +116,12 @@ if [ "${#PROVS[@]}" -eq 1 ]; then
 elif [ "${#PROVS[@]}" -gt 1 ]; then
   echo "  [ok]   multiple CDF providers registered:"
   i=1; for p in "${PROVS[@]}"; do echo "           $i) $p"; i=$((i+1)); done
+  echo "           0) type a name manually"
   ask "         which provider to use" "1" PPICK
   if printf '%s' "$PPICK" | grep -qE '^[0-9]+$' && [ "$PPICK" -ge 1 ] && [ "$PPICK" -le "${#PROVS[@]}" ]; then
     PROVIDER_NAME="${PROVS[$((PPICK-1))]}"
+  else
+    ask "         Provider name" "$PROVIDER_NAME" PROVIDER_NAME
   fi
   echo "         using: $PROVIDER_NAME"
 elif [ "$PROV_PARSE_OK" = "yes" ]; then
@@ -115,12 +135,31 @@ else
 fi
 
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
-if [ -r "$CFG" ]; then
-  echo "  [ok]   Databricks config readable: $CFG"
+if [ -f "$CFG" ]; then
+  echo "  [ok]   Databricks config found: $CFG"
+  # Ownership check — must be arcgis so the provider process can read it.
+  CFG_OWNER=$(stat -c '%U' "$CFG" 2>/dev/null || true)
+  CFG_PERMS=$(stat -c '%a' "$CFG" 2>/dev/null || true)
+  if [ -n "$CFG_OWNER" ] && [ "$CFG_OWNER" != "arcgis" ]; then
+    echo "  [WARN] $CFG is owned by '$CFG_OWNER', not 'arcgis' — the provider will fail to read it."
+    echo "         Fix: sudo chown arcgis:arcgis $CFG"
+  else
+    echo "  [ok]   owner: ${CFG_OWNER:-unknown}"
+  fi
+  if [ -n "$CFG_PERMS" ] && [ "$CFG_PERMS" != "600" ]; then
+    echo "  [WARN] $CFG permissions are $CFG_PERMS, expected 600."
+    echo "         Fix: sudo chmod 600 $CFG"
+  else
+    echo "  [ok]   permissions: ${CFG_PERMS:-unknown}"
+  fi
+  if [ ! -s "$CFG" ]; then
+    echo "  [WARN] $CFG is empty — add a [DEFAULT] profile before publishing."
+  fi
 else
-  echo "  [warn] could not read $CFG (may just be a permissions/other-user check — often fine)."
-  echo "         The provider runs as 'arcgis' and reads it at query time; ensure it exists there"
-  echo "         (chown arcgis:arcgis, chmod 600) or set DATABRICKS_CONFIG_FILE in init_user_param.sh."
+  echo "  [FAIL] $CFG not found."
+  echo "         The provider runs as 'arcgis' and must read this file at query time."
+  echo "         Create it:  sudo -u arcgis databricks configure --token"
+  echo "         Or copy:    sudo cp ~/.databrickscfg $CFG && sudo chown arcgis:arcgis $CFG && sudo chmod 600 $CFG"
 fi
 echo
 
@@ -213,7 +252,7 @@ echo "-- Data source (used for every table you publish this session) --"
 # Workspace profile pick-list read from the SAME .databrickscfg the provider uses.
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
 PROFILES=""
-[ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]')
+[ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]' | tr -d '\r')
 if [ -n "$PROFILES" ]; then
   echo "  Workspace profiles found in $CFG:"
   declare -a PROFARR=(); n=1
@@ -223,7 +262,8 @@ if [ -n "$PROFILES" ]; then
   done <<< "$PROFILES"
   echo "    0) type a different name / use env-var default"
   ask "choose a number" "1" PICK
-  if printf '%s' "$PICK" | grep -qE '^[0-9]+$' && [ -n "${PROFARR[$PICK]:-}" ]; then
+  # Reject leading zeros (08/09 trigger bash octal error); reject non-numeric and out-of-range.
+  if printf '%s' "$PICK" | grep -qE '^[1-9][0-9]*$' && [ -n "${PROFARR[$PICK]:-}" ]; then
     WORKSPACE="${PROFARR[$PICK]}"
   else
     ask "Workspace profile name (blank = env-var default)" "" WORKSPACE
@@ -242,9 +282,11 @@ echo "  -> workspace = ${WORKSPACE:-(env-var default)}"
 CLI_OK=0
 [ -r "$CFG" ] && export DATABRICKS_CONFIG_FILE="$CFG"
 if command -v databricks >/dev/null 2>&1 && [ -n "$WORKSPACE" ]; then
-  if databricks current-user me --profile "$WORKSPACE" -o json >/dev/null 2>&1; then
+  if timeout 15 databricks current-user me --profile "$WORKSPACE" -o json >/dev/null 2>&1; then
     CLI_OK=1
     echo "  [ok]   Databricks CLI detected + authenticated (profile '$WORKSPACE') — auto-detect on"
+  else
+    echo "  [info] Databricks CLI present but auth check timed out or failed — falling back to manual entry"
   fi
 fi
 
@@ -252,7 +294,7 @@ if [ "$BACKEND" = "lakehouse" ]; then
   WAREHOUSE_PATH=""
   if [ "$CLI_OK" = 1 ]; then
     WIDS=(); WNAMES=()
-    while IFS=$'\t' read -r wid wname; do [ -n "$wid" ] && WIDS+=("$wid") && WNAMES+=("$wname"); done < <(databricks warehouses list --profile "$WORKSPACE" -o json 2>/dev/null | python3 -c "
+    while IFS=$'\t' read -r wid wname; do [ -n "$wid" ] && WIDS+=("$wid") && WNAMES+=("$wname"); done < <(timeout 15 databricks warehouses list --profile "$WORKSPACE" -o json 2>/dev/null | python3 -c "
 import sys,json
 try: d=json.load(sys.stdin)
 except Exception: sys.exit()
@@ -264,7 +306,7 @@ for w in (d if isinstance(d,list) else []):
       i=1; for w in "${WNAMES[@]}"; do echo "    $i) $w"; i=$((i+1)); done
       echo "    0) type the http path manually"
       ask "  choose a number" "1" WPICK
-      if printf '%s' "$WPICK" | grep -qE '^[0-9]+$' && [ "$WPICK" -ge 1 ] && [ "$WPICK" -le "${#WIDS[@]}" ]; then
+      if printf '%s' "$WPICK" | grep -qE '^[1-9][0-9]*$' && [ "$WPICK" -ge 1 ] && [ "$WPICK" -le "${#WIDS[@]}" ]; then
         WAREHOUSE_PATH="/sql/1.0/warehouses/${WIDS[$((WPICK-1))]}"
         echo "  -> $WAREHOUSE_PATH"
       fi
@@ -299,7 +341,7 @@ while true; do
     done
     SUG_GEOM=""; SUG_ID=""
     if [ "$CLI_OK" = 1 ]; then
-      read -r SUG_GEOM SUG_ID < <(databricks tables get "$TABLE" --profile "$WORKSPACE" -o json 2>/dev/null | guess_cols) || true
+      read -r SUG_GEOM SUG_ID < <(timeout 15 databricks tables get "$TABLE" --profile "$WORKSPACE" -o json 2>/dev/null | guess_cols) || true
       [ "$SUG_GEOM" = "_" ] && SUG_GEOM=""
       [ "$SUG_ID" = "_" ] && SUG_ID=""
       [ -n "$SUG_GEOM$SUG_ID" ] && echo "  (auto-detected from the table — geometry: '${SUG_GEOM:-?}', id: '${SUG_ID:-?}'; press Enter to accept)"
@@ -361,13 +403,13 @@ while true; do
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
-  CREATE=$(curl -sk "$SERVER/$CTX/admin/services/createService" \
+  CREATE=$(curl -sk --connect-timeout 10 --max-time 60 "$SERVER/$CTX/admin/services/createService" \
     --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
   STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
   OK=0
   if [ "$STATUS" = "success" ]; then
     echo "   created."; OK=1
-  elif printf '%s' "$CREATE" | grep -qiE "already exist|exists in folder|exists in"; then
+  elif printf '%s' "$CREATE" | grep -qiE "already exists|already exist in"; then
     echo "   a service named '$SERVICE_NAME' already exists — continuing to start + verify."
     echo "   (If you meant to change its settings, delete it first and re-run.)"; OK=1
   else
@@ -379,26 +421,61 @@ while true; do
   if [ "$OK" = "1" ]; then
     echo
     echo "-> starting service..."
-    curl -sk "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
-      --data-urlencode "token=$TOKEN" --data-urlencode "f=json" >/dev/null
-    echo "   requested."
+    START_RESP=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
+      --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+    START_STATUS=$(printf '%s' "$START_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status') or '')" 2>/dev/null)
+    if [ "$START_STATUS" = "success" ]; then
+      echo "   started."
+    else
+      echo "   [warn] start response status='$START_STATUS' — raw: $(printf '%s' "$START_RESP" | head -c 400)"
+    fi
     echo
     # REST query validates tokens more strictly than admin on some servers: a requestip
     # token (fine for create/start) can be refused with "ClientID does not match". Mint a
     # referer-bound token + matching Referer header for the query; fall back to admin token.
+    # Password written to temp file so it never appears in process args.
     echo "-> sample query (5 rows)..."
-    QTOKEN=$(curl -sk "$SERVER/$CTX/admin/generateToken" \
-      --data-urlencode "username=$ADMIN_USER" --data-urlencode "password=$ADMIN_PASS" \
+    _tmppass2=$(mktemp); chmod 600 "$_tmppass2"; printf '%s' "$ADMIN_PASS" > "$_tmppass2"
+    QTOKEN=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+      --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass2" \
       --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" \
-      --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+      --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
+    rm -f "$_tmppass2"
     [ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
-    Q=$(curl -sk -H "Referer: $SERVER" \
-      "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query?where=1=1&outFields=*&resultRecordCount=5&returnGeometry=true&token=$QTOKEN&f=json")
-    NFEAT=$(printf '%s' "$Q" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d.get('features',[])))" 2>/dev/null || echo "0")
+    # Use -G with --data-urlencode so token and all params are properly URL-encoded.
+    Q=$(curl -sk --connect-timeout 10 --max-time 60 -G -H "Referer: $SERVER" \
+      "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query" \
+      --data-urlencode "where=1=1" \
+      --data-urlencode "outFields=*" \
+      --data-urlencode "resultRecordCount=5" \
+      --data-urlencode "returnGeometry=true" \
+      --data-urlencode "token=$QTOKEN" \
+      --data-urlencode "f=json")
+    # Parse the query result: distinguish a valid (possibly empty) FeatureCollection
+    # from an error response so an empty table doesn't show false-failure diagnostics.
+    QPARSE=$(printf '%s' "$Q" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('unparseable'); sys.exit()
+if 'error' in d:
+    print('error:' + str(d['error'].get('message', d['error'])))
+elif 'features' in d:
+    print('ok:' + str(len(d['features'])))
+else:
+    print('unknown')
+" 2>/dev/null || echo "unparseable")
+    NFEAT=$(printf '%s' "$QPARSE" | sed 's/^ok://;s/[^0-9].*//' | grep -E '^[0-9]+$' || echo "0")
+    [[ "$NFEAT" =~ ^[0-9]+$ ]] || NFEAT=0
     echo
-    if [ "$NFEAT" -gt 0 ] 2>/dev/null; then
+    if printf '%s' "$QPARSE" | grep -q '^ok:'; then
       echo "  ============================================================"
-      echo "   SUCCESS — $NFEAT feature(s). '$SERVICE_NAME' is live."
+      if [ "$NFEAT" -gt 0 ]; then
+        echo "   SUCCESS — $NFEAT feature(s). '$SERVICE_NAME' is live."
+      else
+        echo "   SUCCESS — service is live (table is currently empty; 0 rows returned)."
+      fi
       echo "  ============================================================"
       echo "   REST (on box): $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
       echo "   Via web adaptor: https://<your-host>/<webadaptor>/rest/services/$SERVICE_NAME/FeatureServer/0"
@@ -406,8 +483,8 @@ while true; do
       echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
       echo "  Verify manually with a referer-bound token + a matching 'Referer: $SERVER' header on the query."
     else
-      echo "!! The query returned no features. Raw response:"
-      printf '%s\n' "$Q" | head -c 700; echo
+      echo "!! Service query returned an error or unexpected response. Raw response:"
+      printf '%s\n' "$Q" | head -c 2000; echo
       echo "   - 404 / 'Service not found' => service did not start: wrong tableName/geometryColumn, or the"
       echo "       provider errored initializing it (table/column missing). Fix the value and re-run."
       echo "   - 'No default Databricks workspace configured' => .databrickscfg/workspace issue"
