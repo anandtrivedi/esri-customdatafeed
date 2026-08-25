@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (285 tests, ~5s)
+# Run all tests (362 tests, ~5s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -129,17 +129,20 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**285 tests across 9 files:**
+**362 tests across 12 files:**
 | File | Count | Tests |
 |------|-------|-------|
+| `model.test.js` | 68 | Auth, getData routing, editData (CRUD + transactions), field extraction |
 | `sanitize.test.js` | 59 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
-| `model.test.js` | 55 | Auth, getData routing, editData (CRUD + transactions), field extraction |
-| `lakebaseQuery.test.js` | 48 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
+| `lakebaseQuery.test.js` | 49 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
+| `geometryFormat.test.js` | 39 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
 | `editSql.test.js` | 29 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization |
 | `sql.test.js` | 29 | Databricks SQL building, pagination, filtering, injection protection |
-| `geometry.test.js` | 22 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
-| `geometryFormat.test.js` | 21 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
-| `filters.test.js` | 13 | filtersApplied flags, distinct bypass, combined filters |
+| `geometry.test.js` | 24 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
+| `workspaceResolver.test.js` | 22 | `.databrickscfg` profile resolution → workspace + auth config |
+| `filters.test.js` | 15 | filtersApplied flags, distinct bypass, combined filters |
+| `version.test.js` | 10 | Provider version reporting |
+| `connectionPool.test.js` | 9 | Databricks SQL pool sizing, idle cleanup, wait queue |
 | `translate.test.js` | 9 | Row→GeoJSON, invalid geometry handling, ID casting |
 
 Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exception: `model.test.js` tests the full `model.js` including getData/editData integration.

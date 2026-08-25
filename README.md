@@ -59,7 +59,7 @@ nodejs-provider/
       lakebasePool.js         # PostgreSQL connection pooling (pg module, workspace-aware)
       lakebaseQuery.js        # PostGIS SELECT query builder
       editSql.js              # INSERT/UPDATE/DELETE SQL builders
-  test/                       # 350 unit tests (mocha + chai)
+  test/                       # 362 unit tests (mocha + chai)
 
 mcp-server/                   # MCP server: publish/manage CDF feature services from agents
   bin/cli.js                  # serve (stdio|http) + register-target + list-targets
@@ -132,6 +132,8 @@ If you're not sure which to use, start with a PAT — it's easier to set up and 
 
 Do this **on the ArcGIS Server box itself** (the Linux or Windows machine where ArcGIS Server is installed), not on your laptop — the provider includes native modules that must compile for the server's OS, otherwise they fail to load at runtime.
 
+> **This build step needs a package registry — it is the one part that is *not* air-gapped.** `node_modules/` is not shipped in this repo, so `npm install` downloads dependencies. On a **fully offline** box (no internet and no internal npm proxy), do the build on a **separate machine that matches the server's OS and CPU architecture** *and* has registry (or internal-proxy) access, then copy the resulting `.cdpk` to the server and register it there via the Server Manager GUI ([Step 2](#step-2--register-the-provider)) or `register-provider.sh` **option 2** ("register an existing .cdpk"). Matching OS/arch matters because the native modules are compiled, not portable. Everything *after* the build — registering, publishing services, diagnosing — is fully air-gapped.
+
 The provider's source lives in the **`nodejs-provider/` subdirectory at the root of this repo** (see [Project Structure](#project-structure) above). Clone the repo on the server and `cd` into that subdirectory before running `npm install`:
 
 ```bash
@@ -166,7 +168,7 @@ You now have `databricks-geospatial-provider.cdpk` ready to register.
 
 This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Publishing individual Feature Services against the registered provider is [Step 4](#step-4--publish-your-feature-services).
 
-> **Prefer a script? `register-provider.sh` does Step 1 + Step 2 in one wizard.** Run [`register-provider.sh`](register-provider.sh) on the box (companion to the publish wizard, same bash + curl + python3, air-gapped-friendly) and it builds the `.cdpk` from `nodejs-provider/`, mints the admin token, and registers it — or **updates** it if the provider already exists (with a warning first, since an update re-extracts the provider directory). It auto-detects the install root (`/opt/arcgis` **or** `/app/arcgis`) and restarts the server for you. `sudo bash register-provider.sh` (or `--help`). The GUI steps below are the click-through equivalent.
+> **Prefer a script? `register-provider.sh` does Step 1 + Step 2 in one wizard.** Run [`register-provider.sh`](register-provider.sh) on the box (companion to the publish wizard, same bash + curl + python3) and it builds the `.cdpk` from `nodejs-provider/`, mints the admin token, and registers it. *Its build path (option 1) needs a package registry like Step 1; on a fully offline box, build the `.cdpk` elsewhere on matching OS/arch and use the script's **option 2** to register the existing package — that path, and everything after it, is air-gapped.* The script **updates** rather than registers if the provider already exists (with a warning first, since an update re-extracts the provider directory — and it now snapshots the live provider dir so a failed update can be rolled back). It auto-detects the install root (`/opt/arcgis` **or** `/app/arcgis`) and restarts the server for you. `sudo bash register-provider.sh` (or `--help`). The GUI steps below are the click-through equivalent.
 
 Do this in the **ArcGIS Server Manager** web app — the same admin site you use to manage your server. It needs no command line and no tokens:
 
@@ -429,7 +431,7 @@ Prefer to script the payload yourself, or need to understand every parameter? Se
 
 These steps harden the deployment for production. Skip if you're just trying the provider locally — Steps 1-4 alone will work.
 
-> **Where things live on the ArcGIS Server box.** A Linux install lands under `/opt/arcgis/server/` by default; on Windows the equivalent is typically `C:\Program Files\ArcGIS\Server\`. Substitute your install root if it's elsewhere. The paths in the rest of this section assume the Linux default. Edits to files under `/opt/arcgis/` need `sudo`, and any change requires a server restart (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`). If you want to verify the install state before/after changes, jump to the [sanity-check block](#troubleshooting) at the top of Troubleshooting.
+> **Where things live on the ArcGIS Server box.** A Linux install lands under `/opt/arcgis/server/` by default, **but hardened sites often install under `/app/arcgis/server/`** — check with `ls -d /opt/arcgis /app/arcgis 2>/dev/null`, and substitute your actual root everywhere `/opt/arcgis` appears below. On Windows the equivalent is typically `C:\Program Files\ArcGIS\Server\`. (`register-provider.sh` and `diagnose-service.sh` auto-detect `/opt` vs `/app`; the copy-paste commands here do not, so adjust them by hand.) The paths in the rest of this section assume the Linux default. Edits to files under `/opt/arcgis/` need `sudo`, and any change requires a server restart (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`). If you want to verify the install state before/after changes, jump to the [sanity-check block](#troubleshooting) at the top of Troubleshooting.
 
 #### Set environment variables in `init_user_param.sh`
 
@@ -860,23 +862,26 @@ Then create your Feature Service with `tableName` (or `lakebaseTable`) set to `m
 <details>
 <summary><b>First, sanity-check the install state on the ArcGIS Server box</b></summary>
 
-Before debugging a specific symptom, confirm the registered provider, env vars, and `.databrickscfg` look right. Most issues fall out from one of these being misconfigured. The provider files are owned by the `arcgis` OS user, so SSH in and run with `sudo`:
+Before debugging a specific symptom, confirm the registered provider, env vars, and `.databrickscfg` look right. Most issues fall out from one of these being misconfigured. The provider files are owned by the `arcgis` OS user, so SSH in and run with `sudo`.
+
+> **If ArcGIS is installed under `/app/arcgis` (common on hardened boxes), the block below fails with "No such file or directory."** Change the `ROOT=` line to `ROOT=/app/arcgis` — every path in the block is derived from it. (`diagnose-service.sh` finds the right root automatically; this manual block does not.)
 
 ```bash
-sudo bash -c '
+# Set ROOT to your ArcGIS install root: /opt/arcgis is the default; use /app/arcgis on hardened boxes.
+sudo ROOT=/opt/arcgis bash -c '
+P="$ROOT/server/framework/runtime/customdata/providers/databricks-geospatial-provider"
 echo "=== Provider dir (this is what ArcGIS Server actually runs) ==="
-ls -la /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/
+ls -la "$P/"
 
 echo ""
 echo "=== Provider .env (redacted) ==="
-[ -f /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env ] \
-  && sed -E "s/(TOKEN|PASSWORD|SECRET) *= *.+/\1=<REDACTED>/g" \
-       /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env \
+[ -f "$P/.env" ] \
+  && sed -E "s/(TOKEN|PASSWORD|SECRET) *= *.+/\1=<REDACTED>/g" "$P/.env" \
   || echo "(no .env file)"
 
 echo ""
 echo "=== init_user_param.sh (redacted) ==="
-sed -E "s/(TOKEN|PASSWORD|SECRET) *= *.+/\1=<REDACTED>/g" /opt/arcgis/server/usr/init_user_param.sh 2>/dev/null
+sed -E "s/(TOKEN|PASSWORD|SECRET) *= *.+/\1=<REDACTED>/g" "$ROOT/server/usr/init_user_param.sh" 2>/dev/null
 
 echo ""
 echo "=== .databrickscfg profiles (redacted) ==="
@@ -884,7 +889,7 @@ sed -E "s/(token|client_secret) *= *.+/\1 = <REDACTED>/g" /home/arcgis/.databric
 
 echo ""
 echo "=== Most recent server log lines mentioning Custom_data_feeds ==="
-ls -t /opt/arcgis/server/usr/logs/*/server/server-*.log 2>/dev/null | head -1 \
+ls -t "$ROOT"/server/usr/logs/*/server/server-*.log 2>/dev/null | head -1 \
   | xargs grep -E "Custom_data_feeds|Pool " 2>/dev/null | tail -10
 '
 ```
@@ -900,7 +905,7 @@ This dumps everything that matters — provider directory contents, env vars, mu
 **Service won't start / "Provider not found" / "UNABLE_TO_GET_JNDI_NAME"**
 - Verify the `.cdpk` was registered (Server Manager → Server Configuration → Custom Data Feeds).
 - Confirm `dataProviderName` in the service JSON matches the registered provider name exactly.
-- **Native module mismatch**: if you built `node_modules` on a different OS than the ArcGIS Server (e.g., macOS → Linux), the provider will fail to load. Run `npm install` on the ArcGIS Server box itself.
+- **Native module mismatch**: if you built `node_modules` on a different OS/arch than the ArcGIS Server (e.g., macOS → Linux, or x86_64 → arm64), the provider will fail to load. Run `npm install` on the ArcGIS Server box itself — or, if that box is offline, on a **separate machine matching its OS and CPU architecture** that has registry access, then transfer the `.cdpk` (see the offline note in [Step 1](#step-1--get-the-code-and-build-the-provider-package)).
 - Check ArcGIS Server logs (typically `/opt/arcgis/server/usr/logs/<machine>/server/server-*.log` on Linux).
 
 **Service shows STARTED in admin but `HTTP 404 — Service not found` from REST**
@@ -991,7 +996,7 @@ These are the provider's own unit tests (mocha + chai) — they exercise the SQL
 ```bash
 cd esri-customdatafeed/nodejs-provider
 npm test
-# 350 passing
+# 362 passing
 ```
 
 ## License
