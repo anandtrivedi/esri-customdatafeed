@@ -476,16 +476,22 @@ echo
 # An update RE-EXTRACTS over the provider dir, and a FAILED update can leave it deleted until a
 # good package is registered — 404ing every existing service. A cheap copy first gives a
 # concrete rollback path. (register, i.e. first install, has no live dir to protect.)
-BACKUP_DIR=""
+BACKUP_FILE=""
 if [ "$ACTION" = "update" ] && [ -d "$PROVIDER_DIR" ]; then
-  BACKUP_DIR="${PROVIDER_DIR}.bak.$(date +%Y%m%d%H%M%S)"
+  # Back up OUTSIDE providers/ as a tarball. VERIFIED THE HARD WAY: a FAILED update deletes the
+  # provider dir AND prunes sibling dirs left inside providers/ — a .bak placed there does NOT
+  # survive the very failure it's meant to protect against. usr/ is ArcGIS's user-writable area
+  # and is not touched by provider (re-)registration, so the backup survives to actually restore.
+  _bkdir="$SERVER_DIR/usr/cdf-provider-backups"
+  BACKUP_FILE="$_bkdir/${PROVIDER_NAME}.bak.$(date +%Y%m%d%H%M%S).tgz"
   echo "-> backing up the current provider dir before update:"
-  echo "     $PROVIDER_DIR  ->  $BACKUP_DIR"
-  if run_as_arcgis cp -a "$PROVIDER_DIR" "$BACKUP_DIR" 2>/dev/null; then
+  echo "     $PROVIDER_DIR"
+  echo "     -> $BACKUP_FILE"
+  if run_as_arcgis mkdir -p "$_bkdir" && run_as_arcgis tar czf "$BACKUP_FILE" -C "$(dirname "$PROVIDER_DIR")" "$PROVIDER_NAME"; then
     echo "   [ok] backup created."
   else
     echo "   [warn] could not create the backup (permissions?) — continuing WITHOUT a rollback copy."
-    BACKUP_DIR=""
+    BACKUP_FILE=""
   fi
 fi
 
@@ -496,16 +502,17 @@ RESP=$("${CURL[@]}" --max-time 120 "$SERVER/$CTX/admin/services/types/customdata
 STATUS=$(printf '%s' "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status','') )" 2>/dev/null)
 if [ "$STATUS" = "success" ]; then
   echo "   [ok] $ACTION succeeded."
-  [ -n "$BACKUP_DIR" ] && echo "   (pre-update backup kept at $BACKUP_DIR — remove it once the upgrade is confirmed working.)"
+  [ -n "$BACKUP_FILE" ] && echo "   (pre-update backup kept at $BACKUP_FILE — remove it once the upgrade is confirmed working.)"
 else
   echo "!! $ACTION did not report success. The server said:"
   printf '%s\n' "$RESP" | head -c 2000; echo
   if [ "$ACTION" = "update" ]; then
     echo "   [!] If this update FAILED, the provider directory may have been removed — existing"
     echo "       services will 404 until a good .cdpk is registered."
-    if [ -n "$BACKUP_DIR" ]; then
-      echo "   Rollback — restore the pre-update copy and restart:"
-      echo "       sudo -u arcgis cp -a '$BACKUP_DIR' '$PROVIDER_DIR'"
+    if [ -n "$BACKUP_FILE" ]; then
+      echo "   Rollback — restore the pre-update copy from the backup tarball, then restart:"
+      echo "       sudo -u arcgis rm -rf '$PROVIDER_DIR'"
+      echo "       sudo -u arcgis tar xzf '$BACKUP_FILE' -C '$(dirname "$PROVIDER_DIR")'"
       echo "       sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
     else
       echo "       Re-run with a correct package to restore service."
