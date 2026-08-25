@@ -69,7 +69,7 @@ PUBLISHED=()
 # INT/TERM additionally *terminate* the script (trapping a signal otherwise replaces
 # the default terminate, so Ctrl-C would fall through into the next prompt — and the
 # confirmation prompt defaults to "y"). SIGKILL (kill -9) cannot be trapped.
-_tmppass=""
+_tmppass=""; MINT_RESP=""
 _cleanup() { rm -f "${_tmppass}"; }
 trap _cleanup EXIT
 trap 'exit 130' INT
@@ -87,27 +87,28 @@ ask() {
 }
 
 # --- mint an ArcGIS admin token -------------------------------------------------
-# Centralizes the sensitive password handling in one audited place: the password is
-# written to a chmod-600 temp file (never in process args) via the global _tmppass, so
-# the EXIT/INT/TERM trap always shreds it — even if a signal lands mid-mint. Echoes the
-# raw JSON response; the caller parses .token (and can show the raw body on failure).
+# Sets MINT_RESP to the raw JSON response. MUST be called as a plain statement, NOT in
+# $(...): the password temp file is created here via the global _tmppass, and only when
+# this runs in the parent shell can the EXIT/INT/TERM trap shred that file if a signal
+# lands mid-mint. (Inside a command substitution the _tmppass assignment would be
+# subshell-local and the parent trap would see nothing.) Only the curl is subshelled —
+# it doesn't own the temp file. The password never appears in process args (password@file).
 #   mint_token requestip         -> IP-bound token (fine for the admin calls here)
 #   mint_token referer <url>     -> referer-bound token (needed for feature-service /query)
-mint_token() {
-  local client="$1" referer="${2:-}" resp
+mint_token() {   # sets MINT_RESP
+  local client="$1" referer="${2:-}"
   _tmppass=$(mktemp); chmod 600 "$_tmppass"; printf '%s' "$ADMIN_PASS" > "$_tmppass"
   if [ -n "$referer" ]; then
-    resp=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+    MINT_RESP=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/generateToken" \
       --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass" \
       --data-urlencode "client=$client" --data-urlencode "referer=$referer" \
       --data-urlencode "f=json")
   else
-    resp=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+    MINT_RESP=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/generateToken" \
       --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass" \
       --data-urlencode "client=$client" --data-urlencode "f=json")
   fi
   rm -f "$_tmppass"; _tmppass=""
-  printf '%s' "$resp"
 }
 
 echo "============================================================"
@@ -129,7 +130,7 @@ echo
 # and remove -k for those calls. The admin password itself never appears in process args
 # (it goes via a temp file), but an unverified TLS connection can expose it in transit.
 echo "-> requesting admin token (client=requestip)..."
-TOKEN_RESP=$(mint_token requestip)
+mint_token requestip; TOKEN_RESP="$MINT_RESP"
 TOKEN=$(printf '%s' "$TOKEN_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
   echo "!! No token was returned. The server said:"
@@ -496,7 +497,8 @@ while true; do
     # token (fine for create/start) can be refused with "ClientID does not match". Mint a
     # referer-bound token + matching Referer header for the query; fall back to admin token.
     echo "-> sample query (5 rows)..."
-    QTOKEN=$(mint_token referer "$SERVER" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
+    mint_token referer "$SERVER"
+    QTOKEN=$(printf '%s' "$MINT_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
     [ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
     # Use -G with --data-urlencode so token and all params are properly URL-encoded.
     # Retry on cold start: a freshly created service can 404 for a few seconds while the
