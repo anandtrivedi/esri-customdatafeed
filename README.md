@@ -166,6 +166,8 @@ You now have `databricks-geospatial-provider.cdpk` ready to register.
 
 This is a **one-time** action that tells ArcGIS Server "the Databricks CDF provider exists and is available to use." You only do it again when you change the provider's source code. Publishing individual Feature Services against the registered provider is [Step 4](#step-4--publish-your-feature-services).
 
+> **Prefer a script? `register-provider.sh` does Step 1 + Step 2 in one wizard.** Run [`register-provider.sh`](register-provider.sh) on the box (companion to the publish wizard, same bash + curl + python3, air-gapped-friendly) and it builds the `.cdpk` from `nodejs-provider/`, mints the admin token, and registers it — or **updates** it if the provider already exists (with a warning first, since an update re-extracts the provider directory). It auto-detects the install root (`/opt/arcgis` **or** `/app/arcgis`) and restarts the server for you. `sudo bash register-provider.sh` (or `--help`). The GUI steps below are the click-through equivalent.
+
 Do this in the **ArcGIS Server Manager** web app — the same admin site you use to manage your server. It needs no command line and no tokens:
 
 1. Open **ArcGIS Server Manager** and sign in.
@@ -852,6 +854,8 @@ Then create your Feature Service with `tableName` (or `lakebaseTable`) set to `m
 ---
 
 ## Troubleshooting
+
+> **Fastest first step: run [`diagnose-service.sh`](diagnose-service.sh).** A read-only health check (bash + curl + python3, makes no changes) — run it on the box, give it a service name, and it mints its own admin token and reports the site machines, registered providers, the service's state + `min/max` instances + `tableName`/`idField`/geometry, realtime status, and per-machine instance statistics — then prints a plain-English **assessment** of the likely problem. It flags the common ones automatically: service **stopped** (404s every time), **`minInstancesPerNode=0`** (the "intermittent 404, works on refresh" cause — no warm instance kept), multi-machine round-robin, and a reminder to confirm `idField` is a unique integer. `sudo bash diagnose-service.sh` (or `--help`). Run it *right after* reproducing a 404 to catch a node with zero live instances.
 
 <details>
 <summary><b>First, sanity-check the install state on the ArcGIS Server box</b></summary>
