@@ -19,7 +19,7 @@ One provider is registered once; each Feature Service picks its backend via serv
 
 ## Quick Start — Easy Deploy (recommended)
 
-Esri offers **no GUI** to publish a feature service from a custom data provider — the only supported way is the Admin REST API `createService` call with a 15-field JSON payload. The **`publish-service.sh`** wizard does that for you: it prompts one field at a time, mints the admin token itself, lists your workspace profiles, builds the JSON correctly, and creates → starts → verifies the service. Only three one-time setup steps come first.
+Publishing a feature service from a custom data provider isn't yet exposed in the ArcGIS Server Manager GUI — the supported path is the Admin REST API `createService` call with a 15-field JSON payload. The **`publish-service.sh`** wizard does that for you: it prompts one field at a time, mints the admin token itself, lists your workspace profiles, builds the JSON correctly, and creates → starts → verifies the service. Only three one-time setup steps come first.
 
 **1. Register the provider — GUI, one-time.** In **ArcGIS Server Manager → Server Configuration → Custom Data Feeds → Add Custom Data Provider**, upload the `.cdpk`. (No `.cdpk` yet? Build one per [Step 1](#step-1--get-the-code-and-build-the-provider-package).)
 
