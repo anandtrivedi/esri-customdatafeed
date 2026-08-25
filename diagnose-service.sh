@@ -48,7 +48,7 @@ ask "Admin URL" "https://localhost:6443" SERVER
 ask "URL context" "arcgis" CTX
 ask "Admin username" "siteadmin" ADMINUSER
 read -rs -p "  Admin password: " PW; echo
-ask "Service name (without .FeatureServer)" "TEST_FeatureService_Databricks" SVC
+ask "Service name (use folder/name if it's in a folder)" "TEST_FeatureService_Databricks" SVC
 echo
 
 # --- mint admin token -----------------------------------------------------------
@@ -61,6 +61,8 @@ if [ -z "$TOKEN" ]; then
   echo "!! Could not mint an admin token. The server said:"
   printf '%s\n' "$TRESP" | head -c 600; echo
   echo "   Check the Admin URL / context / username / password and re-run."
+  echo "   Note: the admin API is normally only on :6443 with context 'arcgis' — not through a"
+  echo "         web adaptor. On a federated box, siteadmin must still be enabled for admin login."
   exit 1
 fi
 echo "[ok] admin token minted"
@@ -99,17 +101,26 @@ FOUND=$(jget "$DRESP" '"no" if (d.get("status")=="error" or "error" in d) else "
 if [ "$FOUND" != "yes" ]; then
   echo "  !! service not found / error:"
   jget "$DRESP" 'd.get("messages") or (d.get("error") or {}).get("message") or d'
-  CSTATE=""; MININST=""; MAXINST=""; IDFIELD=""; TABLE=""; LBTABLE=""
+  # It may be in a FOLDER (root path won't find it). List folders so the operator can retry.
+  FRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services?token=$TOKEN&f=json")
+  FOLDERS=$(jget "$FRESP" '", ".join(f for f in d.get("folders",[]) if f and f!="/")')
+  if [ -n "$FOLDERS" ]; then
+    echo "  Folders on this server: $FOLDERS"
+    echo "  (if your service lives in one of those, re-run and enter it as  folder/name)"
+  fi
+  CSTATE=""; MININST=""; MAXINST=""; IDFIELD=""; TABLE=""; LBTABLE=""; PROVIDER=""; DPNAME=""
 else
   CSTATE=$(jget "$DRESP" 'd.get("configuredState") or ""')
   MININST=$(jget "$DRESP" 'd.get("minInstancesPerNode")')
   MAXINST=$(jget "$DRESP" 'd.get("maxInstancesPerNode")')
   PROVIDER=$(jget "$DRESP" 'd.get("provider") or ""')
+  DPNAME=$(jget "$DRESP" '(d.get("jsonProperties") or {}).get("customDataProviderInfo",{}).get("dataProviderName") or ""')
   IDFIELD=$(jget "$DRESP" '(d.get("jsonProperties") or {}).get("customDataProviderInfo",{}).get("serviceParameters",{}).get("idField") or ""')
   TABLE=$(jget "$DRESP" '(d.get("jsonProperties") or {}).get("customDataProviderInfo",{}).get("serviceParameters",{}).get("tableName") or ""')
   LBTABLE=$(jget "$DRESP" '(d.get("jsonProperties") or {}).get("customDataProviderInfo",{}).get("serviceParameters",{}).get("lakebaseTable") or ""')
   echo "  configuredState : $CSTATE"
   echo "  provider        : $PROVIDER"
+  [ -n "$DPNAME" ] && echo "  dataProvider    : $DPNAME"
   echo "  minInstances    : $MININST"
   echo "  maxInstances    : $MAXINST"
   [ -n "$TABLE" ]   && echo "  tableName       : $TABLE"
@@ -144,6 +155,9 @@ if not pm and not s:
 PY
 FREE_TOTAL=$(jget "$STRESP" 'sum((m.get("free") or 0) for m in (d.get("perMachine") or [])) if d.get("perMachine") else (d.get("summary") or {}).get("free")')
 BUSY_TOTAL=$(jget "$STRESP" 'sum((m.get("busy") or 0) for m in (d.get("perMachine") or [])) if d.get("perMachine") else (d.get("summary") or {}).get("busy")')
+# only trust the instance-count branches below if both totals came back as real numbers
+STATS_NUM=0
+if printf '%s' "${FREE_TOTAL:-}" | grep -qE '^[0-9]+$' && printf '%s' "${BUSY_TOTAL:-}" | grep -qE '^[0-9]+$'; then STATS_NUM=1; fi
 echo
 
 # --- ASSESSMENT -----------------------------------------------------------------
@@ -154,49 +168,73 @@ PROBLEMS=0
 
 if [ "$FOUND" != "yes" ]; then
   echo " * Service not found under '$SVC'."
-  echo "     -> Check the exact name (and folder). If the name is right, the provider may not"
-  echo "        be registered or failed to load — confirm the .cdpk is registered and re-check."
+  echo "     -> If it's in a FOLDER, re-run and enter it as folder/name (folders listed above)."
+  echo "     -> If the name is right, the provider may not be registered or failed to load —"
+  echo "        confirm the .cdpk is registered and re-check."
   PROBLEMS=$((PROBLEMS+1))
 else
-  # stopped?
+  # not started -> 404s every time
   if [ "$CSTATE" != "STARTED" ] || { [ -n "$RTSTATE" ] && [ "$RTSTATE" != "STARTED" ]; }; then
     echo " * Service is NOT started (configured=$CSTATE, realtime=${RTSTATE:-?}) -> it 404s every time."
     echo "     -> Start it (Server Manager ▶, or admin /start)."
     PROBLEMS=$((PROBLEMS+1))
   fi
-  # min instances 0 -> intermittent 404
+  # service references a CDF provider that isn't registered -> guaranteed failure
+  if [ -n "$DPNAME" ] && ! printf '%s' "$PROVS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -Fxq "$DPNAME"; then
+    echo " * Service references CDF provider '$DPNAME', which is NOT in the registered list above."
+    echo "     -> Guaranteed failure. Register that provider (register-provider.sh), or fix the"
+    echo "        service's dataProviderName to match a registered provider."
+    PROBLEMS=$((PROBLEMS+1))
+  fi
+  # not a CDF service -> some advice may not apply
+  if [ -n "${PROVIDER:-}" ] && [ "$PROVIDER" != "CUSTOMDATA" ]; then
+    echo " * NOTE: provider is '$PROVIDER', not CUSTOMDATA — this may not be a Databricks CDF"
+    echo "        service, so some of the advice below may not apply."
+  fi
+  # min=0 -> POSSIBLE intermittent-404 cause; escalate only when corroborated (multi-machine)
   if [ "$MININST" = "0" ]; then
-    echo " * minInstancesPerNode = 0 -> no resident instance is kept."
-    echo "     -> This is the classic 'intermittent 404, works on refresh': the instance is"
-    echo "        evicted from the shared pool (or a round-robin node has none) and must reload."
-    echo "     -> Fix: set minInstancesPerNode=1 and maxInstancesPerNode>=2 (dedicated, warm)."
-    PROBLEMS=$((PROBLEMS+1))
+    if [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
+      echo " * minInstancesPerNode=0 on a MULTI-machine site ($MACHINE_COUNT) -> likely the intermittent"
+      echo "     404 cause: a round-robin node with no resident instance 404s while another serves."
+      echo "     -> Fix: minInstancesPerNode=1, maxInstancesPerNode>=2 (a warm instance on every node)."
+      PROBLEMS=$((PROBLEMS+1))
+    else
+      echo " * minInstancesPerNode=0 -> no instance is kept resident. This CAN cause intermittent"
+      echo "     '404, works on refresh' UNDER shared-pool pressure (many min=0 services vs pool size),"
+      echo "     but on a quiet single-machine box it may be perfectly healthy."
+      echo "     -> If you see that symptom, set min=1/max>=2; also check the shared-instance pool size"
+      echo "        vs how many services use it. Don't 'fix' this if you aren't seeing the symptom."
+    fi
+  # multi-machine with min>=1 = healthy topology (informational, NOT a problem)
+  elif [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
+    echo " * Multi-machine site ($MACHINE_COUNT machines) with min>=1 — healthy topology."
+    echo "     -> Just confirm the service is started on ALL nodes (each per-machine line above"
+    echo "        should show instances); a node stuck at 0 would 404 via round-robin."
   fi
-  # multi-machine amplifier
-  if [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
-    echo " * Multi-machine site ($MACHINE_COUNT machines)."
-    echo "     -> With min=0 the load balancer can round-robin to a node with no instance -> 404."
-    echo "        min>=1 keeps a warm instance on EVERY node; also confirm the service is"
-    echo "        started site-wide (per-machine stats above should all show instances)."
-    PROBLEMS=$((PROBLEMS+1))
+  # STARTED but zero live instances right now (arms the log-tail advice for the init-failure case)
+  if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" = "0" ]; then
+    echo " * No instance is running right now (free=0, busy=0)."
+    echo "     -> Normal for a min=0 service that's idle. BUT if requests are actively 404ing, the"
+    echo "        provider is failing to INITIALIZE (Databricks auth/connectivity, wrong table/column)"
+    echo "        -> tail the log for 'Custom_data_feeds' lines to see the real error."
   fi
-  # all busy
-  if [ -n "${FREE_TOTAL:-}" ] && [ "${FREE_TOTAL:-x}" = "0" ] && [ -n "${BUSY_TOTAL:-}" ] && [ "${BUSY_TOTAL:-0}" != "0" ]; then
+  # no free but busy -> under load
+  if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" != "0" ]; then
     echo " * No free instances (free=0, busy=$BUSY_TOTAL) -> requests queue/time out under load."
     echo "     -> Raise maxInstancesPerNode."
     PROBLEMS=$((PROBLEMS+1))
   fi
-  # idField sanity note (can't verify uniqueness from here)
+  # idField uniqueness reminder (can't verify from here)
   if [ -n "$IDFIELD" ]; then
     echo " * idField = '$IDFIELD' — verify it is a UNIQUE integer per row (ArcGIS OBJECTID)."
     echo "     -> If it repeats (e.g. mmsi on a raw event table) features silently collide/drop"
     echo "        in clients — that is NOT a 404, but corrupts the map. Use a unique row id/view."
   fi
   if [ "$PROBLEMS" -eq 0 ]; then
-    echo " * No obvious ArcGIS-side config problem: service is STARTED with a warm instance."
-    echo "     -> If you still get errors, tail the provider log for 'Custom_data_feeds' lines"
-    echo "        (Databricks auth/connectivity), and remember a federated /query needs a PORTAL"
-    echo "        token (a server/admin token returns 'Invalid token', not a 404)."
+    echo " * No blocking ArcGIS-side config problem found (service STARTED; provider registered)."
+    echo "     -> If you still get errors: a federated /query needs a PORTAL token (a server/admin"
+    echo "        token returns 'Invalid token', not a 404), and provider-side Databricks errors"
+    echo "        show up in the 'Custom_data_feeds' log lines."
   fi
 fi
 echo "============================================================"
