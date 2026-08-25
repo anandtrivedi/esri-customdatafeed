@@ -146,8 +146,8 @@ if [ -f "$CFG" ]; then
   else
     echo "  [ok]   owner: ${CFG_OWNER:-unknown}"
   fi
-  if [ -n "$CFG_PERMS" ] && [ "$CFG_PERMS" != "600" ]; then
-    echo "  [WARN] $CFG permissions are $CFG_PERMS, expected 600."
+  if [ -n "$CFG_PERMS" ] && [ "$CFG_PERMS" != "600" ] && [ "$CFG_PERMS" != "400" ]; then
+    echo "  [WARN] $CFG permissions are $CFG_PERMS, expected 600 (or 400 for read-only)."
     echo "         Fix: sudo chmod 600 $CFG"
   else
     echo "  [ok]   permissions: ${CFG_PERMS:-unknown}"
