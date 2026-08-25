@@ -30,6 +30,25 @@
 #
 set -uo pipefail   # deliberately NOT -e: we handle and explain errors ourselves.
 
+# --- --help / -h: print usage and exit (no server calls, no tool requirements) --
+case "${1:-}" in
+  -h|--help)
+    echo "publish-service.sh — interactive wizard to publish a Databricks CDF Feature Service."
+    echo
+    echo "  Run it ON the ArcGIS Server box, as root (simplest) or the arcgis user:"
+    echo "      sudo bash publish-service.sh"
+    echo
+    echo "  It prompts for the ArcGIS admin connection, then for each table: picks the"
+    echo "  backend (Lakehouse or Lakebase), builds the createService payload for you, and"
+    echo "  creates -> starts -> verifies the service, printing its FeatureServer URL."
+    echo "  No JSON to hand-edit, no admin token to mint yourself. Works air-gapped."
+    echo
+    echo "  Requires: bash, curl, python3 (all present on ArcGIS Server) and a"
+    echo "  .databrickscfg readable by the arcgis user (see the repo README, Step 3)."
+    exit 0
+    ;;
+esac
+
 # --- verify required tools are present (air-gapped: no external downloads) ----
 for _tool in python3 curl; do
   command -v "$_tool" >/dev/null 2>&1 || { echo "!! Required tool '$_tool' not found. Install it before running this script."; exit 1; }
@@ -37,12 +56,21 @@ done
 
 PROVIDER_NAME="databricks-geospatial-provider"
 
-# Always clean up password temp files. EXIT handles the cleanup for every exit
-# path; INT/TERM additionally *terminate* the script (trapping a signal otherwise
-# replaces the default terminate, so Ctrl-C would fall through into the next prompt
-# — and the confirmation prompt defaults to "y"). SIGKILL (kill -9) cannot be trapped.
-_tmppass=""; _tmppass2=""
-_cleanup() { rm -f "${_tmppass}" "${_tmppass2}"; }
+# Shared curl invocation: -k for ArcGIS's self-signed cert (see note at first use),
+# --noproxy so loopback calls are never routed through an ambient HTTPS_PROXY, and a
+# connect timeout. Using an array means every call inherits these flags — you can't add
+# a curl call that forgets them. Per-call --max-time is appended at each site.
+CURL=(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10)
+
+# Feature services successfully published this session (for the end-of-run summary).
+PUBLISHED=()
+
+# Always clean up the password temp file. EXIT handles cleanup for every exit path;
+# INT/TERM additionally *terminate* the script (trapping a signal otherwise replaces
+# the default terminate, so Ctrl-C would fall through into the next prompt — and the
+# confirmation prompt defaults to "y"). SIGKILL (kill -9) cannot be trapped.
+_tmppass=""
+_cleanup() { rm -f "${_tmppass}"; }
 trap _cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -56,6 +84,30 @@ ask() {
     read -r -p "  $prompt: " ans
   fi
   printf -v "$__var" '%s' "$ans"
+}
+
+# --- mint an ArcGIS admin token -------------------------------------------------
+# Centralizes the sensitive password handling in one audited place: the password is
+# written to a chmod-600 temp file (never in process args) via the global _tmppass, so
+# the EXIT/INT/TERM trap always shreds it — even if a signal lands mid-mint. Echoes the
+# raw JSON response; the caller parses .token (and can show the raw body on failure).
+#   mint_token requestip         -> IP-bound token (fine for the admin calls here)
+#   mint_token referer <url>     -> referer-bound token (needed for feature-service /query)
+mint_token() {
+  local client="$1" referer="${2:-}" resp
+  _tmppass=$(mktemp); chmod 600 "$_tmppass"; printf '%s' "$ADMIN_PASS" > "$_tmppass"
+  if [ -n "$referer" ]; then
+    resp=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+      --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass" \
+      --data-urlencode "client=$client" --data-urlencode "referer=$referer" \
+      --data-urlencode "f=json")
+  else
+    resp=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+      --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass" \
+      --data-urlencode "client=$client" --data-urlencode "f=json")
+  fi
+  rm -f "$_tmppass"; _tmppass=""
+  printf '%s' "$resp"
 }
 
 echo "============================================================"
@@ -77,13 +129,7 @@ echo
 # and remove -k for those calls. The admin password itself never appears in process args
 # (it goes via a temp file), but an unverified TLS connection can expose it in transit.
 echo "-> requesting admin token (client=requestip)..."
-_tmppass=$(mktemp); chmod 600 "$_tmppass"; printf '%s' "$ADMIN_PASS" > "$_tmppass"
-TOKEN_RESP=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
-  --data-urlencode "username=$ADMIN_USER" \
-  --data-urlencode "password@$_tmppass" \
-  --data-urlencode "client=requestip" \
-  --data-urlencode "f=json")
-rm -f "$_tmppass"
+TOKEN_RESP=$(mint_token requestip)
 TOKEN=$(printf '%s' "$TOKEN_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
   echo "!! No token was returned. The server said:"
@@ -106,7 +152,7 @@ echo
 echo "== Preflight =="
 echo "  [ok]   ArcGIS admin reachable, token acquired"
 
-PROV_JSON=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
+PROV_JSON=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
   --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 PROV_PARSE_OK=$(printf '%s' "$PROV_JSON" | python3 -c "import sys,json; json.load(sys.stdin); print('yes')" 2>/dev/null)
 PROVS=()
@@ -419,7 +465,7 @@ while true; do
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
-  CREATE=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 60 "$SERVER/$CTX/admin/services/createService" \
+  CREATE=$("${CURL[@]}" --max-time 60 "$SERVER/$CTX/admin/services/createService" \
     --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
   STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
   OK=0
@@ -437,7 +483,7 @@ while true; do
   if [ "$OK" = "1" ]; then
     echo
     echo "-> starting service..."
-    START_RESP=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
+    START_RESP=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
       --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
     START_STATUS=$(printf '%s' "$START_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status') or '')" 2>/dev/null)
     if [ "$START_STATUS" = "success" ]; then
@@ -449,21 +495,15 @@ while true; do
     # REST query validates tokens more strictly than admin on some servers: a requestip
     # token (fine for create/start) can be refused with "ClientID does not match". Mint a
     # referer-bound token + matching Referer header for the query; fall back to admin token.
-    # Password written to temp file so it never appears in process args.
     echo "-> sample query (5 rows)..."
-    _tmppass2=$(mktemp); chmod 600 "$_tmppass2"; printf '%s' "$ADMIN_PASS" > "$_tmppass2"
-    QTOKEN=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
-      --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass2" \
-      --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" \
-      --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
-    rm -f "$_tmppass2"
+    QTOKEN=$(mint_token referer "$SERVER" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
     [ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
     # Use -G with --data-urlencode so token and all params are properly URL-encoded.
     # Retry on cold start: a freshly created service can 404 for a few seconds while the
     # provider initializes (maxStartupTime is 300s). Poll up to ~30s before judging failure.
     QPARSE=""; Q=""
     for _attempt in 1 2 3 4 5 6; do
-      Q=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 60 -G -H "Referer: $SERVER" \
+      Q=$("${CURL[@]}" --max-time 60 -G -H "Referer: $SERVER" \
         "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query" \
         --data-urlencode "where=1=1" \
         --data-urlencode "outFields=*" \
@@ -507,6 +547,7 @@ else:
       echo "  ============================================================"
       echo "   REST (on box): $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
       echo "   Via web adaptor: https://<your-host>/<webadaptor>/rest/services/$SERVICE_NAME/FeatureServer/0"
+      PUBLISHED+=("$SERVICE_NAME  ->  $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0")
     elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
       echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
       echo "  Verify manually with a referer-bound token + a matching 'Referer: $SERVER' header on the query."
@@ -527,4 +568,11 @@ else:
   case "$MORE" in y|Y|yes|YES) echo;; *) break;; esac
 done
 echo
+if [ "${#PUBLISHED[@]}" -gt 0 ]; then
+  echo "============================================================"
+  echo " Published this session (${#PUBLISHED[@]}):"
+  for _p in "${PUBLISHED[@]}"; do echo "   $_p"; done
+  echo "============================================================"
+  echo
+fi
 echo "Done."
