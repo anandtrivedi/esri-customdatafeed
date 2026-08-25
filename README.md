@@ -69,6 +69,10 @@ mcp-server/                   # MCP server: publish/manage CDF feature services 
 
 ## Setup
 
+> **Shortcut — one guided command: [`setup.sh`](setup.sh).** If you'd rather not follow the steps by hand, run `sudo bash setup.sh` on the box. It **prechecks** the environment (provider registered? `.databrickscfg` present with the right owner/permissions? existing services? standalone or federated? `/opt` vs `/app`?), prints **the fix for anything missing**, then routes you to the right action — collecting the ArcGIS admin login **once** and reusing it for every step (no retyping). Its menu covers first-time install (configure → register → publish), publishing more tables, diagnosing a service, and flipping a service private/public.
+>
+> **If any step fails, you're never stuck.** `setup.sh` just orchestrates the same focused scripts and admin calls documented below — when a step fails it tells you exactly which script to run directly (e.g. `bash register-provider.sh`) and points you here. So the manual steps below are both the "do it yourself" path *and* the fallback for anything the wizard can't complete. Each menu item maps 1:1 to a step: **Configure** → [Step 3](#step-3--configure-the-databricks-connection), **Register** → [Step 2](#step-2--register-the-provider), **Publish** → [Step 4](#step-4--publish-your-feature-services), **Diagnose** → [Troubleshooting](#troubleshooting).
+
 Work through the five steps in order. Almost everything runs **on the ArcGIS Server host** — the machine where ArcGIS Server is installed — so SSH into it first and stay there. (The one exception is registering the provider in Step 2, which you do in the browser-based Server Manager; if that browser is on a different machine, Step 2 tells you how to get the file there.) That's why the occasional `curl` example targets `https://localhost:6443/...` — `localhost` *is* the ArcGIS Server, because you're logged into it.
 
 > **Which user runs what:**
@@ -247,6 +251,8 @@ To retire a provider instead, unregister it by `.cdpk` filename (REST): `.../cus
 ### Step 3 — Configure the Databricks connection
 
 The provider logs in to Databricks by reading a small credential file called **`.databrickscfg`** — the standard Databricks config file. You don't have to write it by hand: the Databricks CLI from [Prerequisites](#prerequisites) creates it for you.
+
+> **Prefer a script?** [`configure-databricks.sh`](configure-databricks.sh) prompts for the host + a PAT (or a service principal's `client_id`/`client_secret`), then writes the profile into `.databrickscfg` **atomically, owned by `arcgis`, mode `600`** (preserving any existing profiles) — no CLI or hand-editing, and no chance of leaving it root-owned or world-readable. `sudo bash configure-databricks.sh`. (This is what `setup.sh`'s "Configure the Databricks connection" runs.)
 
 **Create the file with the CLI.** On the server, run:
 
