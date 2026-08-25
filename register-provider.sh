@@ -71,10 +71,14 @@ trap 'exit 143' TERM
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
   local prompt="$1" def="$2" __var="$3" ans=""
+  # A failed read = EOF / closed stdin (Ctrl-D, dry pipe, non-interactive run). Abort rather
+  # than silently taking the default — this script has destructive confirmations (REGISTER /
+  # UPDATE / restart) that must never proceed unattended on EOF.
   if [ -n "$def" ]; then
-    read -r -p "  $prompt [$def]: " ans; ans="${ans:-$def}"
+    if ! read -r -p "  $prompt [$def]: " ans; then echo; echo "!! Input closed (EOF) — aborting; nothing was changed." >&2; exit 130; fi
+    ans="${ans:-$def}"
   else
-    read -r -p "  $prompt: " ans
+    if ! read -r -p "  $prompt: " ans; then echo; echo "!! Input closed (EOF) — aborting; nothing was changed." >&2; exit 130; fi
   fi
   printf -v "$__var" '%s' "$ans"
 }
@@ -174,6 +178,33 @@ if [ "$PKGMODE" = "2" ]; then
     *.cdpk) : ;;
     *) echo "   [warn] '$CDPK_PATH' does not end in .cdpk — continuing anyway." ;;
   esac
+  # The SELECTED package's own cdconfig.json is the source of truth for the provider name — the
+  # repo's cdconfig.json (read earlier) may differ or be absent. Reading it from the archive
+  # keeps the register-vs-update decision, the provider directory, and the outage warnings
+  # aligned with what actually gets installed.
+  _pn_pkg=$(python3 - "$CDPK_PATH" <<'PY' 2>/dev/null || true
+import sys, zipfile, json
+try:
+    z = zipfile.ZipFile(sys.argv[1])
+    names = [n for n in z.namelist() if n.rsplit('/', 1)[-1] == 'cdconfig.json']
+    names.sort(key=len)   # prefer the shallowest cdconfig.json
+    if names:
+        print((json.loads(z.read(names[0])) or {}).get('name') or '')
+except Exception:
+    pass
+PY
+)
+  if [ -n "$_pn_pkg" ]; then
+    if [ "$_pn_pkg" != "$PROVIDER_NAME" ]; then
+      echo "   [info] the package declares provider name '$_pn_pkg' (repo/default was"
+      echo "          '$PROVIDER_NAME') — using the package's name for register/update."
+    fi
+    PROVIDER_NAME="$_pn_pkg"
+    PROVIDER_DIR="$SERVER_DIR/framework/runtime/customdata/providers/$PROVIDER_NAME"
+  else
+    echo "   [warn] could not read cdconfig.json from '$CDPK_PATH' — using '$PROVIDER_NAME'."
+    echo "          If that's wrong, the register-vs-update choice below may be incorrect."
+  fi
 else
   # --- build the .cdpk ----------------------------------------------------------
   command -v zip >/dev/null 2>&1 || { echo "!! 'zip' is required to build a .cdpk (choose option 2 to register a prebuilt one instead)."; exit 1; }
@@ -224,7 +255,8 @@ echo "-- ArcGIS connection --"
 ask "Admin URL (on the box use https://localhost:6443)" "https://localhost:6443" SERVER
 ask "URL context (arcgis for :6443; the web-adaptor name otherwise)" "arcgis" CTX
 ask "Admin username" "siteadmin" ADMIN_USER
-read -r -s -p "  Admin password: " ADMIN_PASS; echo
+if ! read -r -s -p "  Admin password: " ADMIN_PASS; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+echo
 echo
 
 echo "-> requesting admin token (client=requestip)..."
@@ -306,6 +338,23 @@ fi
 echo "   ok (itemID ${ITEMID})."
 echo
 
+# --- rollback safety: snapshot the live provider dir before a destructive update ---------
+# An update RE-EXTRACTS over the provider dir, and a FAILED update can leave it deleted until a
+# good package is registered — 404ing every existing service. A cheap copy first gives a
+# concrete rollback path. (register, i.e. first install, has no live dir to protect.)
+BACKUP_DIR=""
+if [ "$ACTION" = "update" ] && [ -d "$PROVIDER_DIR" ]; then
+  BACKUP_DIR="${PROVIDER_DIR}.bak.$(date +%Y%m%d%H%M%S)"
+  echo "-> backing up the current provider dir before update:"
+  echo "     $PROVIDER_DIR  ->  $BACKUP_DIR"
+  if run_as_arcgis cp -a "$PROVIDER_DIR" "$BACKUP_DIR" 2>/dev/null; then
+    echo "   [ok] backup created."
+  else
+    echo "   [warn] could not create the backup (permissions?) — continuing WITHOUT a rollback copy."
+    BACKUP_DIR=""
+  fi
+fi
+
 # --- register or update ----------------------------------------------------------
 echo "-> ${ACTION}ing the provider..."
 RESP=$("${CURL[@]}" --max-time 120 "$SERVER/$CTX/admin/services/types/customdataproviders/$ACTION" \
@@ -313,12 +362,20 @@ RESP=$("${CURL[@]}" --max-time 120 "$SERVER/$CTX/admin/services/types/customdata
 STATUS=$(printf '%s' "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status','') )" 2>/dev/null)
 if [ "$STATUS" = "success" ]; then
   echo "   [ok] $ACTION succeeded."
+  [ -n "$BACKUP_DIR" ] && echo "   (pre-update backup kept at $BACKUP_DIR — remove it once the upgrade is confirmed working.)"
 else
   echo "!! $ACTION did not report success. The server said:"
   printf '%s\n' "$RESP" | head -c 2000; echo
   if [ "$ACTION" = "update" ]; then
     echo "   [!] If this update FAILED, the provider directory may have been removed — existing"
-    echo "       services will 404 until a good .cdpk is registered. Re-run with a correct package."
+    echo "       services will 404 until a good .cdpk is registered."
+    if [ -n "$BACKUP_DIR" ]; then
+      echo "   Rollback — restore the pre-update copy and restart:"
+      echo "       sudo -u arcgis cp -a '$BACKUP_DIR' '$PROVIDER_DIR'"
+      echo "       sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+    else
+      echo "       Re-run with a correct package to restore service."
+    fi
   fi
   echo "   (Common: the .cdpk failed provider validation — check the server log for the module error,"
   echo "    e.g. a bad exclude that stripped a node_modules '.env'-named file.)"
@@ -353,9 +410,20 @@ fi
 
 # Verify the provider is listed (only meaningful after a restart / when it was already loaded).
 echo "-> verifying the provider is registered..."
+VERIFIED="unknown"
 if [ "$RESTARTED" = "1" ]; then
-  # Token minted before the restart may no longer be valid; re-mint for the check.
-  mint_token requestip; TOKEN=$(printf '%s' "$MINT_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
+  # startserver.sh returns BEFORE the admin API is back up (the server needs ~1-2 min more), and
+  # the pre-restart token is now invalid. Poll for readiness by re-minting, up to ~2 min, so the
+  # verify below reflects reality instead of racing the restart and always warning "not yet".
+  echo "   (waiting for the admin API to come back up after restart — up to ~2 min)"
+  TOKEN=""
+  for _a in $(seq 1 12); do
+    mint_token requestip
+    TOKEN=$(printf '%s' "$MINT_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
+    [ -n "$TOKEN" ] && { echo "   [ok] admin API is back (after ~$(( (_a-1)*10 ))s)."; break; }
+    sleep 10
+  done
+  [ -z "$TOKEN" ] && echo "   [warn] admin API still not answering after ~2 min."
 fi
 if [ -n "$TOKEN" ]; then
   VER_JSON=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
@@ -375,17 +443,33 @@ if isinstance(d,dict):
 print('yes' if target in names else 'no')
 " 2>/dev/null)
   case "$VER" in
-    yes) echo "   [ok] '$PROVIDER_NAME' is registered." ;;
-    no)  echo "   [warn] '$PROVIDER_NAME' not in the provider list yet."
+    yes) VERIFIED="yes"; echo "   [ok] '$PROVIDER_NAME' is registered." ;;
+    no)  VERIFIED="no";  echo "   [warn] '$PROVIDER_NAME' not in the provider list yet."
          [ "$RESTARTED" = "1" ] || echo "          (expected — you haven't restarted yet.)" ;;
-    *)   echo "   [warn] could not read the provider list to confirm." ;;
+    *)   VERIFIED="unknown"; echo "   [warn] could not read the provider list to confirm." ;;
   esac
 else
-  echo "   [warn] no valid token to verify with (server may still be starting) — check Server Manager."
+  VERIFIED="pending"
+  echo "   [warn] no valid token to verify with (server may still be starting) — check Server Manager,"
+  echo "          or re-run diagnose-service.sh shortly to confirm the provider loaded."
 fi
 echo
 
+# Distinct, honest end states — and a nonzero exit when a restart happened but the provider
+# could not be confirmed, so callers/CI don't read the banner as success.
 echo "============================================================"
-echo " Done — provider '$PROVIDER_NAME' ${ACTION}ed."
+if [ "$RESTARTED" != "1" ]; then
+  echo " ${ACTION^} uploaded — NOT active yet. Restart to load it:"
+  echo "   sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+  RC=0
+else
+  case "$VERIFIED" in
+    yes)     echo " Done — provider '$PROVIDER_NAME' ${ACTION}ed and verified active."; RC=0 ;;
+    pending) echo " ${ACTION^} + restart done — server still starting; provider NOT yet confirmed."; RC=2 ;;
+    no)      echo " ${ACTION^} done but '$PROVIDER_NAME' is NOT in the provider list — check the server log."; RC=2 ;;
+    *)       echo " ${ACTION^} done — verification INCONCLUSIVE (couldn't read the provider list)."; RC=2 ;;
+  esac
+fi
 echo " Next: publish tables against it with publish-service.sh."
 echo "============================================================"
+exit "$RC"
