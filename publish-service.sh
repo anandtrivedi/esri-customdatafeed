@@ -23,6 +23,11 @@
 #       sudo chmod 600 /home/arcgis/.databrickscfg
 #   (or set DATABRICKS_CONFIG_FILE in init_user_param.sh to a path arcgis can read).
 #
+# NOTE: the ArcGIS admin token is minted once at startup and reused for the whole
+#   session. ArcGIS tokens default to ~60 min. If you publish many tables across a
+#   very long session and a create/start call later fails with an "invalid/expired
+#   token" message, just re-run the script — it mints a fresh token each run.
+#
 set -uo pipefail   # deliberately NOT -e: we handle and explain errors ourselves.
 
 # --- verify required tools are present (air-gapped: no external downloads) ----
@@ -32,9 +37,15 @@ done
 
 PROVIDER_NAME="databricks-geospatial-provider"
 
-# Always clean up password temp files, even on Ctrl-C or kill.
+# Always clean up password temp files. EXIT handles the cleanup for every exit
+# path; INT/TERM additionally *terminate* the script (trapping a signal otherwise
+# replaces the default terminate, so Ctrl-C would fall through into the next prompt
+# — and the confirmation prompt defaults to "y"). SIGKILL (kill -9) cannot be trapped.
 _tmppass=""; _tmppass2=""
-trap 'rm -f "${_tmppass}" "${_tmppass2}"' EXIT INT TERM
+_cleanup() { rm -f "${_tmppass}" "${_tmppass2}"; }
+trap _cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
@@ -67,7 +78,7 @@ echo
 # (it goes via a temp file), but an unverified TLS connection can expose it in transit.
 echo "-> requesting admin token (client=requestip)..."
 _tmppass=$(mktemp); chmod 600 "$_tmppass"; printf '%s' "$ADMIN_PASS" > "$_tmppass"
-TOKEN_RESP=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+TOKEN_RESP=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
   --data-urlencode "username=$ADMIN_USER" \
   --data-urlencode "password@$_tmppass" \
   --data-urlencode "client=requestip" \
@@ -95,7 +106,7 @@ echo
 echo "== Preflight =="
 echo "  [ok]   ArcGIS admin reachable, token acquired"
 
-PROV_JSON=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
+PROV_JSON=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
   --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 PROV_PARSE_OK=$(printf '%s' "$PROV_JSON" | python3 -c "import sys,json; json.load(sys.stdin); print('yes')" 2>/dev/null)
 PROVS=()
@@ -403,7 +414,7 @@ while true; do
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
-  CREATE=$(curl -sk --connect-timeout 10 --max-time 60 "$SERVER/$CTX/admin/services/createService" \
+  CREATE=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 60 "$SERVER/$CTX/admin/services/createService" \
     --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
   STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
   OK=0
@@ -421,7 +432,7 @@ while true; do
   if [ "$OK" = "1" ]; then
     echo
     echo "-> starting service..."
-    START_RESP=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
+    START_RESP=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/services/$SERVICE_NAME.FeatureServer/start" \
       --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
     START_STATUS=$(printf '%s' "$START_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status') or '')" 2>/dev/null)
     if [ "$START_STATUS" = "success" ]; then
@@ -436,24 +447,28 @@ while true; do
     # Password written to temp file so it never appears in process args.
     echo "-> sample query (5 rows)..."
     _tmppass2=$(mktemp); chmod 600 "$_tmppass2"; printf '%s' "$ADMIN_PASS" > "$_tmppass2"
-    QTOKEN=$(curl -sk --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
+    QTOKEN=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 30 "$SERVER/$CTX/admin/generateToken" \
       --data-urlencode "username=$ADMIN_USER" --data-urlencode "password@$_tmppass2" \
       --data-urlencode "client=referer" --data-urlencode "referer=$SERVER" \
       --data-urlencode "f=json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('token') or '')" 2>/dev/null)
     rm -f "$_tmppass2"
     [ -z "$QTOKEN" ] && QTOKEN="$TOKEN"
     # Use -G with --data-urlencode so token and all params are properly URL-encoded.
-    Q=$(curl -sk --connect-timeout 10 --max-time 60 -G -H "Referer: $SERVER" \
-      "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query" \
-      --data-urlencode "where=1=1" \
-      --data-urlencode "outFields=*" \
-      --data-urlencode "resultRecordCount=5" \
-      --data-urlencode "returnGeometry=true" \
-      --data-urlencode "token=$QTOKEN" \
-      --data-urlencode "f=json")
-    # Parse the query result: distinguish a valid (possibly empty) FeatureCollection
-    # from an error response so an empty table doesn't show false-failure diagnostics.
-    QPARSE=$(printf '%s' "$Q" | python3 -c "
+    # Retry on cold start: a freshly created service can 404 for a few seconds while the
+    # provider initializes (maxStartupTime is 300s). Poll up to ~30s before judging failure.
+    QPARSE=""; Q=""
+    for _attempt in 1 2 3 4 5 6; do
+      Q=$(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-time 60 -G -H "Referer: $SERVER" \
+        "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query" \
+        --data-urlencode "where=1=1" \
+        --data-urlencode "outFields=*" \
+        --data-urlencode "resultRecordCount=5" \
+        --data-urlencode "returnGeometry=true" \
+        --data-urlencode "token=$QTOKEN" \
+        --data-urlencode "f=json")
+      # Parse: valid (possibly empty) FeatureCollection vs error, so an empty table
+      # doesn't trip the false-failure diagnostics below.
+      QPARSE=$(printf '%s' "$Q" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -466,6 +481,14 @@ elif 'features' in d:
 else:
     print('unknown')
 " 2>/dev/null || echo "unparseable")
+      # Success or a definitive data error → stop. Keep retrying only while the service
+      # still looks like it is starting (404 / not found / not yet available).
+      case "$QPARSE" in ok:*) break;; esac
+      if printf '%s' "$Q" | grep -qiE "Service not found|not available|404"; then
+        if [ "$_attempt" -lt 6 ]; then echo "   (service still starting — retry $_attempt/6)"; sleep 5; continue; fi
+      fi
+      break
+    done
     NFEAT=$(printf '%s' "$QPARSE" | sed 's/^ok://;s/[^0-9].*//' | grep -E '^[0-9]+$' || echo "0")
     [[ "$NFEAT" =~ ^[0-9]+$ ]] || NFEAT=0
     echo
