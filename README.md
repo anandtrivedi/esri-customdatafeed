@@ -73,7 +73,7 @@ Work through the five steps in order. They're all done **on the ArcGIS Server ho
 
 > **Which user runs what:**
 > - **Your SSH user** (typically `ubuntu` on a fresh AWS AMI) runs the build and packaging work — `git clone`, `npm install`, `zip`, and `databricks configure`.
-> - **`sudo` is required** for anything that reads or writes under `/opt/arcgis/` (the ArcGIS Server install tree). Editing `init_user_param.sh`, placing `.databrickscfg`, recreating `.env` after a `.cdpk` re-extraction, and tailing logs all need `sudo`.
+> - **`sudo` is required** for anything that reads or writes under `/opt/arcgis/` (the ArcGIS Server install tree). Editing `init_user_param.sh`, placing `.databrickscfg`, and tailing logs all need `sudo`.
 > - **`sudo -u arcgis`** is used to start, stop, or restart ArcGIS Server itself, because the server processes run as the `arcgis` OS user. Example: `sudo -u arcgis /opt/arcgis/server/startserver.sh`.
 > - Files you create under `/opt/arcgis/...` should be `chown arcgis:arcgis` so the server can read them.
 
@@ -214,13 +214,12 @@ curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/
 
 To retire a provider instead, unregister it by `.cdpk` filename (REST): `.../customdataproviders/unregister` with `--data-urlencode "customdataFilename=old-provider-name.cdpk"`. Restart the server afterward either way.
 
-> ⚠️ **Back up `.env` before any update.** The update extracts the new `.cdpk` over the provider directory (wiping any `.env` you added), and if the new package fails validation the runtime **deletes the provider directory entirely** — services stay down until a good `.cdpk` is in. Back up first: `sudo cp /opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env /tmp/cdf.env.bak`.
-
 > **What just happened.** Registration extracts your `.cdpk` into `/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/` and validates it by starting the provider with the bundled Node runtime. The server places the files automatically — you don't copy anything manually. The `git clone` in your home directory and the `.cdpk` were just staging artifacts.
 >
 > **After registration — every time:**
-> 1. **Recreate `.env`** in the live provider directory (`/opt/arcgis/server/framework/runtime/customdata/providers/databricks-geospatial-provider/.env`) if you use one — the extraction overwrites it. (The `.env` in your home-dir clone is not used at runtime.) This needs `sudo` — see the [user-context callout](#setup). **Prefer `.databrickscfg` + `init_user_param.sh`** (Steps 3 and 5) over a provider-dir `.env`, precisely because those survive re-registration.
-> 2. **Restart ArcGIS Server** (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`) so the new code loads.
+> 1. **Restart ArcGIS Server** (`sudo -u arcgis /opt/arcgis/server/stopserver.sh` then `startserver.sh`) so the new code loads.
+>
+> **Nothing else to do.** Credentials live in `.databrickscfg` at `/home/arcgis/.databrickscfg` — outside the provider directory — and are never touched by a `.cdpk` extraction. This is why Step 3 uses that location.
 
 ### Step 3 — Configure the Databricks connection
 
@@ -412,16 +411,16 @@ These steps harden the deployment for production. Skip if you're just trying the
 
 #### Set environment variables in `init_user_param.sh`
 
-ArcGIS Server reads a startup script (typically at `/opt/arcgis/server/usr/init_user_param.sh` on Linux) and exports anything in it as environment variables for the embedded Node.js runtime. Put Databricks credentials here for production rather than only in the provider's `.env` — `init_user_param.sh` is the most reliable channel into the JVM-hosted runtime.
+ArcGIS Server reads a startup script (typically at `/opt/arcgis/server/usr/init_user_param.sh` on Linux) and exports anything in it as environment variables for the embedded Node.js runtime. Use it to set the path to your `.databrickscfg` (so the provider finds it regardless of where the `arcgis` OS user's home directory is) and any operational tuning variables — pool sizes, query timeouts, audit logging:
 
 ```bash
 # /opt/arcgis/server/usr/init_user_param.sh
-export DATABRICKS_SERVER_HOSTNAME=your-workspace.cloud.databricks.com
-export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
-export DATABRICKS_ACCESS_TOKEN=dapi...
+export DATABRICKS_CONFIG_FILE=/home/arcgis/.databrickscfg   # explicit path to credentials
+export DATABRICKS_MAX_RECORD_COUNT=2000                      # optional tuning
+export ENABLE_AUDIT_LOG=false                                # optional tuning
 ```
 
-When you use a `.databrickscfg`, it lives at `/home/arcgis/.databrickscfg` (`chmod 600`, `chown arcgis:arcgis`) so only the `arcgis` OS user (the one ArcGIS Server runs as) can read it — see [`.databrickscfg` location on ArcGIS Server](#databrickscfg-location-on-arcgis-server). Restart ArcGIS Server after editing `init_user_param.sh`.
+Restart ArcGIS Server after editing `init_user_param.sh`. Credentials themselves (host, token, warehouse path) belong in `.databrickscfg` — not here — so they're in one place and never duplicated.
 
 #### Admin token binding: `requestip` vs `referer`
 
