@@ -39,8 +39,14 @@ DIST_DIR="$SCRIPT_DIR/dist"
 [ -f "$NODEJS_DIR/cdconfig.json" ] || { echo "!! $NODEJS_DIR/cdconfig.json not found — run from the repo root."; exit 1; }
 
 PROVIDER_NAME=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('name') or '')" "$NODEJS_DIR/cdconfig.json")
+# ArcGIS validates the UPLOADED .cdpk filename against cdconfig.json's fileName at register time
+# ("config fileName does not match uploaded cdpk name"), and the Server Manager GUI can't override
+# the upload name — so the artifact MUST be named exactly cdconfig.fileName. Version goes in the
+# release tag + manifest, NOT the filename.
+CDPK_FILENAME=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('fileName') or ((d.get('name') or '')+'.cdpk'))" "$NODEJS_DIR/cdconfig.json")
 VERSION=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('version') or '')" "$NODEJS_DIR/package.json")
 [ -n "$PROVIDER_NAME" ] || { echo "!! could not read provider name from cdconfig.json."; exit 1; }
+[ -n "$CDPK_FILENAME" ] || { echo "!! could not read fileName from cdconfig.json."; exit 1; }
 [ -n "$VERSION" ] || { echo "!! could not read version from package.json."; exit 1; }
 GIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=""; git -C "$SCRIPT_DIR" diff --quiet 2>/dev/null || GIT_DIRTY=" (working tree DIRTY)"
@@ -114,7 +120,9 @@ echo
 
 # --- package ----------------------------------------------------------------------------------
 mkdir -p "$DIST_DIR"
-CDPK_NAME="${PROVIDER_NAME}-v${VERSION}.cdpk"
+# Canonical name (== cdconfig.fileName) so it registers via the GUI and the script without a
+# rename. The version is carried by the GitHub release tag + MANIFEST, not the filename.
+CDPK_NAME="$CDPK_FILENAME"
 CDPK_PATH="$DIST_DIR/$CDPK_NAME"
 rm -f "$CDPK_PATH"
 echo "-> packaging $CDPK_NAME ..."
