@@ -384,6 +384,99 @@ else
 fi
 echo
 
+# --- least-privilege grant help (opt-in) ---------------------------------------
+# Lakehouse: resolve the EXACT identity the provider authenticates as (via the CLI's
+# current-user me on the SAME profile), build the three minimal Unity Catalog grants for
+# THIS one table (USE CATALOG, USE SCHEMA, SELECT on the table/view — nothing wider), print
+# them, and optionally run them via the Statement Execution API (default No). Safety rules:
+# never REVOKE/DENY; never a group; grant target is the resolved principal only; identifiers
+# are strict-charset validated and backtick-quoted; one securable per API call. Warehouse
+# CAN USE is a permissions-API action (not SQL) — mentioned separately, never bundled/run.
+GRANT_PRINCIPAL=""   # resolved once per session and cached
+
+resolve_grant_principal() {
+  [ -n "$GRANT_PRINCIPAL" ] && return
+  local who
+  if [ -n "$WORKSPACE" ]; then
+    who=$(timeout 15 databricks current-user me --profile "$WORKSPACE" -o json 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('userName') or '')" 2>/dev/null)
+  else
+    who=$(timeout 15 databricks current-user me -o json 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('userName') or '')" 2>/dev/null)
+  fi
+  GRANT_PRINCIPAL="$who"
+}
+
+offer_lakehouse_grants() {
+  [ "$CLI_OK" = 1 ] || {
+    echo "  (Databricks CLI not available — skipping grant help. Grant USE CATALOG / USE SCHEMA /"
+    echo "   SELECT on $TABLE to the provider's identity manually; see the README.)"; return; }
+
+  local cat sch tbl safe=1 part
+  IFS='.' read -r cat sch tbl <<< "$TABLE"
+  for part in "$cat" "$sch" "$tbl"; do
+    printf '%s' "$part" | grep -qE '^[A-Za-z0-9_]+$' || safe=0
+  done
+
+  resolve_grant_principal
+  # Must be a single email (user) or a UUID (service-principal app-id). Anything else —
+  # empty, a group name, a list — aborts the offer so we never widen exposure.
+  if ! printf '%s' "$GRANT_PRINCIPAL" | grep -qE '^[^@[:space:],]+@[^@[:space:],]+$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+    echo "  (Could not resolve a single principal to grant to (got: '${GRANT_PRINCIPAL:-<empty>}')."
+    echo "   Skipping grant help — grant USE CATALOG / USE SCHEMA / SELECT on $TABLE manually.)"
+    return
+  fi
+
+  # TABLE vs VIEW — reuse the table_type the CLI already exposes.
+  local objkind="TABLE" ttype
+  ttype=$(timeout 15 databricks tables get "$TABLE" --profile "${WORKSPACE:-DEFAULT}" -o json 2>/dev/null | python3 -c "import sys,json;print((json.load(sys.stdin).get('table_type') or '').upper())" 2>/dev/null)
+  case "$ttype" in *VIEW*) objkind="VIEW";; esac
+
+  local g1="GRANT USE CATALOG ON CATALOG \`$cat\` TO \`$GRANT_PRINCIPAL\`;"
+  local g2="GRANT USE SCHEMA ON SCHEMA \`$cat\`.\`$sch\` TO \`$GRANT_PRINCIPAL\`;"
+  local g3="GRANT SELECT ON $objkind \`$cat\`.\`$sch\`.\`$tbl\` TO \`$GRANT_PRINCIPAL\`;"
+
+  echo
+  echo "  -- Least-privilege grants --"
+  echo "  The provider will query as: $GRANT_PRINCIPAL"
+  echo "  Minimum grants to read this $objkind:"
+  printf '    %s\n    %s\n    %s\n' "$g1" "$g2" "$g3"
+  echo "  Note: the principal also needs CAN USE on the SQL Warehouse — set that in the"
+  echo "  warehouse Permissions UI (or permissions API). It is not a SQL grant and is not run here."
+
+  if [ "$safe" != 1 ]; then
+    echo "  (Table name has characters outside [A-Za-z0-9_] — not offering to run these"
+    echo "   automatically; copy them into a Databricks SQL editor or hand to a UC admin.)"
+    return
+  fi
+
+  ask "Attempt to run these three grants now with your CLI credentials? (y/N)" "n" DOGRANT
+  case "$DOGRANT" in y|Y|yes|YES) : ;; *) echo "  (not run — the statements above are yours to apply)"; return;; esac
+
+  local wid="${WAREHOUSE_PATH##*/}" stmt state body
+  for stmt in "$g1" "$g2" "$g3"; do
+    echo "   -> $stmt"
+    body=$(python3 -c "import json,sys;print(json.dumps({'warehouse_id':sys.argv[1],'statement':sys.argv[2],'wait_timeout':'30s'}))" "$wid" "$stmt")
+    state=$(timeout 45 databricks api post /api/2.0/sql/statements --profile "${WORKSPACE:-DEFAULT}" --json "$body" 2>/dev/null \
+      | python3 -c "import sys,json;print((json.load(sys.stdin).get('status') or {}).get('state') or '')" 2>/dev/null)
+    if [ "$state" = "SUCCEEDED" ]; then
+      echo "      ok"
+    else
+      echo "      !! not applied (state='${state:-error}') — you likely lack GRANT rights on this object."
+      echo "      Hand the statements above to a Unity Catalog admin to run. Continuing."
+      break
+    fi
+  done
+}
+
+offer_lakebase_grants() {
+  echo
+  echo "  -- Lakebase grants (emit only — run in the Lakebase SQL editor as the DB owner) --"
+  echo "  Replace <role> with the Postgres role the provider connects as:"
+  printf '    GRANT USAGE ON SCHEMA "%s" TO "<role>";\n' "$LB_SCHEMA"
+  printf '    GRANT SELECT ON TABLE "%s"."%s" TO "<role>";\n' "$LB_SCHEMA" "$LB_TABLE"
+  [ "$EDITING" = "true" ] && printf '    GRANT INSERT, UPDATE, DELETE ON TABLE "%s"."%s" TO "<role>";\n' "$LB_SCHEMA" "$LB_TABLE"
+  echo "  (Lakebase is a separate Postgres engine — these are not run by this wizard.)"
+}
+
 # --- publish loop: one table per pass, reusing connection/workspace/warehouse --
 while true; do
   echo "------------------------------------------------------------"
@@ -459,6 +552,11 @@ while true; do
        ask "Publish another table from the same data source? (y/n)" "n" MORE
        case "$MORE" in y|Y|yes|YES) echo; continue;; *) break;; esac ;;
   esac
+  echo
+
+  # Optional least-privilege grant help, BEFORE createService so the sample-query
+  # verification below actually confirms the grant took effect.
+  if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; else offer_lakebase_grants; fi
   echo
 
   export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC \
