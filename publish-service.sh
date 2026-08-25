@@ -462,6 +462,10 @@ offer_lakehouse_grants() {
   ask "Attempt to run these three grants now with your CLI credentials? (y/N)" "n" DOGRANT
   case "$DOGRANT" in y|Y|yes|YES) : ;; *) echo "  (not run — the statements above are yours to apply)"; return;; esac
 
+  # Note: with a named WORKSPACE (the normal pick-list path) the principal was resolved and
+  # the grants execute under the SAME profile. With a blank workspace (env-var default) the
+  # two both fall back to the CLI's default profile, so they still coincide; the resolved
+  # principal is displayed and validated regardless, so scope cannot widen either way.
   local stmt state body
   for stmt in "$g1" "$g2" "$g3"; do
     echo "   -> $stmt"
@@ -676,6 +680,30 @@ else:
       echo "   REST (on box): $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0"
       echo "   Via web adaptor: https://<your-host>/<webadaptor>/rest/services/$SERVICE_NAME/FeatureServer/0"
       PUBLISHED+=("$SERVICE_NAME  ->  $SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0")
+
+      # Anonymous-exposure probe (read-only, warning-only): repeat the query with NO token.
+      # If it still returns features, the service is readable WITHOUT authentication — which
+      # depends on the ArcGIS Server's global security config, not this script, and which
+      # least-privilege source grants do NOT prevent. Warn loudly so the operator can lock it
+      # down if that exposure is unintended. This never changes the publish outcome.
+      ANON=$("${CURL[@]}" --max-time 30 -G \
+        "$SERVER/$CTX/rest/services/$SERVICE_NAME/FeatureServer/0/query" \
+        --data-urlencode "where=1=1" --data-urlencode "resultRecordCount=1" \
+        --data-urlencode "returnGeometry=false" --data-urlencode "f=json")
+      ANONSTATE=$(printf '%s' "$ANON" | python3 -c "
+import sys, json
+try: d = json.load(sys.stdin)
+except Exception: print('unknown'); sys.exit()
+print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev/null || echo "unknown")
+      if [ "$ANONSTATE" = "open" ]; then
+        echo
+        echo "   !!  ANONYMOUS ACCESS: this service answered a query with NO token — its rows are"
+        echo "       readable by anyone who can reach $SERVER. Source-side least-privilege grants"
+        echo "       do NOT prevent this. If that exposure is unintended, require authentication in"
+        echo "       ArcGIS Server security, or restrict the service/folder permissions, before use."
+      else
+        echo "   [ok] anonymous query refused — the service requires authentication."
+      fi
     elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
       echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
       echo "  Verify manually with a referer-bound token + a matching 'Referer: $SERVER' header on the query."
