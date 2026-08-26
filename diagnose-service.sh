@@ -343,7 +343,7 @@ try: d=json.loads(os.environ['RESP'])
 except Exception: print('unparseable'); raise SystemExit
 if isinstance(d,dict) and 'error' in d:
     e=d['error'] if isinstance(d['error'],dict) else {}
-    print('error:%s' % str(e.get('message', d['error'])).replace('\n',' ').replace('\r',' ')[:140])
+    print('error:%s:%s' % (e.get('code',''), str(e.get('message', d['error'])).replace('\n',' ').replace('\r',' ')[:140]))
 elif isinstance(d,dict) and 'features' in d:
     print('ok:%d' % len(d['features']))
 else:
@@ -448,6 +448,13 @@ else
     case "$DEFINITIVE_Q" in
       ok:*)    echo " * HEALTHY (CONFIRMED via a Portal token) — query returned ${DEFINITIVE_Q#ok:} feature(s)."
                echo "     Provider + data path are good; the server-token 500 earlier was only the federated token." ;;
+      error:403:*|error:498:*|error:499:*|*nvalid*token*|*ClientID*|*oken*equired*|*ermission*|*uthorized*|*haring*)
+               # Token/permission-shaped failure — a valid Portal token can still be refused because the
+               # service's Portal ITEM isn't shared to that user, or the token is referer-mismatched/expired.
+               # That is NOT a confirmed provider/data failure, so don't stamp it as one.
+               echo " * INCONCLUSIVE (Portal token / item-sharing) — the Portal-token query returned ${DEFINITIVE_Q#error:}."
+               echo "     That's a token/permission problem (e.g. the service's Portal item isn't shared to this"
+               echo "     user), NOT a confirmed provider failure. Fix Portal sharing / use a valid Portal token, then retry." ;;
       error:*) echo " * REAL FAILURE (CONFIRMED via a Portal token) — query returned ${DEFINITIVE_Q#error:}."
                echo "     A provider/data error, not a token issue -> tail 'Custom_data_feeds' for the SQL/auth cause."
                PROBLEMS=$((PROBLEMS+1)) ;;

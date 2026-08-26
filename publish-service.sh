@@ -179,10 +179,18 @@ echo
 # Detect federation. A federated ArcGIS Server has owningSystemUrl set — and on a federated
 # server, service access is governed by PORTAL item sharing, NOT the server's esriEveryone
 # principal. This changes what the 'private' Advanced option can actually guarantee (below).
-FEDERATED=0
+# Tri-state: yes / standalone / unknown. If rest/info can't be read (proxy / login redirect /
+# timeout), stay "unknown" and treat a /query 500 the same cautious way as federated (INCONCLUSIVE),
+# so a transient detection blip on a genuinely federated box never turns a federated token rejection
+# into a false hard failure.
+FEDERATED=unknown; OWNING=""
 FEDINFO=$("${CURL[@]}" --max-time 20 "$SERVER/$CTX/rest/info" --data-urlencode "f=json" -G 2>/dev/null)
-OWNING=$(printf '%s' "$FEDINFO" | python3 -c "import sys,json;print((json.load(sys.stdin).get('owningSystemUrl') or '').strip())" 2>/dev/null)
-if [ -n "$OWNING" ]; then FEDERATED=1; echo "   [info] federated ArcGIS Enterprise detected (Portal: $OWNING)"; echo; fi
+FED_OK=$(printf '%s' "$FEDINFO" | python3 -c "import sys,json;d=json.load(sys.stdin);print('yes' if (isinstance(d,dict) and 'error' not in d) else 'no')" 2>/dev/null)
+if [ "$FED_OK" = "yes" ]; then
+  OWNING=$(printf '%s' "$FEDINFO" | python3 -c "import sys,json;print((json.load(sys.stdin).get('owningSystemUrl') or '').strip())" 2>/dev/null)
+  if [ -n "$OWNING" ]; then FEDERATED=yes; echo "   [info] federated ArcGIS Enterprise detected (Portal: $OWNING)"; echo
+  else FEDERATED=standalone; fi
+fi
 
 # --- PREFLIGHT: verify prerequisites before asking for any service details -----
 # Runs on invoke. Hard-stops on things that guarantee failure (no provider
@@ -761,7 +769,7 @@ while true; do
         echo "   [note] this ONLY removes anonymous access — it does not grant your users. Grant the"
         echo "          authorized ArcGIS roles/users access separately (Server Manager, or"
         echo "          permissions/add with isAllowed=true)."
-        if [ "$FEDERATED" = "1" ]; then
+        if [ "$FEDERATED" = "yes" ]; then
           echo "   [!] FEDERATED server: the authoritative access control here is PORTAL ITEM SHARING,"
           echo "       not this server-level deny. Set the service's Portal item to NOT shared with"
           echo "       'Everyone (public)'. Note: a federated server's /query requires a token"
@@ -875,7 +883,7 @@ print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev
           echo "       private, or restrict the service/folder permissions in ArcGIS Server security."
         fi
       elif [ "$ANONSTATE" = "protected" ]; then
-        if [ "$PRIVATE" = "true" ] && [ "$FEDERATED" = "1" ]; then
+        if [ "$PRIVATE" = "true" ] && [ "$FEDERATED" = "yes" ]; then
           echo "   [ok] anonymous query refused — BUT this is a federated server, where /query needs a"
           echo "        token regardless, so this does NOT confirm your deny worked. Verify the item's"
           echo "        Portal sharing is not public."
@@ -890,16 +898,22 @@ print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev
     elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
       echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
       echo "  Verify manually with a referer-bound token + a matching 'Referer: $SERVER' header on the query."
-    elif [ "$FEDERATED" = "1" ] && printf '%s' "$Q" | grep -qiE "Error performing query operation|\"code\" *: *500"; then
+    elif [ "$FEDERATED" != "standalone" ] && printf '%s' "$Q" | grep -qiE "Error performing query operation|\"code\" *: *500"; then
       # On a federated server the FeatureServer's query-auth step rejects a server-minted token and
       # returns a GENERIC 500 (the 'Invalid token' is only in the server log, not this response body),
-      # so the literal-'Invalid token' check above misses it. Report INCONCLUSIVE, not a data failure.
-      echo "  Service CREATED + STARTED; auto-verify INCONCLUSIVE on this FEDERATED server."
-      echo "  A federated server rejects its own tokens on /query (delegated to Portal), which comes back"
-      echo "  as a generic 500 — so this check can't confirm the data path from here. Verify with a PORTAL"
-      echo "  token, or add the layer in Portal and query there. (NB: a 500 could also be a real provider"
-      echo "  error; if the Portal-token query also fails, tail the 'Custom_data_feeds' log — a SELECT"
-      echo "  returning rows means the provider is healthy and it is purely the token.)"
+      # so the literal-'Invalid token' check above misses it. Treat federated AND unknown (rest/info
+      # couldn't be read) the same cautious way — INCONCLUSIVE, never a false data failure.
+      if [ "$FEDERATED" = "yes" ]; then
+        echo "  Service CREATED + STARTED; auto-verify INCONCLUSIVE on this FEDERATED server."
+        echo "  A federated server rejects its own tokens on /query (delegated to Portal), which comes back"
+        echo "  as a generic 500 — so this check can't confirm the data path from here."
+      else
+        echo "  Service CREATED + STARTED; auto-verify INCONCLUSIVE (couldn't confirm whether this server"
+        echo "  is federated; a federated server would reject this server token on /query with just such a 500)."
+      fi
+      echo "  Verify with a PORTAL token, or add the layer in Portal and query there. (NB: a 500 could also"
+      echo "  be a real provider error; if the Portal-token query ALSO fails, tail the 'Custom_data_feeds'"
+      echo "  log — a SELECT returning rows means the provider is healthy and it is purely the token.)"
     else
       echo "!! Service query returned an error or unexpected response. Raw response:"
       printf '%s\n' "$Q" | head -c 2000; echo
