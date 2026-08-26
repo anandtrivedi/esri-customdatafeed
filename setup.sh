@@ -263,9 +263,17 @@ run_child() {   # $1 = script name (relative to SCRIPT_DIR), rest = args
   if [ "$rc" -eq 0 ]; then
     echo "-> $s finished (ok)."
   else
-    echo "-> $s exited with status $rc — NOT completed."
-    echo "   You can: retry it from the menu, run it directly for the full output:  bash $s"
-    echo "   or do this step by hand — see the matching section in the repo README."
+    local ref
+    case "$s" in
+      configure-databricks.sh) ref="README - 'Configure the Databricks connection'";;
+      register-provider.sh)    ref="README - 'Register the provider'";;
+      publish-service.sh)      ref="README - 'Publish a feature service'";;
+      diagnose-service.sh)     ref="README - 'Troubleshooting'";;
+      *)                       ref="the matching section in the repo README";;
+    esac
+    echo "-> $s did NOT complete (status $rc). Nothing is stuck — the menu re-checks the server"
+    echo "   state below, so you can fix the one thing it reported and pick this step again."
+    echo "   Do it by hand instead: $ref.   (Full output: run  bash $s  directly.)"
   fi
   return "$rc"
 }

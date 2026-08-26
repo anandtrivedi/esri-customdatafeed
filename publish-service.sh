@@ -720,7 +720,10 @@ while true; do
     # Require BOTH the 6843 port AND 'Connection refused' together (in either order) so a service
     # name/param containing '6843', or an unrelated connection error, can't trigger retries.
     if printf '%s' "$CREATE" | grep -qiE "6843[^\"]*Connection refused|Connection refused[^\"]*6843"; then
-      if [ "$_c" -lt 12 ]; then echo "   (server not ready yet — service port 6843 refused; retry $_c/12, waiting 15s)"; sleep 15; continue; fi
+      if [ "$_c" -lt 12 ]; then
+        [ "$_c" = 1 ] && echo "   waiting for the ArcGIS service container (port 6843) — it starts a bit after the web tier following a restart; retrying up to ~3 min:"
+        echo "     …not ready, retry $_c/12"; sleep 15; continue
+      fi
     fi
     break
   done
