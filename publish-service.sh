@@ -688,10 +688,15 @@ while true; do
   if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; else offer_lakebase_grants; fi
   echo
 
-  # Fail-closed privacy: a PRIVATE service is created STOPPED, anonymous access is denied and
-  # verified, and only THEN is it started — so it is never both running and world-readable.
-  # Public services create STARTED as before.
-  if [ "$PRIVATE" = "true" ]; then CREATE_STATE="STOPPED"; else CREATE_STATE="STARTED"; fi
+  # Always create STOPPED, then /start below (the start step already runs for every service and
+  # is verified with a retrying sample query). Two reasons:
+  #  1) Fail-closed privacy: a PRIVATE service must deny anonymous access BEFORE it ever runs, so
+  #     it is never both started and world-readable.
+  #  2) Robustness: creating with configuredState=STARTED makes ArcGIS start an instance
+  #     SYNCHRONOUSLY inside createService, which on some boxes races the service's SOC coming up
+  #     and fails the whole create with "Connect to localhost:6843 ... Connection refused" (seen
+  #     reproducibly on a federated 12.1 box). Create STOPPED + a separate /start avoids that race.
+  CREATE_STATE="STOPPED"
   export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC \
          LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME MIN_INST MAX_INST \
          PRIVATE MAX_IDLE CREATE_STATE
@@ -863,6 +868,16 @@ print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev
     elif printf '%s' "$Q" | grep -qiE "Invalid token|ClientID does not match|Token Required"; then
       echo "  Service CREATED + STARTED; auto-verify inconclusive (a token technicality, not a data problem)."
       echo "  Verify manually with a referer-bound token + a matching 'Referer: $SERVER' header on the query."
+    elif [ "$FEDERATED" = "1" ] && printf '%s' "$Q" | grep -qiE "Error performing query operation|\"code\" *: *500"; then
+      # On a federated server the FeatureServer's query-auth step rejects a server-minted token and
+      # returns a GENERIC 500 (the 'Invalid token' is only in the server log, not this response body),
+      # so the literal-'Invalid token' check above misses it. Report INCONCLUSIVE, not a data failure.
+      echo "  Service CREATED + STARTED; auto-verify INCONCLUSIVE on this FEDERATED server."
+      echo "  A federated server rejects its own tokens on /query (delegated to Portal), which comes back"
+      echo "  as a generic 500 — so this check can't confirm the data path from here. Verify with a PORTAL"
+      echo "  token, or add the layer in Portal and query there. (NB: a 500 could also be a real provider"
+      echo "  error; if the Portal-token query also fails, tail the 'Custom_data_feeds' log — a SELECT"
+      echo "  returning rows means the provider is healthy and it is purely the token.)"
     else
       echo "!! Service query returned an error or unexpected response. Raw response:"
       printf '%s\n' "$Q" | head -c 2000; echo
