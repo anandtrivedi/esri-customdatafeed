@@ -703,9 +703,27 @@ while true; do
   SVC=$(build_service_json)
 
   echo "-> creating service '$SERVICE_NAME'..."
-  CREATE=$("${CURL[@]}" --max-time 60 "$SERVER/$CTX/admin/services/createService" \
-    --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
-  STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+  # Retry on a transient "Connect to localhost:6843 ... Connection refused": right after a
+  # server (re)start — e.g. setup.sh's register step restarts the server, then publishes — the
+  # service-container (SOC) port 6843 lags REST readiness, so createService can be refused for a
+  # few seconds even for a STOPPED create. This is transient; wait + retry. Definitive errors
+  # ('already exists', a bad parameter) do NOT match this and fall through immediately.
+  # Retry window ~180s: after a restart the SOC (service-container, port 6843) can take a
+  # couple of minutes to accept connections — longer than REST readiness — and createService is
+  # refused until then. maxStartupTime is 300s, so 12x15s stays within that envelope.
+  CREATE=""; STATUS=""
+  for _c in $(seq 1 12); do
+    CREATE=$("${CURL[@]}" --max-time 60 "$SERVER/$CTX/admin/services/createService" \
+      --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+    STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+    [ "$STATUS" = "success" ] && break
+    # Require BOTH the 6843 port AND 'Connection refused' together (in either order) so a service
+    # name/param containing '6843', or an unrelated connection error, can't trigger retries.
+    if printf '%s' "$CREATE" | grep -qiE "6843[^\"]*Connection refused|Connection refused[^\"]*6843"; then
+      if [ "$_c" -lt 12 ]; then echo "   (server not ready yet — service port 6843 refused; retry $_c/12, waiting 15s)"; sleep 15; continue; fi
+    fi
+    break
+  done
   OK=0
   if [ "$STATUS" = "success" ]; then
     echo "   created."; OK=1
