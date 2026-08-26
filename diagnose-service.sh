@@ -101,6 +101,33 @@ fi
 echo "[ok] admin token minted"
 echo
 
+# --- federation detection -------------------------------------------------------
+# A FEDERATED ArcGIS Server delegates token validation to its Portal, so a SERVER-minted
+# token (even a referer one) is REJECTED on /query — surfacing as HTTP 498/499 OR, on 12.x,
+# a generic 500 "Error performing query operation" that wraps an "Invalid token"
+# AGSSecurityException. That is a token technicality, NOT a provider/data failure. Detect it
+# here so the smoke test and assessment below don't misreport it as a Databricks/grants problem.
+# Tri-state: "yes" (owningSystemUrl present), "standalone" (rest/info OK, no owningSystemUrl),
+# or "unknown" (rest/info didn't parse — curl error / HTML login redirect / proxy). Only a
+# CONFIRMED "standalone" lets a 500 on /query be called a hard failure; "yes" and "unknown"
+# both route a 500 to INCONCLUSIVE, so a failed detection can't mask a federated token issue.
+FEDERATED="unknown"; OWNINGSYS=""
+IRESP=$("${CURL[@]}" "$SERVER/$CTX/rest/info?f=json")
+OKINFO=$(jget "$IRESP" "'yes' if (isinstance(d,dict) and 'error' not in d) else 'no'")
+if [ "$OKINFO" = "yes" ]; then
+  OWNINGSYS=$(jget "$IRESP" 'd.get("owningSystemUrl") or ""')
+  if [ -n "$OWNINGSYS" ]; then FEDERATED="yes"; else FEDERATED="standalone"; fi
+fi
+echo "-- Federation --"
+case "$FEDERATED" in
+  yes)        echo "  FEDERATED with Portal: $OWNINGSYS"
+              echo "  (server-minted tokens are rejected on /query here — a PORTAL token is required to query)" ;;
+  standalone) echo "  standalone (not federated) — server tokens are valid for /query" ;;
+  *)          echo "  [warn] could not determine federation from rest/info (network / login redirect / proxy?)."
+              echo "         Query-token failures below are treated as INCONCLUSIVE, not as data failures." ;;
+esac
+echo
+
 # --- site machines --------------------------------------------------------------
 echo "-- Site machines --"
 MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines?token=$TOKEN&f=json")
@@ -252,6 +279,20 @@ if [ "$FOUND" = "yes" ]; then
       error:498:*|error:499:*) echo "  [info] query rejected the token (${SMOKE#error:}). On a FEDERATED site /query"
                  echo "         needs a PORTAL token, not this admin token — a token technicality, not a data"
                  echo "         failure. Verify from a portal/browser client." ;;
+      error:500:*)
+        if [ "$FEDERATED" != "standalone" ]; then
+          echo "  [INCONCLUSIVE] query returned 500 (${SMOKE#error:})."
+          if [ "$FEDERATED" = "yes" ]; then
+            echo "         This server is FEDERATED — it rejects its own tokens on /query (delegated to"
+            echo "         Portal), which surfaces as this generic 500 'Invalid token'."
+          else
+            echo "         Federation could not be confirmed above, so a 500 here is ambiguous."
+          fi
+          echo "         This run did NOT verify the data path, and the SAME 500 is how a real provider"
+          echo "         error would look. See the ASSESSMENT below for how to tell them apart."
+        else
+          echo "  [PROBLEM] query FAILED (persisted across retries): ${SMOKE#error:}"
+        fi ;;
       error:*)   echo "  [PROBLEM] query FAILED (persisted across retries): ${SMOKE#error:}" ;;
       unparseable) echo "  [info] query returned a non-JSON response (login redirect / HTML / proxy?) — inconclusive." ;;
       *)         echo "  [info] query result inconclusive." ;;
@@ -325,6 +366,11 @@ else
     echo "     -> Normal for a min=0 service that's idle. BUT if requests are actively 404ing, the"
     echo "        provider is failing to INITIALIZE (Databricks auth/connectivity, wrong table/column)"
     echo "        -> tail the log for 'Custom_data_feeds' lines to see the real error."
+    if [ "$FEDERATED" = "yes" ]; then
+      echo "     -> NOTE: on a FEDERATED server the admin statistics can report max=0/free=0 even"
+      echo "        while the FeatureServer metadata and a PORTAL-token /query work fine — don't treat"
+      echo "        this 0-instance reading alone as failure; trust the live query result above."
+    fi
   fi
   # no free but busy -> under load
   if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" != "0" ]; then
@@ -353,6 +399,27 @@ else
       error:498:*|error:499:*)
         echo " * Config looks correct; the live query only needs a portal/referer token (a token"
         echo "     technicality on federated sites, not a data problem). Verify from a portal client." ;;
+      error:500:*)
+        if [ "$FEDERATED" != "standalone" ]; then
+          echo " * [INCONCLUSIVE] the live /query returned 500 (${SMOKE#error:}); this run did NOT verify the data path."
+          if [ "$FEDERATED" = "yes" ]; then
+            echo "     This server is FEDERATED ($OWNINGSYS) — it rejects its own tokens on /query, which"
+            echo "     surfaces as a generic 500 'Invalid token'. That 500 is ALSO how a REAL provider error"
+            echo "     would look (bad SQL, missing UC grant, provider init crash) — this run can't tell them apart."
+          else
+            echo "     Federation could not be confirmed from rest/info, so this 500 is ambiguous between a"
+            echo "     federated token rejection and a REAL provider error (bad SQL, missing UC grant, init crash)."
+          fi
+          echo "     Resolve it one of these ways:"
+          echo "       - re-query with a PORTAL token (or add-as-layer in Portal): success => provider healthy;"
+          echo "       - tail the 'Custom_data_feeds' log: a SELECT returning rows => healthy (token-only issue),"
+          echo "         a Databricks/SQL/auth error => the real provider failure to fix."
+        else
+          echo " * WARNING: ArcGIS config looks fine, BUT the live query FAILED (${SMOKE#error:})."
+          echo "     -> THIS is the real failure — provider init / Databricks auth / missing UC grants /"
+          echo "        wrong table or geometry column. Tail the log for 'Custom_data_feeds' lines."
+          PROBLEMS=$((PROBLEMS+1))
+        fi ;;
       error:*)
         echo " * WARNING: ArcGIS config looks fine, BUT the live query FAILED (${SMOKE#error:})."
         echo "     -> THIS is the real failure — provider init / Databricks auth / missing UC grants /"
