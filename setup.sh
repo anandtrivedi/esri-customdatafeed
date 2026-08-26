@@ -83,8 +83,16 @@ elif [ "$MYUID" = "0" ]; then PRIV="root"
 else PRIV="limited"; fi
 
 ARCGIS_ROOT=""; _found=()
-for _c in /opt/arcgis /app/arcgis; do
-  { [ -e "$_c/server/startserver.sh" ] || [ -d "$_c/server/framework/runtime/node" ]; } && _found+=("$_c")
+# Candidate roots: the classic /opt & /app, PLUS home-directory installs — the Linux installer
+# defaults to the installing user's HOME (e.g. /home/arcgis or /home/arcgis/arcgis) when no path
+# is given, so also probe the arcgis account's home and the current $HOME.
+_cands=(/opt/arcgis /app/arcgis)
+_ahome=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+[ -n "$_ahome" ] && _cands+=("$_ahome" "$_ahome/arcgis")
+[ -n "${HOME:-}" ] && _cands+=("$HOME" "$HOME/arcgis")
+for _c in "${_cands[@]}"; do
+  { [ -e "$_c/server/startserver.sh" ] || [ -d "$_c/server/framework/runtime/node" ]; } || continue
+  case " ${_found[*]} " in *" $_c "*) ;; *) _found+=("$_c") ;; esac   # dedupe
 done
 if [ "${#_found[@]}" -eq 1 ]; then ARCGIS_ROOT="${_found[0]}"
 elif [ "${#_found[@]}" -gt 1 ]; then ARCGIS_ROOT="${_found[0]}"; ROOT_AMBIGUOUS=1; fi
@@ -99,7 +107,7 @@ fi
 if [ -n "$ARCGIS_ROOT" ]; then
   echo "  ArcGIS install    : $ARCGIS_ROOT${ROOT_AMBIGUOUS:+  [warn] both /opt and /app exist — using $ARCGIS_ROOT; override below if wrong]}"
 else
-  echo "  ArcGIS install    : [warn] not found under /opt/arcgis or /app/arcgis"
+  echo "  ArcGIS install    : [warn] not found under /opt/arcgis, /app/arcgis, or the arcgis user's home"
   ask "ArcGIS install root (dir containing server/)" "/opt/arcgis" ARCGIS_ROOT
 fi
 SERVER_DIR="$ARCGIS_ROOT/server"

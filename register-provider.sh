@@ -207,13 +207,19 @@ fi
 echo "  Provider name (from cdconfig.json): $PROVIDER_NAME"
 echo
 
-# --- detect the ArcGIS install root (/opt/arcgis vs /app/arcgis) ----------------
+# --- detect the ArcGIS install root (/opt, /app, or a home-directory install) ---
 echo "-- ArcGIS install root --"
 ARCGIS_ROOT=""
 _found=()
-for _c in /opt/arcgis /app/arcgis; do
+# Classic /opt & /app PLUS home-directory installs: the Linux installer defaults to the
+# installing user's HOME (e.g. /home/arcgis or /home/arcgis/arcgis) when no path is given.
+_cands=(/opt/arcgis /app/arcgis)
+_ahome=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+[ -n "$_ahome" ] && _cands+=("$_ahome" "$_ahome/arcgis")
+[ -n "${HOME:-}" ] && _cands+=("$HOME" "$HOME/arcgis")
+for _c in "${_cands[@]}"; do
   if [ -e "$_c/server/startserver.sh" ] || [ -d "$_c/server/framework/runtime/node" ]; then
-    _found+=("$_c")
+    case " ${_found[*]} " in *" $_c "*) ;; *) _found+=("$_c") ;; esac   # dedupe
   fi
 done
 if [ "${#_found[@]}" -eq 1 ]; then
