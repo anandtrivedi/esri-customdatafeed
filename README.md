@@ -13,14 +13,14 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
 
 ## Quick Start
 
-Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install — it prechecks the environment, then chains **register → configure → publish**, collecting the ArcGIS admin login once.
+Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install — it prechecks the environment, then chains **configure → register → publish** (configure first, so the provider reads your credentials when the register step restarts it), collecting the ArcGIS admin login once.
 
 ```bash
 # 0. Get the code onto the ArcGIS Server host (it carries the wizard + the provider source).
 git clone <this-repo-url> && cd esri-customdatafeed
 
-# 1. Run the guided wizard (as root, or the arcgis user).
-sudo bash setup.sh          # prechecks -> register the provider -> configure Databricks -> publish a service
+# 1. Run the guided wizard — as ROOT (recommended) or the arcgis user (NOT a plain user).
+sudo bash setup.sh          # prechecks -> configure Databricks -> register the provider -> publish a service
 
 # 2. If a step ever misbehaves, the read-only health check tells you why:
 sudo bash diagnose-service.sh
@@ -58,7 +58,7 @@ sudo bash publish-service.sh
 
 **`setup.sh` (Quick Start) does all of this for you.** Follow these steps only if you can't use the wizard, want to do it by hand, or need to understand each piece. Each step also maps to a focused script the wizard calls, so this is the fallback for anything the wizard can't complete.
 
-> **Which user runs what:** your SSH user (e.g. `ubuntu`) runs the build (`git`, `npm`, `zip`). `sudo` is needed to read/write under the ArcGIS install tree. `sudo -u arcgis` starts/stops the server (it runs as the `arcgis` OS user): `sudo -u arcgis /opt/arcgis/server/startserver.sh`. Files you create under the install tree should be `chown arcgis:arcgis`.
+> **Which user runs what:** your SSH user (e.g. `ubuntu`) runs the **build** (`git`, `npm`, `zip`). But the **`.sh` helper scripts** — `setup.sh`, `register-provider.sh`, `configure-databricks.sh`, `publish-service.sh`, `diagnose-service.sh` — must run as **root (`sudo bash …`)** or the **`arcgis`** user: a plain user can't restart the server or read the mode-600, `arcgis`-owned `/home/arcgis/.databrickscfg`. `sudo -u arcgis` starts/stops the server (it runs as the `arcgis` OS user): `sudo -u arcgis /opt/arcgis/server/startserver.sh`. Files you create under the install tree should be `chown arcgis:arcgis`.
 >
 > **Install root:** Linux defaults to `/opt/arcgis/server/`, but hardened sites often use `/app/arcgis/server/` — check `ls -d /opt/arcgis /app/arcgis 2>/dev/null` and substitute yours. (`setup.sh`, `register-provider.sh`, and `diagnose-service.sh` auto-detect `/opt`, `/app`, and home-directory installs; hand-typed commands below do not.)
 
@@ -408,7 +408,9 @@ curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN
   }'
 ```
 
-For a Lakebase read+write service: `"capabilities": "Query,Editing"`, set `lakebaseHost`/`lakebaseDatabase`/`lakebaseTable`, and `"editingEnabled": "true"`. Services may be created STOPPED — start via `services/<name>.FeatureServer/start`. Routing: `getData` picks Lakebase iff `lakebaseHost` is set; `editData` is always Lakebase.
+For a Lakebase read+write service: `"capabilities": "Query,Editing"`, set `lakebaseHost`/`lakebaseDatabase`/`lakebaseTable`, and `"editingEnabled": "true"`. Routing: `getData` picks Lakebase iff `lakebaseHost` is set; `editData` is always Lakebase.
+
+> **If you script this yourself, prefer `"configuredState": "STOPPED"` then a separate `services/<name>.FeatureServer/start` call** (what `publish-service.sh` does). Creating with `STARTED` makes ArcGIS start the instance synchronously inside `createService`, which — right after a server restart — can race the service container (port 6843) and fail the whole create with `Connect to localhost:6843 … Connection refused`. Create STOPPED, then start.
 
 </details>
 
