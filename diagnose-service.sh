@@ -303,6 +303,63 @@ else
 fi
 echo
 
+# --- optional DEFINITIVE check on a federated server (mint a real PORTAL token) --
+# The smoke query above uses a SERVER token, which a federated server rejects on /query, so its
+# result is only INCONCLUSIVE. If this server is federated and that query did NOT already succeed,
+# offer to mint a PORTAL token and run a real query — turning inconclusive into a definite
+# healthy / provider-error verdict. Fully optional: press Enter at the username to skip.
+DEFINITIVE_Q=""
+if [ "$FEDERATED" = "yes" ] && [ "$FOUND" = "yes" ] && ! printf '%s' "$SMOKE" | grep -q '^ok:'; then
+  echo "-- Definitive federated check (optional) --"
+  echo "  The check above used a SERVER token (federated servers refuse those on /query). Enter a"
+  echo "  PORTAL login to run a REAL query — or press Enter at the username to skip."
+  ask "  Portal URL (base, e.g. https://<host>/arcgis or https://<host>:7443/arcgis)" "${OWNINGSYS:-}" PORTAL_URL
+  PUSER=""
+  [ -n "$PORTAL_URL" ] && ask "  Portal username (Enter to skip)" "" PUSER
+  if [ -n "$PUSER" ]; then
+    PPASS=""
+    if ! read -r -s -p "  Portal password: " PPASS; then echo; PPASS=""; fi; echo
+    [[ "$PORTAL_URL" =~ ^https?:// ]] || PORTAL_URL="https://$PORTAL_URL"   # tolerate a scheme-less paste
+    PREF=$(printf '%s' "$PORTAL_URL" | sed -E 's#^(https?://[^/]+).*#\1#')   # scheme://host[:port] for the Referer
+    PBASE="${PORTAL_URL%/}"
+    _ptp=$(mktemp); chmod 600 "$_ptp"; trap 'rm -f "$_ptp" 2>/dev/null' INT TERM   # shred the pw file on Ctrl-C too
+    printf '%s' "$PPASS" > "$_ptp"; unset PPASS
+    PGT=$("${CURL[@]}" --max-time 30 "$PBASE/sharing/rest/generateToken" \
+      --data-urlencode "username=$PUSER" --data-urlencode "password@$_ptp" \
+      --data-urlencode "client=referer" --data-urlencode "referer=$PREF" --data-urlencode "f=json")
+    rm -f "$_ptp"; trap - INT TERM
+    PTOK=$(jget "$PGT" 'd.get("token") or ""')
+    if [ -z "$PTOK" ]; then
+      echo "  [info] could not mint a Portal token (check the URL / login). Server said: $(printf '%s' "$PGT" | head -c 160)"
+      echo "         See the README 'Federated' section for the exact token steps."
+    else
+      PQR=$("${CURL[@]}" --max-time 60 -G -H "Referer: $PREF" \
+        "$SERVER/$CTX/rest/services/$SVC/FeatureServer/0/query" \
+        --data-urlencode "where=1=1" --data-urlencode "resultRecordCount=1" \
+        --data-urlencode "returnGeometry=false" --data-urlencode "token=$PTOK" --data-urlencode "f=json")
+      DEFINITIVE_Q=$(RESP="$PQR" python3 -c "
+import os,json
+try: d=json.loads(os.environ['RESP'])
+except Exception: print('unparseable'); raise SystemExit
+if isinstance(d,dict) and 'error' in d:
+    e=d['error'] if isinstance(d['error'],dict) else {}
+    print('error:%s' % str(e.get('message', d['error'])).replace('\n',' ').replace('\r',' ')[:140])
+elif isinstance(d,dict) and 'features' in d:
+    print('ok:%d' % len(d['features']))
+else:
+    print('unknown')" 2>/dev/null || echo unparseable)
+      case "$DEFINITIVE_Q" in
+        ok:*)    echo "  [ok] DEFINITIVE: Portal-token query SUCCEEDED (features=${DEFINITIVE_Q#ok:}) — provider + data path are healthy; the earlier 500 was purely the federated token." ;;
+        error:*) echo "  [PROBLEM] DEFINITIVE: Portal-token query FAILED (${DEFINITIVE_Q#error:}) — a REAL error, not the token contract (a provider/data problem, OR a Portal item-permission denial — read the message). Tail 'Custom_data_feeds' for a SQL/auth cause." ;;
+        *)       echo "  [info] Portal-token query inconclusive ($DEFINITIVE_Q)."; DEFINITIVE_Q="" ;;
+      esac
+    fi
+  else
+    echo "  (skipped — staying inconclusive; verify in Portal when you can.)"
+  fi
+  echo
+fi
+
 # --- ASSESSMENT -----------------------------------------------------------------
 echo "============================================================"
 echo " ASSESSMENT — likely problem(s) and what to do"
@@ -385,8 +442,17 @@ else
     echo "        in clients — that is NOT a 404, but corrupts the map. Use a unique row id/view."
   fi
   # Final verdict is anchored on the LIVE query, not just config — config can be perfect while
-  # the provider fails to initialize.
-  if [ "$SMOKE_RECOVERED" = "yes" ]; then
+  # the provider fails to initialize. A DEFINITIVE Portal-token result (federated) wins over the
+  # inconclusive server-token smoke test.
+  if [ -n "$DEFINITIVE_Q" ]; then
+    case "$DEFINITIVE_Q" in
+      ok:*)    echo " * HEALTHY (CONFIRMED via a Portal token) — query returned ${DEFINITIVE_Q#ok:} feature(s)."
+               echo "     Provider + data path are good; the server-token 500 earlier was only the federated token." ;;
+      error:*) echo " * REAL FAILURE (CONFIRMED via a Portal token) — query returned ${DEFINITIVE_Q#error:}."
+               echo "     A provider/data error, not a token issue -> tail 'Custom_data_feeds' for the SQL/auth cause."
+               PROBLEMS=$((PROBLEMS+1)) ;;
+    esac
+  elif [ "$SMOKE_RECOVERED" = "yes" ]; then
     echo " * INTERMITTENT 404 CONFIRMED — first query 404'd, a retry succeeded. Root cause is the"
     echo "     min=0 'no warm instance' gap, not a data problem."
     echo "     -> Fix: set minInstancesPerNode=1, maxInstancesPerNode>=2 (per-service) to keep one warm."
