@@ -12,7 +12,7 @@
  *
  * Bump this on each maintainer release (keep in sync with package.json version).
  */
-const CONNECTOR_RELEASE = "1.1.1";
+const CONNECTOR_RELEASE = "1.1.2";
 
 /**
  * Optional deployer placeholder. Deployers may set CDF_DEPLOYMENT_LABEL in

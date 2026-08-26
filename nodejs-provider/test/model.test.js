@@ -796,6 +796,18 @@ describe("model", () => {
       const metadata = await model.getMetadata();
       expect(metadata.inputCrs).to.equal(4326);
     });
+
+    it("should use the per-service idField from req.params", async () => {
+      const model = new Model();
+      const metadata = await model.getMetadata({ params: { idField: "OBJECTID" } });
+      expect(metadata.idField).to.equal("OBJECTID");
+    });
+
+    it("should use the per-service srid from req.params as inputCrs", async () => {
+      const model = new Model();
+      const metadata = await model.getMetadata({ params: { srid: "3857" } });
+      expect(metadata.inputCrs).to.equal(3857);
+    });
   });
 
   describe("editData", () => {

@@ -397,4 +397,32 @@ describe("geometry", () => {
       expect(getExtentFromGeoJson({ coordinates: [] }, 4326)).to.be.null;
     });
   });
+
+  describe("SQL injection prevention", () => {
+    it("escapes single quotes in a GeoJSON string property (no literal breakout)", () => {
+      const evil = JSON.stringify({
+        type: "Point",
+        coordinates: [0, 0],
+        crs: { properties: { name: "' OR 1=1 --" } },
+      });
+      const result = getGeometryQuery(evil, "geometry", null, "esriSpatialRelIntersects", 4326, "GEOMETRY");
+      // The single quote is DOUBLED inside the ST_GeomFromGeoJSON literal, so it can't break out.
+      expect(result).to.include("'' OR 1=1 --");
+    });
+
+    it("coerces a malicious JSON inSR wkid string to an integer SRID", () => {
+      const geom = JSON.stringify({ x: 1, y: 2 });
+      const result = getGeometryQuery(geom, "geometry", '{"wkid":"3857) OR 1=1 --"}', "esriSpatialRelIntersects", 4326, "GEOMETRY");
+      expect(result).to.not.include("OR 1=1");
+      expect(result).to.include("ST_SetSRID");
+      expect(result).to.include("3857");
+    });
+
+    it("coerces a malicious geometry-embedded spatialReference.wkid to an integer SRID", () => {
+      const geom = JSON.stringify({ x: 1, y: 2, spatialReference: { wkid: "3857); DROP TABLE t --" } });
+      const result = getGeometryQuery(geom, "geometry", null, "esriSpatialRelIntersects", 4326, "GEOMETRY");
+      expect(result).to.not.include("DROP TABLE");
+      expect(result).to.include("3857");
+    });
+  });
 });

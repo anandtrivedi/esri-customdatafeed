@@ -23,6 +23,13 @@ const { applicationName } = require('./version');
 // Map of serviceKey -> { pool, tokenExpiry, workspaceConfig }
 const pools = {};
 
+// Single-flight guard: serviceKey -> in-flight Promise<Pool> currently (re)creating that pool.
+// Without this, two concurrent requests for the same key when the pool is absent or its token
+// has expired both pass the fast-path guard, both mint a credential + build a pg.Pool, and the
+// second overwrites the first in `pools` — orphaning the first pool (its idle connections never
+// close, it's not in `pools` for shutdown, and its token never refreshes).
+const poolsCreating = {};
+
 // Cache of `${workspaceAlias}|${host}` -> instanceName (doesn't change per workspace)
 const instanceNameCache = {};
 
@@ -303,6 +310,28 @@ async function getLakebasePool(config) {
     return pools[key].pool;
   }
 
+  // Single-flight: if another request is already (re)creating this pool, await THAT one
+  // instead of building a second. There is no `await` between this check and the assignment
+  // below, so the check + set are atomic on the event loop — no window for two creations.
+  if (poolsCreating[key]) {
+    return poolsCreating[key];
+  }
+
+  const creation = createLakebasePool(key, config);
+  poolsCreating[key] = creation;
+  try {
+    return await creation;
+  } finally {
+    delete poolsCreating[key];
+  }
+}
+
+/**
+ * Actually (re)create the pg.Pool for a key: close any expired pool, mint a credential,
+ * build the pool, and register it in `pools`. Only ever run one-at-a-time per key via the
+ * single-flight guard in getLakebasePool().
+ */
+async function createLakebasePool(key, config) {
   if (pools[key]) {
     console.log(`[LakebasePool] Token expired for ${key}, refreshing...`);
     try {

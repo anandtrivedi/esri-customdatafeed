@@ -7,6 +7,7 @@
  */
 
 const { validateIdentifier } = require('./sanitize');
+const { esriRingsToGeoJSON, esriPathsToGeoJSON } = require('./esriGeometry');
 
 /**
  * Convert ArcGIS/Esri geometry JSON to GeoJSON for PostGIS ST_GeomFromGeoJSON.
@@ -36,17 +37,15 @@ function toGeoJSON(geom) {
     return { type: 'Point', coordinates: [geom.x, geom.y] };
   }
 
-  // Esri polygon
+  // Esri polygon — split into Polygon vs MultiPolygon by ring winding (a 2nd exterior ring
+  // must NOT be persisted as a hole of the first).
   if (geom.rings) {
-    return { type: 'Polygon', coordinates: geom.rings };
+    return esriRingsToGeoJSON(geom.rings);
   }
 
   // Esri polyline
   if (geom.paths) {
-    if (geom.paths.length === 1) {
-      return { type: 'LineString', coordinates: geom.paths[0] };
-    }
-    return { type: 'MultiLineString', coordinates: geom.paths };
+    return esriPathsToGeoJSON(geom.paths);
   }
 
   return null;

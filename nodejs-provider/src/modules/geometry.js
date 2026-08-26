@@ -14,6 +14,8 @@
  */
 
 const { getGeometryFieldExpression } = require("./geometryFormat");
+const { escapeSqlString, validateInteger } = require("./sanitize");
+const { esriRingsToGeoJSON, esriPathsToGeoJSON } = require("./esriGeometry");
 
 /**
  * Build geometry filter query for Databricks
@@ -36,13 +38,19 @@ function getGeometryQuery(
 
   // Convert to GeoJSON format for ST_GeomFromGeoJSON
   const geoJsonString = toGeoJsonString(rawGeomFilter);
-  // ST_GeomFromGeoJSON always returns GEOMETRY with SRID 4326
-  let geometryFilter = `ST_GeomFromGeoJSON('${geoJsonString}')`;
+  // ST_GeomFromGeoJSON always returns GEOMETRY with SRID 4326.
+  // escapeSqlString doubles any single quotes so a crafted GeoJSON string property
+  // (e.g. a "crs":{"properties":{"name":"..."}} value) can't break out of the SQL
+  // literal — the geometry param is client-controlled and never hits the WHERE guard.
+  let geometryFilter = `ST_GeomFromGeoJSON('${escapeSqlString(geoJsonString)}')`;
 
-  // Handle spatial reference transformation if needed
-  // ST_GeomFromGeoJSON always produces SRID=4326, so if the input geometry
-  // came from a different CRS we need to set the correct source SRID first
-  inSR = getSpatialReference(rawGeomFilter, inSR, dbSR);
+  // Handle spatial reference transformation if needed.
+  // ST_GeomFromGeoJSON always produces SRID=4326, so if the input geometry came from a
+  // different CRS we set the correct source SRID first. Coerce the resolved SRID to an
+  // integer HERE (the sink): it may come from a client-supplied inSR param OR the geometry's
+  // own embedded spatialReference.wkid, either of which can be a string, and it is
+  // interpolated (not parameterized) into ST_SetSRID below — validate it to prevent injection.
+  inSR = validateInteger(getSpatialReference(rawGeomFilter, inSR, dbSR), dbSR);
   if (inSR != dbSR) {
     // Databricks ST_Transform signature: ST_Transform(GEOMETRY, targetSRID INTEGER)
     // The source SRID is read from the geometry itself. Since ST_GeomFromGeoJSON
@@ -189,17 +197,11 @@ function toGeoJsonString(filter) {
       ],
     };
   } else if (typeof filter === "object" && filter.rings) {
-    // Esri Polygon format
-    geojson = {
-      type: "Polygon",
-      coordinates: filter.rings,
-    };
+    // Esri Polygon format — split into Polygon/MultiPolygon by ring winding
+    geojson = esriRingsToGeoJSON(filter.rings);
   } else if (typeof filter === "object" && filter.paths) {
-    // Esri Polyline format — multi-path polylines map to MultiLineString
-    // (matches the Lakebase path in lakebaseQuery.parseGeometryFilter)
-    geojson = filter.paths.length === 1
-      ? { type: "LineString", coordinates: filter.paths[0] }
-      : { type: "MultiLineString", coordinates: filter.paths };
+    // Esri Polyline format — single path → LineString, multi → MultiLineString
+    geojson = esriPathsToGeoJSON(filter.paths);
   } else if (typeof filter === "object" && filter.xmin !== undefined) {
     // Esri Envelope format
     geojson = {
