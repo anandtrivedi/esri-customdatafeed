@@ -13,14 +13,14 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
 
 ## Quick Start
 
-Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install — it prechecks the environment, then chains **configure → register → publish** (configure first, so the provider reads your credentials when the register step restarts it), collecting the ArcGIS admin login once.
+Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install: it prechecks the environment, then opens a menu — for a fresh box choose **option 5 (Full first-time setup)**, which chains **configure → register → publish** (configure first, so the provider reads your credentials when the register step restarts it) using an ArcGIS admin login it collects once.
 
 ```bash
 # 0. Get the code onto the ArcGIS Server host (it carries the wizard + the provider source).
 git clone <this-repo-url> && cd esri-customdatafeed
 
 # 1. Run the guided wizard — as ROOT (recommended) or the arcgis user (NOT a plain user).
-sudo bash setup.sh          # prechecks -> configure Databricks -> register the provider -> publish a service
+sudo bash setup.sh          # opens a menu -> pick 5 (Full first-time setup): configure -> register -> publish
 
 # 2. If a step ever misbehaves, the read-only health check tells you why:
 sudo bash diagnose-service.sh
@@ -29,7 +29,7 @@ sudo bash diagnose-service.sh
 sudo bash publish-service.sh
 ```
 
-`setup.sh` builds the provider package (`.cdpk`) for you when the box has npm + registry access; on an **air-gapped** box, build the `.cdpk` on any connected machine (or download a release) and the wizard registers that instead — see [Manual Setup](#manual-setup). On a **federated** ArcGIS Enterprise it detects that and offers Portal-specific guidance (menu option `F`).
+`setup.sh` builds the provider package (`.cdpk`) for you (via its Register step) when the box has npm + registry access; on an **air-gapped** box, build the `.cdpk` on any connected machine (or download a release) and the wizard registers that instead — see [Manual Setup](#manual-setup). On a **federated** ArcGIS Enterprise it offers Portal-specific guidance under **menu option `F`** (which appears only when a federated Enterprise is detected).
 
 > You need three things first (details in **[Prerequisites](#prerequisites)**): an **ArcGIS Server 11.4+** (12.0+ for editing), a **Databricks SQL Warehouse**, and **credentials** (a service principal or a PAT) that can read your tables. Full env-var list, the raw REST API, performance, and geometry details all live under **[Reference](#reference)** at the bottom — you won't need them to get running.
 
@@ -60,7 +60,7 @@ sudo bash publish-service.sh
 
 > **Which user runs what:** your SSH user (e.g. `ubuntu`) runs the **build** (`git`, `npm`, `zip`). But the **`.sh` helper scripts** — `setup.sh`, `register-provider.sh`, `configure-databricks.sh`, `publish-service.sh`, `diagnose-service.sh` — must run as **root (`sudo bash …`)** or the **`arcgis`** user: a plain user can't restart the server or read the mode-600, `arcgis`-owned `/home/arcgis/.databrickscfg`. `sudo -u arcgis` starts/stops the server (it runs as the `arcgis` OS user): `sudo -u arcgis /opt/arcgis/server/startserver.sh`. Files you create under the install tree should be `chown arcgis:arcgis`.
 >
-> **Install root:** Linux defaults to `/opt/arcgis/server/`, but hardened sites often use `/app/arcgis/server/` — check `ls -d /opt/arcgis /app/arcgis 2>/dev/null` and substitute yours. (`setup.sh`, `register-provider.sh`, and `diagnose-service.sh` auto-detect `/opt`, `/app`, and home-directory installs; hand-typed commands below do not.)
+> **Install root:** Linux defaults to `/opt/arcgis/server/`, but hardened sites often use `/app/arcgis/server/` — check `ls -d /opt/arcgis /app/arcgis 2>/dev/null` and substitute yours. (`setup.sh` and `register-provider.sh` auto-detect `/opt`, `/app`, and home-directory installs; hand-typed commands below do not.)
 
 ### 1. Build the provider package (`.cdpk`)
 
