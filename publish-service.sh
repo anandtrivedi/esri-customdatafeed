@@ -717,9 +717,10 @@ while true; do
       --data-urlencode "service=$SVC" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
     STATUS=$(printf '%s' "$CREATE" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
     [ "$STATUS" = "success" ] && break
-    # Require BOTH the 6843 port AND 'Connection refused' together (in either order) so a service
-    # name/param containing '6843', or an unrelated connection error, can't trigger retries.
-    if printf '%s' "$CREATE" | grep -qiE "6843[^\"]*Connection refused|Connection refused[^\"]*6843"; then
+    # Require BOTH the 6843 port AND 'Connection refused' present (anywhere in the response, so it
+    # survives JSON details-arrays / HTML error pages) so a service name/param containing '6843',
+    # or an unrelated connection error alone, can't trigger retries.
+    if printf '%s' "$CREATE" | grep -qi "6843" && printf '%s' "$CREATE" | grep -qi "Connection refused"; then
       if [ "$_c" -lt 12 ]; then
         [ "$_c" = 1 ] && echo "   waiting for the ArcGIS service container (port 6843) — it starts a bit after the web tier following a restart; retrying up to ~3 min:"
         echo "     …not ready, retry $_c/12"; sleep 15; continue

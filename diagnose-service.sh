@@ -32,8 +32,8 @@ CURL=(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10 --max-ti
 # Password is written to a mode-600 temp file and passed to curl via password@file, so it never
 # appears in this process's argv (a concurrent `ps`/`/proc/<pid>/cmdline` can't read it). The
 # trap shreds the file on any exit, including Ctrl-C. (Matches publish-service.sh / register-provider.sh.)
-_tmppass=""
-_cleanup() { rm -f "${_tmppass}"; }
+_tmppass=""; _ptp=""
+_cleanup() { rm -f "${_tmppass}" "${_ptp}"; }
 trap _cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -322,12 +322,12 @@ if [ "$FEDERATED" = "yes" ] && [ "$FOUND" = "yes" ] && ! printf '%s' "$SMOKE" | 
     [[ "$PORTAL_URL" =~ ^https?:// ]] || PORTAL_URL="https://$PORTAL_URL"   # tolerate a scheme-less paste
     PREF=$(printf '%s' "$PORTAL_URL" | sed -E 's#^(https?://[^/]+).*#\1#')   # scheme://host[:port] for the Referer
     PBASE="${PORTAL_URL%/}"
-    _ptp=$(mktemp); chmod 600 "$_ptp"; trap 'rm -f "$_ptp" 2>/dev/null' INT TERM   # shred the pw file on Ctrl-C too
+    _ptp=$(mktemp); chmod 600 "$_ptp"   # global _cleanup (EXIT trap) shreds this, incl. on Ctrl-C
     printf '%s' "$PPASS" > "$_ptp"; unset PPASS
     PGT=$("${CURL[@]}" --max-time 30 "$PBASE/sharing/rest/generateToken" \
       --data-urlencode "username=$PUSER" --data-urlencode "password@$_ptp" \
       --data-urlencode "client=referer" --data-urlencode "referer=$PREF" --data-urlencode "f=json")
-    rm -f "$_ptp"; trap - INT TERM
+    rm -f "$_ptp"; _ptp=""
     PTOK=$(jget "$PGT" 'd.get("token") or ""')
     if [ -z "$PTOK" ]; then
       echo "  [info] could not mint a Portal token (check the URL / login). Server said: $(printf '%s' "$PGT" | head -c 160)"
