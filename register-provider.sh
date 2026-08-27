@@ -253,34 +253,54 @@ echo
 # build, no npm needed) — this is what makes setup.sh's chain "just work" with the release
 # artifact. cdconfig's fileName is the canonical name register requires; fall back to any *.cdpk.
 CDPK_CANON=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('fileName') or ((d.get('name') or '')+'.cdpk'))" "$NODEJS_DIR/cdconfig.json" 2>/dev/null)
-[ -n "$CDPK_CANON" ] || CDPK_CANON="$PROVIDER_NAME.cdpk"
-DETECTED_CDPK=""
-# Search script-relative (trusted) dirs FIRST, then the operator's CWD/HOME — so a package that
-# shipped alongside the scripts wins over one that merely happens to sit in $PWD (matters when run
-# via sudo from a world-writable dir). The chosen path is always displayed before use, and register
-# verifies a sibling .sha256 when present.
-for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist" "$NODEJS_DIR" "$PWD" "$HOME"; do
-  if [ -f "$_d/$CDPK_CANON" ]; then DETECTED_CDPK="$_d/$CDPK_CANON"; break; fi
+# Reject a missing / degenerate / path-bearing name: a compromised cdconfig could set fileName to
+# "../../evil.cdpk" (escapes the trusted-dir probes) or leave it ".cdpk" (a hidden file) — a bare
+# basename only; fall back to <provider>.cdpk otherwise.
+case "$CDPK_CANON" in ""|.cdpk|*/*) CDPK_CANON="$PROVIDER_NAME.cdpk";; esac
+
+# TRUSTED dirs ship alongside the scripts; a package there may auto-default to "register". A file
+# only in CWD/HOME is DETECTED but NOT auto-defaulted — under `cd /tmp && sudo …/register-provider.sh`
+# an attacker could plant a canonically-named .cdpk there (the name is public) and a reflexive Enter
+# would register it as root; a sibling .sha256 is no defense (the attacker writes a matching one).
+DETECTED_CDPK=""; DETECTED_TRUSTED=0
+for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist" "$NODEJS_DIR"; do
+  [ -n "$_d" ] || continue
+  if [ -f "$_d/$CDPK_CANON" ]; then DETECTED_CDPK="$_d/$CDPK_CANON"; DETECTED_TRUSTED=1; break; fi
 done
-if [ -z "$DETECTED_CDPK" ]; then   # no canonically-named package — accept a single stray *.cdpk,
-  for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist"; do   # but only from trusted script-relative dirs
+if [ -z "$DETECTED_CDPK" ]; then   # a single stray *.cdpk in a trusted dir also counts as trusted
+  for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist"; do
+    [ -n "$_d" ] || continue
     for _f in "$_d"/*.cdpk; do                     # pure-glob (no ls|head; safe on no-match/spaces)
-      [ -f "$_f" ] && { DETECTED_CDPK="$_f"; break 2; }
+      [ -f "$_f" ] && { DETECTED_CDPK="$_f"; DETECTED_TRUSTED=1; break 2; }
     done
+  done
+fi
+if [ -z "$DETECTED_CDPK" ]; then   # canonical name in CWD/HOME — detect, but do NOT auto-default
+  for _d in "${PWD:-}" "${HOME:-}"; do
+    [ -n "$_d" ] || continue
+    if [ -f "$_d/$CDPK_CANON" ]; then DETECTED_CDPK="$_d/$CDPK_CANON"; DETECTED_TRUSTED=0; break; fi
   done
 fi
 
 # --- choose: build a fresh .cdpk, or register an existing one -------------------
 echo "-- Package --"
-if [ -n "$DETECTED_CDPK" ]; then
+if [ -n "$DETECTED_CDPK" ] && [ "$DETECTED_TRUSTED" = "1" ]; then
+  # Prebuilt shipped alongside the scripts → safe to default to registering it.
   echo "  Found a prebuilt package: $DETECTED_CDPK"
   echo "  1) Build a fresh .cdpk from $NODEJS_DIR"
   echo "  2) Register the prebuilt .cdpk above  (recommended — no build needed)"
+  if command -v npm >/dev/null 2>&1 || [ -x "${BUNDLED_NODE:-}" ]; then
+    echo "     (note: option 2 registers that prebuilt package — choose 1 to build your current source)"
+  fi
   ask "  choose 1-2" "2" PKGMODE
 else
   echo "  1) Build a fresh .cdpk from $NODEJS_DIR"
   echo "  2) Register an existing .cdpk file"
-  if ! command -v npm >/dev/null 2>&1 && [ ! -x "${BUNDLED_NODE:-}" ]; then
+  if [ -n "$DETECTED_CDPK" ]; then
+    # Found only in CWD/HOME — show it, but DON'T auto-select it (untrusted location).
+    echo "  [note] A prebuilt package was found at $DETECTED_CDPK (your working dir / home)."
+    echo "         Not auto-selected — choose 2 to register it, or 1 to build from source."
+  elif ! command -v npm >/dev/null 2>&1 && [ ! -x "${BUNDLED_NODE:-}" ]; then
     echo "  [note] No prebuilt .cdpk found here, and no npm / bundled Node to build one on this box."
     echo "         Download the release .cdpk (or build it on a machine with registry access),"
     echo "         drop it next to this script, and re-run — it'll be picked up automatically."
