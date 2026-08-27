@@ -247,17 +247,52 @@ fi
 echo "  -> using server dir: $SERVER_DIR"
 echo
 
+# --- auto-detect a prebuilt .cdpk ----------------------------------------------
+# The shipped model is ONE universal .cdpk (download it from a release, or build once). If a
+# prebuilt package is sitting where an operator would drop it, default to REGISTERING it (no
+# build, no npm needed) — this is what makes setup.sh's chain "just work" with the release
+# artifact. cdconfig's fileName is the canonical name register requires; fall back to any *.cdpk.
+CDPK_CANON=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('fileName') or ((d.get('name') or '')+'.cdpk'))" "$NODEJS_DIR/cdconfig.json" 2>/dev/null)
+[ -n "$CDPK_CANON" ] || CDPK_CANON="$PROVIDER_NAME.cdpk"
+DETECTED_CDPK=""
+# Search script-relative (trusted) dirs FIRST, then the operator's CWD/HOME — so a package that
+# shipped alongside the scripts wins over one that merely happens to sit in $PWD (matters when run
+# via sudo from a world-writable dir). The chosen path is always displayed before use, and register
+# verifies a sibling .sha256 when present.
+for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist" "$NODEJS_DIR" "$PWD" "$HOME"; do
+  if [ -f "$_d/$CDPK_CANON" ]; then DETECTED_CDPK="$_d/$CDPK_CANON"; break; fi
+done
+if [ -z "$DETECTED_CDPK" ]; then   # no canonically-named package — accept a single stray *.cdpk,
+  for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist"; do   # but only from trusted script-relative dirs
+    for _f in "$_d"/*.cdpk; do                     # pure-glob (no ls|head; safe on no-match/spaces)
+      [ -f "$_f" ] && { DETECTED_CDPK="$_f"; break 2; }
+    done
+  done
+fi
+
 # --- choose: build a fresh .cdpk, or register an existing one -------------------
 echo "-- Package --"
-echo "  1) Build a fresh .cdpk from $NODEJS_DIR"
-echo "  2) Register an existing .cdpk file"
-ask "  choose 1-2" "1" PKGMODE
+if [ -n "$DETECTED_CDPK" ]; then
+  echo "  Found a prebuilt package: $DETECTED_CDPK"
+  echo "  1) Build a fresh .cdpk from $NODEJS_DIR"
+  echo "  2) Register the prebuilt .cdpk above  (recommended — no build needed)"
+  ask "  choose 1-2" "2" PKGMODE
+else
+  echo "  1) Build a fresh .cdpk from $NODEJS_DIR"
+  echo "  2) Register an existing .cdpk file"
+  if ! command -v npm >/dev/null 2>&1 && [ ! -x "${BUNDLED_NODE:-}" ]; then
+    echo "  [note] No prebuilt .cdpk found here, and no npm / bundled Node to build one on this box."
+    echo "         Download the release .cdpk (or build it on a machine with registry access),"
+    echo "         drop it next to this script, and re-run — it'll be picked up automatically."
+  fi
+  ask "  choose 1-2" "1" PKGMODE
+fi
 echo
 
 CDPK_PATH=""
 if [ "$PKGMODE" = "2" ]; then
   while :; do
-    ask "Path to the .cdpk file" "" CDPK_PATH
+    ask "Path to the .cdpk file" "$DETECTED_CDPK" CDPK_PATH
     if [ -f "$CDPK_PATH" ]; then break; fi
     echo "   !! File not found — try again."
   done
