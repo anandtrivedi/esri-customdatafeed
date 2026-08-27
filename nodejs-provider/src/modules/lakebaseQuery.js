@@ -16,6 +16,7 @@ const {
   checkWhereClauseSafety,
   validateInteger,
 } = require('./sanitize');
+const { esriRingsToGeoJSON, esriPathsToGeoJSON } = require('./esriGeometry');
 
 /**
  * Build a parameterized SELECT statement for Lakebase reads.
@@ -203,16 +204,14 @@ function parseGeometryFilter(geometry) {
     return { type: 'Point', coordinates: [parsed.x, parsed.y] };
   }
 
-  // Esri polygon
+  // Esri polygon — split into Polygon/MultiPolygon by ring winding
   if (parsed.rings) {
-    return { type: 'Polygon', coordinates: parsed.rings };
+    return esriRingsToGeoJSON(parsed.rings);
   }
 
-  // Esri polyline
+  // Esri polyline — single path → LineString, multi → MultiLineString
   if (parsed.paths) {
-    return parsed.paths.length === 1
-      ? { type: 'LineString', coordinates: parsed.paths[0] }
-      : { type: 'MultiLineString', coordinates: parsed.paths };
+    return esriPathsToGeoJSON(parsed.paths);
   }
 
   // Already GeoJSON
@@ -234,8 +233,12 @@ function parseGeometryFilter(geometry) {
 function buildGeomParam(paramIndex, srid, inSR) {
   const base = `ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${Number(srid)})`;
 
-  // If inSR differs from target SRID, transform
-  const sourceSR = parseInSR(inSR);
+  // If inSR differs from target SRID, transform. Coerce the source SRID to an integer HERE
+  // (the sink): parseInSR can return a client-supplied wkid STRING (from a JSON inSR param or the
+  // geometry's embedded spatialReference), and it is interpolated (not parameterized) below —
+  // validate to prevent SQL injection. validateInteger parses leading digits, 0 (falsy) for garbage.
+  const rawSR = parseInSR(inSR);
+  const sourceSR = rawSR == null ? null : validateInteger(rawSR, 0);
   if (sourceSR && sourceSR !== Number(srid)) {
     return `ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${sourceSR}), ${Number(srid)})`;
   }

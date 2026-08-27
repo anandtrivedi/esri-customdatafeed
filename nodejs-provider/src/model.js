@@ -512,11 +512,15 @@ class Model {
    * getMetadata() — Required by CDF 12.0 for editable providers.
    * Returns idField and inputCrs so the runtime knows which field is the OBJECTID
    * and what CRS the data is in.
+   *
+   * Uses the PER-SERVICE idField/srid from req.params when the runtime passes a request,
+   * so a service whose idField isn't 'id' (or SRID isn't 4326) is described correctly.
+   * Falls back to the defaults when called without a request (older runtime hooks).
    */
-  async getMetadata() {
+  async getMetadata(req) {
     return {
-      idField: 'id',
-      inputCrs: config.databricks.srid || 4326,
+      idField: req?.params?.idField || 'id',
+      inputCrs: parseInt(req?.params?.srid) || config.databricks.srid || 4326,
     };
   }
 

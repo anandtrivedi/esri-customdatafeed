@@ -29,6 +29,45 @@ describe("editSql", () => {
       });
     });
 
+    it("should keep a single ring as a Polygon", () => {
+      // Clockwise exterior ring → one Polygon
+      const geom = { rings: [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]] };
+      const result = toGeoJSON(geom);
+      expect(result.type).to.equal("Polygon");
+      expect(result.coordinates).to.have.lengthOf(1);
+    });
+
+    it("should attach a counter-clockwise ring as a hole of the current Polygon", () => {
+      // Clockwise exterior + counter-clockwise interior (hole) → one Polygon with two rings
+      const exterior = [[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]; // CW
+      const hole = [[2, 2], [4, 2], [4, 4], [2, 4], [2, 2]]; // CCW
+      const geom = { rings: [exterior, hole] };
+      const result = toGeoJSON(geom);
+      expect(result.type).to.equal("Polygon");
+      expect(result.coordinates).to.deep.equal([exterior, hole]);
+    });
+
+    it("should split multiple exterior (clockwise) rings into a MultiPolygon", () => {
+      // Two separate clockwise exterior rings must NOT collapse into one Polygon
+      // (the 2nd would be misread as a hole of the 1st).
+      const ringA = [[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]; // CW
+      const ringB = [[10, 10], [10, 11], [11, 11], [11, 10], [10, 10]]; // CW
+      const geom = { rings: [ringA, ringB] };
+      const result = toGeoJSON(geom);
+      expect(result.type).to.equal("MultiPolygon");
+      expect(result.coordinates).to.deep.equal([[ringA], [ringB]]);
+    });
+
+    it("should group holes with their exterior ring in a MultiPolygon", () => {
+      const extA = [[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]; // CW exterior
+      const holeA = [[2, 2], [4, 2], [4, 4], [2, 4], [2, 2]]; // CCW hole of A
+      const extB = [[20, 20], [20, 30], [30, 30], [30, 20], [20, 20]]; // CW exterior
+      const geom = { rings: [extA, holeA, extB] };
+      const result = toGeoJSON(geom);
+      expect(result.type).to.equal("MultiPolygon");
+      expect(result.coordinates).to.deep.equal([[extA, holeA], [extB]]);
+    });
+
     it("should convert Esri single-path polyline to GeoJSON LineString", () => {
       const geom = { paths: [[[0, 0], [1, 1], [2, 2]]] };
       const result = toGeoJSON(geom);

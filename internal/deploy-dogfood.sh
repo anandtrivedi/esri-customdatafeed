@@ -60,7 +60,9 @@ LAKEBASE_DB="geospatial"
 PROVIDER_NAME="databricks-geospatial-provider"
 PROVIDER_DEPLOY="/opt/arcgis/server/framework/runtime/customdata/providers/${PROVIDER_NAME}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOCAL_PROVIDER="${SCRIPT_DIR}/nodejs-provider"
+# This script lives in internal/; the provider source is at the repo root (one level up).
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOCAL_PROVIDER="${REPO_ROOT}/nodejs-provider"
 LICENSE_PATH="/opt/software/licenses/Server_Ent_Adv_AllExt.ecp"
 
 # ---------------------------------------------------------------------------

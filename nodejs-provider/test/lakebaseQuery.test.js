@@ -354,6 +354,19 @@ describe("lakebaseQuery", () => {
       const result = buildGeomParam(1, 4326, null);
       expect(result).to.not.include("ST_Transform");
     });
+
+    it("coerces a malicious JSON inSR wkid string to an integer SRID (no injection)", () => {
+      const result = buildGeomParam(1, 4326, '{"wkid":"3857) OR 1=1 --"}');
+      expect(result).to.not.include("OR 1=1");
+      expect(result).to.include("ST_Transform");
+      expect(result).to.include("3857");
+    });
+
+    it("coerces a malicious plain-string inSR to an integer SRID (no injection)", () => {
+      const result = buildGeomParam(1, 4326, "3857); DROP TABLE t --");
+      expect(result).to.not.include("DROP TABLE");
+      expect(result).to.include("3857");
+    });
   });
 
   describe("parseInSR", () => {

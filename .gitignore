@@ -87,3 +87,6 @@ docs/
 
 # Demo app (contains copied provider source and credentials)
 app/
+
+# Local-only test/review artifacts (screenshots, model review outputs)
+testimages/
