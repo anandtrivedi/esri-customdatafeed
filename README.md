@@ -9,6 +9,8 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
 
 ![CDF Overview — direct integration with ArcGIS Enterprise](cdf-overview.png)
 
+> **Install is a lot simpler now.** No build step and no hand-edited JSON: download the prebuilt provider package (`.cdpk`) from the [latest release](../../releases/latest), drop it next to the scripts, and run `sudo bash setup.sh` — it auto-detects the package, registers it, and walks you through publishing your first table. (Building from source is still there for air-gapped boxes and developers.)
+
 ---
 
 ## Quick Start
