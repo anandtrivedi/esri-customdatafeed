@@ -417,6 +417,16 @@ else
     echo "     -> Just confirm the service is started on ALL nodes (each per-machine line above"
     echo "        should show instances); a node stuck at 0 would 404 via round-robin."
   fi
+  # maxInstancesPerNode=0 -> its own, distinct misconfiguration (independent of min). For a CDF
+  # (CUSTOMDATA) dedicated-instance service this means NO instance is guaranteed resident on a
+  # node, which can 404 requests outright — often a harder problem than min=0 and easy to miss
+  # because the min=0 message above doesn't cover it.
+  if [ "$MAXINST" = "0" ]; then
+    echo " * maxInstancesPerNode=0 -> the service can't guarantee a resident instance on any node."
+    echo "     For a CDF (CUSTOMDATA) dedicated-instance service this is a misconfiguration that can"
+    echo "     404 requests. -> set maxInstancesPerNode>=2 (with minInstancesPerNode>=1)."
+    PROBLEMS=$((PROBLEMS+1))
+  fi
   # STARTED but zero live instances right now (arms the log-tail advice for the init-failure case)
   if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" = "0" ]; then
     echo " * No instance is running right now (free=0, busy=0)."
