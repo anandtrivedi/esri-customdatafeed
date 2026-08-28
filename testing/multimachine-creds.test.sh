@@ -44,7 +44,7 @@ CFG1="$WORK/single.databrickscfg"
 run_case single "$CFG1\n\nhttps://t1.example.com\n1\ndapiSINGLE\n" ""
 grep -q "multi-machine site detected" "$OUT" && no "single: should not print multi-machine" || ok "single: no multi-machine banner"
 [ -f "$CFG1" ] && grep -q "t1.example.com" "$CFG1" && ok "single: wrote creds file" || no "single: creds file missing"
-[ "$(stat -f '%Lp' "$CFG1" 2>/dev/null || stat -c '%a' "$CFG1" 2>/dev/null)" = "600" ] && ok "single: mode 600" || no "single: not 600"
+[ "$(stat -c '%a' "$CFG1" 2>/dev/null || stat -f '%Lp' "$CFG1" 2>/dev/null)" = "600" ] && ok "single: mode 600" || no "single: not 600"
 
 echo "== Test 2: multi-machine SHARED (admin handoff, FILESYSTEM config-store) =="
 PF="$WORK/pass"; printf 'pw' > "$PF"
