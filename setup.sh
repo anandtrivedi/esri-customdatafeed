@@ -111,6 +111,9 @@ else
   ask "ArcGIS install root (dir containing server/)" "/opt/arcgis" ARCGIS_ROOT
 fi
 SERVER_DIR="$ARCGIS_ROOT/server"
+# Hand the resolved server dir to child scripts (configure-databricks.sh uses it to locate
+# init_user_param.sh when wiring DATABRICKS_CONFIG_FILE for a multi-machine shared-creds layout).
+export CDF_SERVER_DIR="$SERVER_DIR"
 
 # tools that only matter for building a .cdpk / CLI niceties
 _tool_report=""
