@@ -1,12 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  register-provider.ps1 — Windows PowerShell port of register-provider.sh.
+  register-provider.ps1 - Windows PowerShell port of register-provider.sh.
   Registers (first install) or updates (upgrade) a PREBUILT Databricks CDF
   provider (.cdpk) on a Windows ArcGIS Server, via the admin REST API.
 
 .DESCRIPTION
-  Pure PowerShell — no bash, python3, Git Bash, or WSL required. Works on
+  Pure PowerShell - no bash, python3, Git Bash, or WSL required. Works on
   Windows PowerShell 5.1 (default on Windows Server) and PowerShell 7+.
 
   Flow: locate the .cdpk -> read its provider name -> mint an admin token ->
@@ -19,7 +19,7 @@
 
   NOTE ON UPDATES: registering a name that already exists is refused by ArcGIS,
   so for an existing provider this calls `update`. An update RE-EXTRACTS over the
-  provider directory (wiping any .env inside it — credentials in .databrickscfg /
+  provider directory (wiping any .env inside it - credentials in .databrickscfg /
   the DATABRICKS_CONFIG_FILE env var live elsewhere and are safe). A FAILED update
   can leave existing services 404ing until a good package is registered, so it
   always confirms first.
