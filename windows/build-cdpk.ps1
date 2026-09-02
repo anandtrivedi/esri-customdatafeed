@@ -1,16 +1,16 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  build-cdpk.ps1 — Windows PowerShell port of build-release.sh. Builds ONE
+  build-cdpk.ps1 - Windows PowerShell port of build-release.sh. Builds ONE
   versioned, universal Databricks CDF provider package (.cdpk) on Windows.
 
 .DESCRIPTION
-  Pure PowerShell — no bash, Git Bash, or WSL. Runs on Windows PowerShell 5.1
+  Pure PowerShell - no bash, Git Bash, or WSL. Runs on Windows PowerShell 5.1
   (the Windows Server default) and PowerShell 7+. Use it on a CONNECTED build
   box (one with npm registry access) to produce the .cdpk, then move that single
   file to your ArcGIS Server host and register it with register-provider.ps1.
 
-  NEVER run this on the ArcGIS Server box — its bundled Node may not ship npm, and
+  NEVER run this on the ArcGIS Server box - its bundled Node may not ship npm, and
   you should not need a compiler there. One .cdpk runs on any platform (the provider
   core is pure JavaScript; the optional lz4 native module falls back cleanly).
 
@@ -18,7 +18,7 @@
     1. npm ci in nodejs-provider (reproducible install from package-lock.json;
        respects your .npmrc / internal proxy).
     2. Ensure the GovCloud OAuth allowlist (.mil / .us) is present in
-       @databricks/sql, and GUARD — refuse to package if it's missing, so a
+       @databricks/sql, and GUARD - refuse to package if it's missing, so a
        GovCloud (.mil/.us) OAuth-M2M deployment can't ship broken.
     3. Zip src/ + node_modules/ + cdconfig.json + package.json + package-lock.json
        into <cdconfig.fileName> (ArcGIS validates the uploaded name against it).
@@ -45,7 +45,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# GovCloud OAuth allowlist — KEEP IN SYNC with build-release.sh / register-provider.sh.
+# GovCloud OAuth allowlist - KEEP IN SYNC with build-release.sh / register-provider.sh.
 $GovCloudDomains = @('.cloud.databricks.mil', '.cloud.databricks.us')
 
 function Get-OAuthManagers([string]$NodeModules) {
@@ -68,14 +68,14 @@ function Get-AwsDomainsState([string]$File) {
 function Set-GovCloudAllowlist([string]$NodeModules) {
   $files = @(Get-OAuthManagers $NodeModules)
   if ($files.Count -eq 0) {
-    Write-Host "   [warn] no @databricks/sql OAuthManager.js found — GovCloud OAuth not applied." -ForegroundColor Yellow
+    Write-Host "   [warn] no @databricks/sql OAuthManager.js found - GovCloud OAuth not applied." -ForegroundColor Yellow
     return
   }
   foreach ($f in $files) {
     $rel = $f.FullName.Substring($NodeModules.Length).TrimStart('\','/')
     switch (Get-AwsDomainsState $f.FullName) {
       'OK'      { Write-Host "   [ok] GovCloud allowlist already present in $rel" -ForegroundColor Green }
-      'NOFIND'  { Write-Host "   [warn] no 'const awsDomains' in $rel — driver layout changed; not edited." -ForegroundColor Yellow }
+      'NOFIND'  { Write-Host "   [warn] no 'const awsDomains' in $rel - driver layout changed; not edited." -ForegroundColor Yellow }
       'MISSING' {
         $add = ($GovCloudDomains | ForEach-Object { "'$_'" }) -join ', '
         $s = Get-Content -LiteralPath $f.FullName -Raw
@@ -85,7 +85,7 @@ function Set-GovCloudAllowlist([string]$NodeModules) {
         if ((Get-AwsDomainsState $f.FullName) -eq 'OK') {
           Write-Host "   [ok] widened OAuth allowlist (.mil/.us) in $rel" -ForegroundColor Green
         } else {
-          Write-Host "   [warn] could not widen $rel cleanly — the guard will stop the build." -ForegroundColor Yellow
+          Write-Host "   [warn] could not widen $rel cleanly - the guard will stop the build." -ForegroundColor Yellow
         }
       }
     }
@@ -96,14 +96,14 @@ function Set-GovCloudAllowlist([string]$NodeModules) {
 function Assert-GovCloudAllowlist([string]$NodeModules) {
   $files = @(Get-OAuthManagers $NodeModules)
   if ($files.Count -eq 0) {
-    Write-Host "   [warn] no @databricks/sql OAuth allowlist found to verify — GovCloud support UNVERIFIED." -ForegroundColor Yellow
+    Write-Host "   [warn] no @databricks/sql OAuth allowlist found to verify - GovCloud support UNVERIFIED." -ForegroundColor Yellow
     return
   }
   $bad = $false
   foreach ($f in $files) {
     if ((Get-AwsDomainsState $f.FullName) -ne 'OK') {
       $rel = $f.FullName.Substring($NodeModules.Length).TrimStart('\','/')
-      Write-Host "!! BUILD GUARD FAILED: $rel — awsDomains must contain BOTH .cloud.databricks.mil and .cloud.databricks.us." -ForegroundColor Red
+      Write-Host "!! BUILD GUARD FAILED: $rel - awsDomains must contain BOTH .cloud.databricks.mil and .cloud.databricks.us." -ForegroundColor Red
       $bad = $true
     }
   }
@@ -116,7 +116,7 @@ $NodeDir = Join-Path $RepoRoot 'nodejs-provider'
 if (-not $OutDir) { $OutDir = Join-Path $RepoRoot 'dist' }
 $cdconfigPath = Join-Path $NodeDir 'cdconfig.json'
 $pkgPath      = Join-Path $NodeDir 'package.json'
-if (-not (Test-Path -LiteralPath $cdconfigPath)) { throw "$cdconfigPath not found — pass -RepoRoot <repo>." }
+if (-not (Test-Path -LiteralPath $cdconfigPath)) { throw "$cdconfigPath not found - pass -RepoRoot <repo>." }
 
 $cdconfig = Get-Content -LiteralPath $cdconfigPath -Raw | ConvertFrom-Json
 $pkg      = Get-Content -LiteralPath $pkgPath -Raw | ConvertFrom-Json
@@ -129,7 +129,7 @@ if (-not $version)      { throw "could not read version from package.json." }
 $gitSha = (& git -C $RepoRoot rev-parse --short HEAD 2>$null); if (-not $gitSha) { $gitSha = 'unknown' }
 
 Write-Host "============================================================"
-Write-Host " Build .cdpk (Windows) — $providerName v$version"
+Write-Host " Build .cdpk (Windows) - $providerName v$version"
 Write-Host "============================================================"
 Write-Host "  git: $gitSha"
 Write-Host "  node: $(& node -v 2>$null)   npm: $(& npm -v 2>$null)"

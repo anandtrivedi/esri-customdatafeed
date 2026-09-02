@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  configure-databricks.ps1 — Windows PowerShell port of configure-databricks.sh.
+  configure-databricks.ps1 - Windows PowerShell port of configure-databricks.sh.
   Writes the .databrickscfg the CDF provider reads, and (the Windows replacement
   for init_user_param.sh) sets DATABRICKS_CONFIG_FILE as a Machine environment
   variable so the ArcGIS Server service picks it up.
 
 .DESCRIPTION
-  Pure PowerShell — no bash, python3, Git Bash, or WSL required. Works on Windows
+  Pure PowerShell - no bash, python3, Git Bash, or WSL required. Works on Windows
   PowerShell 5.1 and PowerShell 7+.
 
   On Windows there is NO init_user_param.sh (that's a Linux ArcGIS mechanism), and
@@ -18,7 +18,7 @@
        to SYSTEM + Administrators + the ArcGIS Server service account.
     2. Sets DATABRICKS_CONFIG_FILE as a MACHINE (system) environment variable pointing
        at that file, so the ArcGIS Server service process inherits it at next start.
-  Restart the ArcGIS Server service afterward — env vars and .databrickscfg are read
+  Restart the ArcGIS Server service afterward - env vars and .databrickscfg are read
   once at process start.
 
   MULTI-MACHINE: the provider code + service definitions propagate across a site
