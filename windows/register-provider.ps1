@@ -131,12 +131,88 @@ function Send-CdpkUpload([string]$Server,[string]$Ctx,[string]$Token,[string]$Pa
   $postB = $enc.GetBytes($post); $ms.Write($postB, 0, $postB.Length)
   $bodyBytes = $ms.ToArray(); $ms.Dispose()
 
-  # token+f in the query string (documented working pattern for uploads; can't mix with multipart body)
-  $uri = "$Server/$Ctx/admin/uploads/upload?token=$Token&f=json"
+  # token+f in the query string (documented working pattern for uploads; can't mix with multipart body).
+  # URL-encode the token - ArcGIS tokens can contain +, /, = which would otherwise corrupt the query.
+  $tok = [System.Uri]::EscapeDataString($Token)
+  $uri = "$Server/$Ctx/admin/uploads/upload?token=$tok&f=json"
   $r = Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=$boundary" `
        -Body $bodyBytes @IwrExtra
   if ($r.item -and $r.item.itemID) { return $r.item.itemID }
   throw "Upload did not return an itemID. Server said: $($r | ConvertTo-Json -Depth 6)"
+}
+
+# --- map a service StartName to an icacls-resolvable principal ----------------
+# Mirrors configure-databricks.ps1's Set-CfgAcl fix: '.\name' and bare 'name' -> COMPUTER\name,
+# and the built-in service identities -> their well-known NT AUTHORITY names (icacls errors 1332
+# "No mapping between account names and SIDs" on 'LocalSystem' or 'COMPUTER\LocalSystem').
+function Resolve-AclPrincipal([string]$StartName) {
+  if ([string]::IsNullOrWhiteSpace($StartName)) { return $null }
+  switch -Regex ($StartName) {
+    '^(LocalSystem|\.\\LocalSystem|NT AUTHORITY\\System)$'         { return 'NT AUTHORITY\SYSTEM' }
+    '^(NT AUTHORITY\\)?NetworkService$|^\.\\NetworkService$'       { return 'NT AUTHORITY\NETWORK SERVICE' }
+    '^(NT AUTHORITY\\)?LocalService$|^\.\\LocalService$'           { return 'NT AUTHORITY\LOCAL SERVICE' }
+  }
+  if ($StartName -like '.\*')                             { return "$env:COMPUTERNAME\" + $StartName.Substring(2) }
+  if ($StartName -notmatch '\\' -and $StartName -notmatch '@') { return "$env:COMPUTERNAME\$StartName" }
+  return $StartName   # DOMAIN\acct, acct@domain, gMSA (domain\acct$) - leave as-is
+}
+
+# --- preflight: guarantee <InstallRoot>\...\customdata\providers exists + is writable -------------
+# Oliver's failure (11.5 on D:\): the providers folder was MISSING and the ArcGIS service account
+# could not rename the extracted package into place -> cryptic "Unable to rename old path" /
+# "Could not find custom data provider configuration file". This resolves the real install root from
+# the service image path (so a non-C:\ install needs no -InstallRoot guess), creates the folder if
+# absent, and grants the service account Modify. Returns the (possibly corrected) install root.
+function Invoke-ProvidersPreflight([string]$Root, [string]$SvcName) {
+  $svc = $null
+  try { $svc = Get-CimInstance Win32_Service -Filter "DisplayName='$SvcName' OR Name='$SvcName'" -ErrorAction SilentlyContinue | Select-Object -First 1 } catch {}
+
+  # Detect the true install root from the service image path (handles non-C:\ installs like D:\).
+  $detected = $null
+  if ($svc -and $svc.PathName) {
+    $exe = ($svc.PathName -replace '^"([^"]+)".*$', '$1')
+    $m = [regex]::Match($exe, '^(?<root>.*\\ArcGIS\\Server)\\', 'IgnoreCase')
+    if ($m.Success) { $detected = $m.Groups['root'].Value }
+  }
+
+  $customdata = Join-Path $Root 'framework\runtime\customdata'
+  if (-not (Test-Path -LiteralPath $customdata)) {
+    # -InstallRoot is wrong/default-but-not-C:\ - fall back to the detected root.
+    if ($detected -and (Test-Path -LiteralPath (Join-Path $detected 'framework\runtime\customdata'))) {
+      Write-Host "  [info] -InstallRoot '$Root' has no customdata tree; using detected install root '$detected'." -ForegroundColor Yellow
+      $Root = $detected; $customdata = Join-Path $Root 'framework\runtime\customdata'
+    } else {
+      Write-Host "  [warn] no '\framework\runtime\customdata' under '$Root'." -ForegroundColor Yellow
+      Write-Host "         If register fails with 'Unable to rename old path' or 'Could not find ... configuration" -ForegroundColor Yellow
+      Write-Host "         file', re-run with the correct -InstallRoot (e.g. 'D:\Program Files\ArcGIS\Server')." -ForegroundColor Yellow
+      return $Root
+    }
+  } elseif ($detected -and ($detected.TrimEnd('\') -ne $Root.TrimEnd('\'))) {
+    # Supplied root is a valid ArcGIS tree, but the running service points elsewhere (e.g. a stale
+    # secondary install). Preflight the supplied root but warn - registration uses the live service's root.
+    Write-Host "  [warn] the ArcGIS service runs from '$detected' but -InstallRoot is '$Root'." -ForegroundColor Yellow
+    Write-Host "         Preflighting '$Root'; if register fails, re-run with -InstallRoot '$detected'." -ForegroundColor Yellow
+  }
+
+  $providers = Join-Path $customdata 'providers'
+  if (-not (Test-Path -LiteralPath $providers)) {
+    Write-Host "  [fix] providers folder missing - creating it: $providers" -ForegroundColor Yellow
+    try { New-Item -ItemType Directory -Path $providers -Force | Out-Null }
+    catch { Write-Host "  [warn] could not create $providers - $($_.Exception.Message)" -ForegroundColor Yellow; return $Root }
+  } else {
+    Write-Host "  [ok] providers folder present: $providers" -ForegroundColor Green
+  }
+
+  # Grant the ArcGIS Server service account Modify so extraction can rename files into place.
+  $acct = Resolve-AclPrincipal ($svc.StartName)
+  if ($acct) {
+    & icacls "$providers" /grant "${acct}:(OI)(CI)M" /C | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Host "  [ok] granted Modify on providers folder to service account '$acct'." -ForegroundColor Green }
+    else { Write-Host "  [warn] icacls grant to '$acct' returned $LASTEXITCODE - grant Modify manually if register fails." -ForegroundColor Yellow }
+  } else {
+    Write-Host "  [warn] could not determine the ArcGIS service account; ensure it can write to $providers." -ForegroundColor Yellow
+  }
+  return $Root
 }
 
 # ===========================================================================
@@ -185,13 +261,21 @@ if (Test-Path -LiteralPath $shaFile) {
 if (-not $ProviderName) { $ProviderName = Get-CdpkProviderName $CdpkPath }
 if (-not $ProviderName) { $ProviderName = "databricks-geospatial-provider" }
 Write-Host "  Provider name: $ProviderName"
+
+# --- preflight the providers folder (create if missing, make writable) ------
+# Skipped on non-Windows PowerShell (no Win32_Service / icacls) - this script targets Windows.
+if ($PSVersionTable.PSVersion.Major -lt 6 -or $IsWindows) {
+  Write-Head "Providers folder preflight"
+  $InstallRoot = Invoke-ProvidersPreflight -Root $InstallRoot -SvcName $ServiceName
+}
 $providerDir = Join-Path $InstallRoot "framework\runtime\customdata\providers\$ProviderName"
 
 # --- admin connection + token ----------------------------------------------
 Write-Head "ArcGIS connection"
 if (-not $AdminPassword) { $AdminPassword = Read-Host "  Admin password for '$AdminUser' @ $AdminUrl/$Context" -AsSecureString }
-$plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-  [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword))
+$__pwPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword)
+try   { $plainPass = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($__pwPtr) }
+finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($__pwPtr) }   # don't leak the unmanaged BSTR
 
 Write-Host "-> requesting admin token (client=requestip)..."
 $token = New-AdminToken -Server $AdminUrl -Ctx $Context -User $AdminUser -PlainPass $plainPass

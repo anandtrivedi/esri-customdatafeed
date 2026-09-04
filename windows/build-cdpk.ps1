@@ -22,11 +22,23 @@
        GovCloud (.mil/.us) OAuth-M2M deployment can't ship broken.
     3. Zip src/ + node_modules/ + cdconfig.json + package.json + package-lock.json
        into <cdconfig.fileName> (ArcGIS validates the uploaded name against it).
+       cdconfig.json is always packaged as UTF-8 WITHOUT a BOM - a BOM makes
+       ArcGIS Server reject the manifest with the SAME generic error as a
+       version mismatch ("Could not find custom data provider configuration file").
     4. Write a .sha256 and a MANIFEST.
 
 .PARAMETER SkipInstall
   Reuse the existing node_modules instead of running npm ci (rebuild the .cdpk
   without a fresh install). The GovCloud patch + guard still run.
+
+.PARAMETER ArcgisVersion
+  Retarget the manifest for a specific ArcGIS Server version WITHOUT hand-editing
+  cdconfig.json (which risks re-introducing a BOM). The shipped manifest is
+  12.0-format; ArcGIS Server <12.0 (e.g. 11.5) rejects it. Pass the server's exact
+  currentVersion (e.g. -ArcgisVersion 11.5) and the build sets arcgisVersion and,
+  for <12.0, drops the top-level "editingEnabled" property (a 12.0-only flag; the
+  per-service editingEnabled parameter and applyEdits editing still work on 11.4+).
+  The on-disk cdconfig.json is left untouched - the change is applied in-memory only.
 
 .EXAMPLE
   .\build-cdpk.ps1
@@ -35,12 +47,17 @@
 .EXAMPLE
   .\build-cdpk.ps1 -SkipInstall
   Repackage from the current node_modules (no npm ci).
+
+.EXAMPLE
+  .\build-cdpk.ps1 -ArcgisVersion 11.5
+  Build a .cdpk whose manifest targets ArcGIS Server 11.5 (no hand-editing, no BOM).
 #>
 [CmdletBinding()]
 param(
   [string]$RepoRoot,
   [string]$OutDir,
-  [switch]$SkipInstall
+  [switch]$SkipInstall,
+  [string]$ArcgisVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,6 +145,51 @@ if (-not $cdpkName)     { throw "could not read fileName from cdconfig.json." }
 if (-not $version)      { throw "could not read version from package.json." }
 $gitSha = (& git -C $RepoRoot rev-parse --short HEAD 2>$null); if (-not $gitSha) { $gitSha = 'unknown' }
 
+# --- normalize cdconfig.json (BOM-free; optional ArcGIS version retarget) ----------------------
+# ArcGIS Server rejects a cdconfig.json that carries a UTF-8 BOM with the SAME generic error as a
+# version-mismatched manifest ("Could not find custom data provider configuration file"). Windows
+# editors (and PowerShell 5.1's Out-File -Encoding UTF8) add a BOM silently, so we ALWAYS repackage
+# cdconfig.json as UTF-8 without a BOM, whatever it looks like on disk.
+$bom = [char]0xFEFF   # U+FEFF, referenced by code point so this script stays pure ASCII
+$cdconfigContent = (Get-Content -LiteralPath $cdconfigPath -Raw) -replace ('^' + $bom), ''
+$effectiveArcgis = $cdconfig.arcgisVersion
+if ($ArcgisVersion) {
+  # Validate the shape before injecting into JSON (a stray quote could corrupt the manifest).
+  if ($ArcgisVersion -notmatch '^\d+(\.\d+){0,2}$') { throw "-ArcgisVersion must look like 11.5 or 12.0.0 (got '$ArcgisVersion')." }
+  # Surgical text edits (not ConvertTo-Json, which reorders/reformats and can mangle the nested
+  # serviceParameters array). The on-disk file is untouched - this only changes the packaged copy.
+  $cdconfigContent = [regex]::Replace($cdconfigContent, '("arcgisVersion"\s*:\s*")[^"]*(")', "`${1}$ArcgisVersion`${2}")
+  $effectiveArcgis = $ArcgisVersion
+  $major = 0; [void][int]::TryParse((($ArcgisVersion -split '\.')[0]), [ref]$major)
+  if ($major -gt 0 -and $major -lt 12) {
+    # Remove ONLY the top-level "editingEnabled": true (12.0-only). The serviceParameters entry is
+    # "key": "editingEnabled" and is left intact - per-service editing still works on 11.4+.
+    $cdconfigContent = [regex]::Replace($cdconfigContent, '(?m)^[ \t]*"editingEnabled"\s*:\s*true\s*,?\s*\r?\n', '')
+    Write-Host "-> cdconfig retargeted to ArcGIS $ArcgisVersion (dropped top-level editingEnabled)." -ForegroundColor Cyan
+  } else {
+    Write-Host "-> cdconfig arcgisVersion set to $ArcgisVersion." -ForegroundColor Cyan
+  }
+}
+# Parse once, and ASSERT the retarget actually took (a silent no-match must not ship a mislabeled artifact).
+try { $parsedCdconfig = $cdconfigContent | ConvertFrom-Json } catch { throw "cdconfig.json is not valid JSON after normalization: $($_.Exception.Message)" }
+if ($ArcgisVersion) {
+  if ($parsedCdconfig.arcgisVersion -ne $ArcgisVersion) { throw "arcgisVersion retarget FAILED - packaged manifest still says '$($parsedCdconfig.arcgisVersion)', not '$ArcgisVersion'. NOT packaging." }
+  if ($major -gt 0 -and $major -lt 12 -and ($parsedCdconfig.PSObject.Properties.Name -contains 'editingEnabled')) {
+    throw "top-level 'editingEnabled' still present after retarget to $ArcgisVersion - ArcGIS <12.0 would reject it. NOT packaging."
+  }
+}
+
+# Write $content into an open zip archive as UTF-8 WITHOUT a BOM.
+function Add-ZipStringEntry($zip, [string]$entryName, [string]$content) {
+  $entry  = $zip.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+  $stream = $entry.Open()
+  try {
+    $enc   = New-Object System.Text.UTF8Encoding($false)   # $false => emit no BOM
+    $bytes = $enc.GetBytes($content)
+    $stream.Write($bytes, 0, $bytes.Length)
+  } finally { $stream.Dispose() }
+}
+
 Write-Host "============================================================"
 Write-Host " Build .cdpk (Windows) - $providerName v$version"
 Write-Host "============================================================"
@@ -187,7 +249,12 @@ try {
   foreach ($full in $include) {
     $rel = $full.Substring($prefixLen).Replace('\','/')
     if (Test-Excluded $rel) { continue }
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $full, $rel, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    if ($rel -eq 'cdconfig.json') {
+      # Packaged from the normalized in-memory copy: guaranteed BOM-free (+ retargeted if -ArcgisVersion).
+      Add-ZipStringEntry $zip 'cdconfig.json' $cdconfigContent
+    } else {
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $full, $rel, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
     $count++
   }
 } finally { $zip.Dispose() }
@@ -199,8 +266,9 @@ $sum = (Get-FileHash -LiteralPath $cdpkPath -Algorithm SHA256).Hash.ToLower()
 "$sum  $cdpkName" | Set-Content -LiteralPath "$cdpkPath.sha256" -Encoding ASCII
 $sizeMB = "{0:N1} MB" -f ((Get-Item -LiteralPath $cdpkPath).Length / 1MB)
 
-# --- verify the packaged artifact carries the GovCloud allowlist (belt + suspenders) ----------
+# --- verify the packaged artifact: GovCloud allowlist + cdconfig.json is BOM-free (belt+suspenders) ---
 $pkgGov = 'none'
+$cdconfigBom = 'unknown'
 $zr = [System.IO.Compression.ZipFile]::OpenRead($cdpkPath)
 try {
   $any = $false; $ok = $true
@@ -211,9 +279,15 @@ try {
       $m = [regex]::Match($txt, 'const awsDomains = \[([^\]]*)\]')
       foreach ($d in $GovCloudDomains) { if (-not ($m.Success -and $m.Groups[1].Value -like "*$d*")) { $ok = $false } }
     }
+    if ($e.FullName -eq 'cdconfig.json') {
+      # Read the first 3 raw bytes; a UTF-8 BOM is EF BB BF and must NOT be present.
+      $bs = $e.Open(); $buf = New-Object byte[] 3; $n = $bs.Read($buf, 0, 3); $bs.Close()
+      if ($n -ge 3 -and $buf[0] -eq 0xEF -and $buf[1] -eq 0xBB -and $buf[2] -eq 0xBF) { $cdconfigBom = 'PRESENT' } else { $cdconfigBom = 'none' }
+    }
   }
   if ($any) { $pkgGov = if ($ok) { 'yes' } else { 'no' } }
 } finally { $zr.Dispose() }
+if ($cdconfigBom -eq 'PRESENT') { throw "packaged cdconfig.json has a UTF-8 BOM - ArcGIS Server would reject it. NOT shipping." }
 
 # --- manifest ---------------------------------------------------------------------------------
 $manifest = Join-Path $OutDir "MANIFEST-v$version.txt"
@@ -226,6 +300,7 @@ $manifest = Join-Path $OutDir "MANIFEST-v$version.txt"
   "git:             $gitSha"
   "built (UTC):     $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
   "node used:       $(& node -v 2>$null)"
+  "arcgis target:   $effectiveArcgis   (cdconfig.json BOM: $cdconfigBom)"
   "govcloud oauth:  allowlist includes .mil/.us -> $pkgGov"
   "native modules:  none required (lz4 optional, not compiled; falls back to pure JS)"
   "built on:        PowerShell $($PSVersionTable.PSVersion)"
