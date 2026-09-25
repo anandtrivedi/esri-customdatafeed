@@ -50,6 +50,10 @@ curl -sk "$BASE/admin/services/types/customdataproviders/register" -d "itemId=$I
 picker runs in your **browser**, so the `.cdpk` must be on the machine you're browsing from
 (copy it off the server first if needed).
 
+**Windows, scripted:** `windows/register-provider.ps1` runs method A's REST flow for you
+(first-install *register* or upgrade *update*); `windows/configure-databricks.ps1` sets the
+Databricks credentials. See `windows/README.md`.
+
 A bare provider registration is available right away. **If you also set or change the
 Databricks credentials** (`init_user_param.sh` / `.databrickscfg`), **restart ArcGIS Server**
 on each machine — the shared provider process reads its credentials at startup.
@@ -64,6 +68,8 @@ the old one first (or use *update*). **First back up the provider directory to *
 The `12.x` package targets `arcgisVersion 12.0.0`, which registers on **12.0 and 12.1**.
 An **11.x** package needs a *downgraded* manifest and is **not prebuilt here yet** — build it
 by setting `arcgisVersion` to your server version and dropping the top-level `editingEnabled`
-(keep the GovCloud OAuth patch), then drop the result in `cdpk/11.x/`. One 11.x build is
+(keep the GovCloud OAuth patch), then drop the result in `cdpk/11.x/`. Easiest builds:
+**Windows** `windows/build-cdpk.ps1 -ArcgisVersion <your-version>` (e.g. `-ArcgisVersion 11.5`);
+**Linux** rebuild via `build-release.sh` with the manifest downgraded. One 11.x build is
 expected to cover the 11.x line; if a specific minor rejects it, rebuild for that exact
 version. CDF requires ArcGIS Server **11.2+**.
