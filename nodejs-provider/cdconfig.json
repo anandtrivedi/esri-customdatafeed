@@ -14,12 +14,12 @@
       },
       {
         "key": "warehouseHttpPath",
-        "label": "SQL Warehouse HTTP Path",
+        "label": "SQL Warehouse HTTP Path (Lakehouse)",
         "description": "e.g. /sql/1.0/warehouses/1857dd2a594736e4"
       },
       {
         "key": "tableName",
-        "label": "Table Name",
+        "label": "Table Name (Lakehouse)",
         "description": "e.g. main.geospatial.us_cell_towers"
       },
       {
@@ -34,7 +34,7 @@
       },
       {
         "key": "geometryFormat",
-        "label": "Geometry Format",
+        "label": "Geometry Format (Lakehouse)",
         "description": "e.g. WKT, WKB, GEOJSON, or GEOMETRY"
       },
       {
@@ -79,7 +79,7 @@
       },
       {
         "key": "editingEnabled",
-        "label": "Editing Enabled",
+        "label": "Editing Enabled (Lakebase)",
         "description": "e.g. true"
       }
     ]

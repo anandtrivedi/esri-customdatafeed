@@ -400,6 +400,8 @@ Then, in the client: register your ArcGIS target (password set via a terminal co
 
 **Lakebase parameters:** `workspace`, `lakebaseHost` (required, selects Lakebase), `lakebasePort` (`5432`), `lakebaseDatabase` (required), `lakebaseSchema` (`public`), `lakebaseTable` (required), `geometryColumn`, `idField`, `maxRecordCount`, `srid`, `editingEnabled` (`false`).
 
+**Fill one set, not both.** A read-only **Lakehouse** service uses the Lakehouse fields (leave the Lakebase fields blank); an editable **Lakebase** service uses the Lakebase fields (leave the Lakehouse fields blank). Setting `lakebaseHost` is what switches the backend to Lakebase. `workspace`, `geometryColumn`, `idField`, `srid`, `maxRecordCount` are shared. In the Portal publish form, the `(Lakehouse)` / `(Lakebase)` tags in the field labels mark which set each belongs to.
+
 ```bash
 curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN&f=json" \
   --data-urlencode 'service={
