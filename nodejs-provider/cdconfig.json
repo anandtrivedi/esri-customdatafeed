@@ -10,77 +10,77 @@
       {
         "key": "workspace",
         "label": "Databricks Workspace Profile",
-        "description": "Databricks profile from .databrickscfg (optional; defaults to env vars). e.g. SP or DoD-FE."
+        "description": "e.g. SP"
       },
       {
         "key": "warehouseHttpPath",
         "label": "SQL Warehouse HTTP Path",
-        "description": "SQL Warehouse HTTP path, for Lakehouse (read-only) services. e.g. /sql/1.0/warehouses/1857dd2a594736e4."
+        "description": "e.g. /sql/1.0/warehouses/1857dd2a594736e4"
       },
       {
         "key": "tableName",
         "label": "Table Name",
-        "description": "Fully-qualified Databricks table for Lakehouse (read-only) services — catalog.schema.table. e.g. main.geospatial.us_cell_towers."
+        "description": "e.g. main.geospatial.us_cell_towers"
       },
       {
         "key": "geometryColumn",
         "label": "Geometry Column",
-        "description": "Column that holds the geometry. e.g. geom, shape, or wkt_geom."
+        "description": "e.g. geom"
       },
       {
         "key": "idField",
         "label": "ID Field",
-        "description": "Unique 32-bit integer column used as OBJECTID (max 2147483647). e.g. objectid (default: id)."
+        "description": "e.g. objectid"
       },
       {
         "key": "geometryFormat",
         "label": "Geometry Format",
-        "description": "Geometry storage format: WKT, WKB, GEOJSON, or GEOMETRY. Optional (auto-detected). e.g. WKT."
+        "description": "e.g. WKT, WKB, GEOJSON, or GEOMETRY"
       },
       {
         "key": "timeColumn",
         "label": "Time Column",
-        "description": "Timestamp column enabling time-aware queries. Optional. e.g. event_time."
+        "description": "e.g. event_time"
       },
       {
         "key": "lakebaseHost",
         "label": "Lakebase Host",
-        "description": "Lakebase (PostgreSQL) host; required for editable services. e.g. ep-bold-dawn-xxxx.database.cloud.databricks.com."
+        "description": "e.g. ep-bold-dawn-xxxx.database.cloud.databricks.com"
       },
       {
         "key": "lakebasePort",
         "label": "Lakebase Port",
-        "description": "Lakebase port. e.g. 5432 (default)."
+        "description": "e.g. 5432"
       },
       {
         "key": "lakebaseDatabase",
         "label": "Lakebase Database",
-        "description": "Lakebase database name. e.g. databricks_postgres."
+        "description": "e.g. databricks_postgres"
       },
       {
         "key": "lakebaseSchema",
         "label": "Lakebase Schema",
-        "description": "Lakebase schema (default: public). e.g. geo_demo."
+        "description": "e.g. geo_demo"
       },
       {
         "key": "lakebaseTable",
         "label": "Lakebase Table",
-        "description": "Lakebase table for reads/writes. e.g. cases_editable."
+        "description": "e.g. cases_editable"
       },
       {
         "key": "maxRecordCount",
         "label": "Max Record Count",
-        "description": "Max features returned per page. e.g. 2000 (default)."
+        "description": "e.g. 2000"
       },
       {
         "key": "srid",
         "label": "Spatial Reference ID",
-        "description": "EPSG SRID of the geometry column. e.g. 4326 (WGS 84, default) or 3857 (Web Mercator)."
+        "description": "e.g. 4326"
       },
       {
         "key": "editingEnabled",
         "label": "Editing Enabled",
-        "description": "Enable applyEdits editing (Lakebase only; also set the Editing service capability). e.g. true."
+        "description": "e.g. true"
       }
     ]
   },
