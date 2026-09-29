@@ -26,25 +26,12 @@ These are the **universal** build — pure-JS core (runs on Windows *and* Linux)
 GovCloud (`.mil`/`.us`) OAuth allowlist patched in, so they work on commercial **and**
 GovCloud Databricks. Provider **v1.1.2**.
 
-## Prerequisite: the Custom Data Feed runtime (separate install)
+## Prerequisite: the Custom Data Feed runtime
 
-The CDF runtime is **NOT bundled with ArcGIS Server** — it is a separate server component you
-must install on **every** ArcGIS Server machine, on **both Windows and Linux**, before you can
-register any `.cdpk`. Without it, register fails with
-`"Custom data feed runtime is not installed or configured properly"`.
-
-Download `ArcGIS Custom Data Feeds` for **your exact server version** from My Esri (same place
-as the ArcGIS Server installer), then:
-
-- **Linux:** extract the `.tar.gz` and run `bash CustomDataFeed-Setup.sh` **as the `arcgis`
-  user in a login shell**. It reads `~/.ESRI.properties.<host>.<ver>` to find the Server dir,
-  deploys into `<server>/framework/runtime/customdata`, then restart ArcGIS Server.
-- **Windows:** run `ArcGIS_Custom_Data_Feeds_Windows_<ver>.exe` (it extracts to
-  `Documents\ArcGIS <ver>\CustomDataFeeds\Setup.exe`; run `Setup /qn`), then restart the
-  ArcGIS Server service.
-
-A server that already serves CDF services has this installed; a *fresh* ArcGIS Server install
-does not.
+The CDF runtime is a **separate server component, not bundled with ArcGIS Server** — install
+`ArcGIS Custom Data Feeds` (for your exact server version, from My Esri) on every ArcGIS Server
+machine, Windows or Linux, and restart. Without it, register fails with *"Custom data feed
+runtime is not installed or configured properly."*
 
 ## Verify before registering
 
@@ -56,8 +43,8 @@ shasum -a 256 databricks-geospatial-provider.cdpk       # macOS
 Get-FileHash .\databricks-geospatial-provider.cdpk -Algorithm SHA256   # Windows
 ```
 
-**12.x** SHA-256: `650589608a7b8e2f30ee43c6f089ca0c50bb359c54f4312dc81b1395d897e6b7`
-**11.x** SHA-256: `1e8a4afb2474a45e60fe7145ead983ceac108e99f17fa0baf2f559ae7aca1889`
+**12.x** SHA-256: `4e3889679e65b5a28ddd5ebcc0baa772312561564a8709bc932dd1f5757d5563`
+**11.x** SHA-256: `410f4b9c2da0098c680ef2c0404dc2b6e3933199dbfc7018c25b8d3781d9c60e`
 (each folder's `*.cdpk.sha256` file carries its checksum.)
 
 ## Register (Server operation; once per Server site — deploys to all machines)
