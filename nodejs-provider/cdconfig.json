@@ -10,12 +10,12 @@
       {
         "key": "workspace",
         "label": "Databricks Workspace Profile",
-        "description": "Profile in .databrickscfg that selects the workspace + credentials. Optional (defaults to the env-var config). e.g. SP or DoD-FE."
+        "description": "Databricks profile from .databrickscfg (optional; defaults to env vars). e.g. SP or DoD-FE."
       },
       {
         "key": "warehouseHttpPath",
         "label": "SQL Warehouse HTTP Path",
-        "description": "SQL Warehouse HTTP path — for Lakehouse (read-only) services. Copy from the warehouse's Connection Details. e.g. /sql/1.0/warehouses/1857dd2a594736e4."
+        "description": "SQL Warehouse HTTP path, for Lakehouse (read-only) services. e.g. /sql/1.0/warehouses/1857dd2a594736e4."
       },
       {
         "key": "tableName",
@@ -30,12 +30,12 @@
       {
         "key": "idField",
         "label": "ID Field",
-        "description": "Unique integer ID column used as OBJECTID (must fit a 32-bit int, max 2147483647). e.g. objectid or id (default: id)."
+        "description": "Unique 32-bit integer column used as OBJECTID (max 2147483647). e.g. objectid (default: id)."
       },
       {
         "key": "geometryFormat",
         "label": "Geometry Format",
-        "description": "How geometry is stored: WKT, WKB, GEOJSON, or GEOMETRY (native). Optional — auto-detected from the column name. e.g. WKT."
+        "description": "Geometry storage format: WKT, WKB, GEOJSON, or GEOMETRY. Optional (auto-detected). e.g. WKT."
       },
       {
         "key": "timeColumn",
@@ -45,7 +45,7 @@
       {
         "key": "lakebaseHost",
         "label": "Lakebase Host",
-        "description": "Lakebase (PostgreSQL) host — set this for editable services (routes reads + writes to Lakebase). e.g. ep-bold-dawn-xxxx.database.cloud.databricks.com."
+        "description": "Lakebase (PostgreSQL) host; required for editable services. e.g. ep-bold-dawn-xxxx.database.cloud.databricks.com."
       },
       {
         "key": "lakebasePort",
@@ -60,17 +60,17 @@
       {
         "key": "lakebaseSchema",
         "label": "Lakebase Schema",
-        "description": "PostgreSQL schema in Lakebase. e.g. geo_demo (default: public)."
+        "description": "Lakebase schema (default: public). e.g. geo_demo."
       },
       {
         "key": "lakebaseTable",
         "label": "Lakebase Table",
-        "description": "Lakebase table read from / written to. e.g. cases_editable."
+        "description": "Lakebase table for reads/writes. e.g. cases_editable."
       },
       {
         "key": "maxRecordCount",
         "label": "Max Record Count",
-        "description": "Max features returned per page; clients can request fewer via resultRecordCount. e.g. 2000 (default)."
+        "description": "Max features returned per page. e.g. 2000 (default)."
       },
       {
         "key": "srid",
@@ -80,7 +80,7 @@
       {
         "key": "editingEnabled",
         "label": "Editing Enabled",
-        "description": "Set true to allow editing via applyEdits (Lakebase only; also add Editing to the service capabilities). e.g. true."
+        "description": "Enable applyEdits editing (Lakebase only; also set the Editing service capability). e.g. true."
       }
     ]
   },

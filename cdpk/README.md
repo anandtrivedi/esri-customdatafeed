@@ -43,8 +43,8 @@ shasum -a 256 databricks-geospatial-provider.cdpk       # macOS
 Get-FileHash .\databricks-geospatial-provider.cdpk -Algorithm SHA256   # Windows
 ```
 
-**12.x** SHA-256: `4e3889679e65b5a28ddd5ebcc0baa772312561564a8709bc932dd1f5757d5563`
-**11.x** SHA-256: `410f4b9c2da0098c680ef2c0404dc2b6e3933199dbfc7018c25b8d3781d9c60e`
+**12.x** SHA-256: `6a9efc1f7c4fe4fdb789af4b98908ae543f9ed6d62d38329b73ee91ee02e44d6`
+**11.x** SHA-256: `8e885982c8a9086013efffb1f34727b6a87b6a5cb267721a23be6e6e72f7b333`
 (each folder's `*.cdpk.sha256` file carries its checksum.)
 
 ## Register (Server operation; once per Server site — deploys to all machines)
