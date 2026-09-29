@@ -163,6 +163,8 @@ host  = your-workspace.cloud.databricks.com
 token = dapi_your_pat_here
 ```
 
+> **Multi-machine sites:** registering the `.cdpk` is site-level (auto-propagates to every node), but `.databrickscfg` is **per-machine** — put the creds on **each** node, or point `DATABRICKS_CONFIG_FILE` (in `init_user_param.sh`) at a shared path. A one-node-only creds install makes the other nodes 404 intermittently.
+
 <details>
 <summary><b>Service principal (OAuth M2M, recommended for production) & multiple workspaces</b></summary>
 
@@ -324,6 +326,7 @@ Provider init failed silently. Tail the server log for `Custom_data_feeds` lines
 - **No data:** verify the fully-qualified table name + geometry column; test the warehouse independently.
 - **OBJECTID:** `idField` must be an integer ≤ 2,147,483,647 with unique values.
 - **Editing fails:** `capabilities:"Query,Editing"` + `editingEnabled:"true"` both set; `lakebaseHost` present (editing is Lakebase-only); ArcGIS 12.0+. On federated Portal, the user's role needs "Edit features".
+- **Lakebase service 404s / won't connect (native login):** the Postgres user comes from the `workspace` profile's auth type — an **OAuth-M2M** profile makes the PG user the SP `client_id`; a **PAT** profile (or unset) falls back to `LAKEBASE_USER`. So a native-login table (using `LAKEBASE_USER`/`LAKEBASE_PASSWORD`) needs `workspace` set to a **PAT** profile — an OAuth-M2M profile logs in as the wrong user and the FeatureServer 404s with no logged error.
 - **Slow:** Lakehouse cold start (5–15 s) after idle; add `OPTIMIZE … ZORDER BY (geom)` (Lakehouse) or `CREATE INDEX … USING GIST (geom)` (Lakebase).
 
 </details>
