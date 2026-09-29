@@ -68,6 +68,8 @@ sudo bash publish-service.sh
 
 ### 1. Build the provider package (`.cdpk`)
 
+> **Most users don't build.** Grab the prebuilt package matching your ArcGIS Server major version — **`cdpk/12.x/`** (12.0 / 12.1) or **`cdpk/11.x/`** (11.2 – 11.5+) — verify the `SHA-256` against that folder's `.cdpk.sha256`, and register it (Step 2). Build from source only for a **custom version, a code change, or an air-gapped** box.
+
 The provider source lives in the **`nodejs-provider/`** subdirectory. `node_modules/` isn't shipped, so this is the one step that needs a package registry (everything after it is air-gap-friendly).
 
 ```bash
@@ -91,6 +93,13 @@ zip -r databricks-geospatial-provider.cdpk \
   /opt/arcgis/server/framework/runtime/node/bin/node \
     /opt/arcgis/server/framework/runtime/node/lib/node_modules/npm/bin/npm-cli.js install
   ```
+
+</details>
+
+<details>
+<summary><b>Rebuilding an 11.x package</b></summary>
+
+The prebuilt `cdpk/11.x/` package already covers **11.2 → 11.5+**. To rebuild for a custom version, start from the 12.x manifest (`cdconfig.json`) and: set `arcgisVersion` to **`11.2.0`** (the floor — registers across the whole 11.x line), keep the top-level `editingEnabled`, add `properties.hosts: false` + `properties.disableIdParam: true`, and add a `config/default.json` = `{}` file to the zip (the 11.x CDF runtime requires all three; 12.x auto-defaults them). Windows: `windows/build-cdpk.ps1 -ArcgisVersion 11.2` (plus the config/hosts additions). Register the version-matched package on each server — the 11.x manifest is for 11.x servers, the `12.x` package for 12.x.
 
 </details>
 
