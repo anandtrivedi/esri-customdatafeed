@@ -15,14 +15,14 @@ cdpk/
     └── databricks-geospatial-provider.cdpk.sha256   # checksum
 ```
 
-**Both are prebuilt.** The `12.x` package targets `arcgisVersion 12.0.0` (registers on 12.0 /
-12.1). The `11.x` package uses a downgraded `arcgisVersion 11.2.0` manifest and registers on
-the whole **11.2 → 11.5+** line. The `11.x` build is in fact **universal** — because a lower
-manifest also registers on a *higher* server, it registers on 12.0 / 12.1 too, and it keeps
-provider-level editing working on 12.x (see the *ArcGIS 11.x note*). If you're on 12.x, either
-package works; the `12.x` one is the native-version match.
+**Use the package that matches your ArcGIS Server's major version:**
+- **12.0 / 12.1** → the `12.x` package (`arcgisVersion 12.0.0`).
+- **11.2 – 11.5+** → the `11.x` package (downgraded `arcgisVersion 11.2.0`; see the *ArcGIS 11.x note*).
 
-These are the **universal** build — pure-JS core (runs on Windows *and* Linux) with the
+Match the package to the server — don't run the 11.x manifest on a 12.x server (it happens to
+register, but the version-matched package is the supported, no-surprises choice).
+
+Both are the same **cross-platform** build — pure-JS core (runs on Windows *and* Linux) with the
 GovCloud (`.mil`/`.us`) OAuth allowlist patched in, so they work on commercial **and**
 GovCloud Databricks. Provider **v1.1.2**.
 
@@ -79,12 +79,12 @@ the old one first (or use *update*). **First back up the provider directory to *
 
 ## ArcGIS 11.x note
 
-The prebuilt `11.x` package is a single **universal** build that registers across the whole
-11.x line and on 12.x. Its manifest differs from the `12.x` one in four ways (all live-tested
-on 11.4 Linux, 11.5 Windows, and 12.1):
+The prebuilt `11.x` package registers across the whole 11.x line (11.2 → 11.5+). Its manifest
+differs from the `12.x` one in four ways (all live-tested on 11.4 Linux, 11.5 Windows, and 12.1):
 
-1. **`arcgisVersion` = `11.2.0`** (the floor). A lower manifest registers on any *higher*
-   server, so one 11.2.0 build covers 11.2 → 11.5+ *and* 12.0 / 12.1. CDF requires **11.2+**.
+1. **`arcgisVersion` = `11.2.0`** (the floor). A lower manifest registers on any 11.x server;
+   one 11.2.0 build covers 11.2 → 11.5+. CDF requires **11.2+**. (It also *happens* to register
+   on 12.x, but 12.x servers should use the version-matched `12.x` package.)
 2. **Top-level `editingEnabled: true` is KEPT.** 11.x *tolerates* it (registers fine; just
    shows it blank in the provider listing) and 12.x *honors* it — so keeping it means the same
    package still enables provider-level editing on 12.x. (Earlier guidance to drop it was

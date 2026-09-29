@@ -287,7 +287,7 @@ SELECT *, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326) AS geometry
 FROM public.my_table WHERE latitude IS NOT NULL;
 ```
 
-> **⚠️ Always stamp the SRID.** Databricks `ST_Point(lon, lat)` and `ST_GeomFromText(wkt)` **default to SRID 0** (undefined) — the column comes out `geometry(0)`. ArcGIS/Portal can't project SRID-0 geometry, so features return with **attributes but no geometry** (nothing draws in Map Viewer, even though a raw REST `/query` still returns the attribute rows). Pass the SRID explicitly — `ST_Point(lon, lat, 4326)` (3-arg form works on Databricks) or `ST_SetSRID(ST_Point(lon, lat), 4326)` — and confirm the column reads `geometry(4326)` via `SELECT DISTINCT ST_SRID(geometry) FROM …`. It must match the service's `srid` param (default `4326`).
+> **⚠️ Always stamp the SRID.** Databricks `ST_Point(lon, lat)` / `ST_GeomFromText(wkt)` **default to SRID 0**, which ArcGIS can't project — features come back with attributes but **no geometry**. Use `ST_Point(lon, lat, 4326)` (or `ST_SetSRID(…, 4326)`) so the column reads `geometry(4326)`, matching the service's `srid` param. (Details in [Troubleshooting](#troubleshooting).)
 
 ---
 
