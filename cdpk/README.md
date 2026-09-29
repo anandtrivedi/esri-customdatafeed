@@ -10,15 +10,41 @@ cdpk/
 ├── 12.x/
 │   ├── databricks-geospatial-provider.cdpk          # ArcGIS Server 12.0 / 12.1 — prebuilt & ready
 │   └── databricks-geospatial-provider.cdpk.sha256   # checksum
-└── 11.x/                                             # ArcGIS Server 11.x — not prebuilt yet; build per the note below
+└── 11.x/
+    ├── databricks-geospatial-provider.cdpk          # ArcGIS Server 11.2 – 11.5+ — prebuilt & ready
+    └── databricks-geospatial-provider.cdpk.sha256   # checksum
 ```
 
-**Currently prebuilt: 12.x** (covers 12.0 and 12.1). For **11.x**, see the *ArcGIS 11.x note*
-at the bottom.
+**Both are prebuilt.** The `12.x` package targets `arcgisVersion 12.0.0` (registers on 12.0 /
+12.1). The `11.x` package uses a downgraded `arcgisVersion 11.2.0` manifest and registers on
+the whole **11.2 → 11.5+** line. The `11.x` build is in fact **universal** — because a lower
+manifest also registers on a *higher* server, it registers on 12.0 / 12.1 too, and it keeps
+provider-level editing working on 12.x (see the *ArcGIS 11.x note*). If you're on 12.x, either
+package works; the `12.x` one is the native-version match.
 
 These are the **universal** build — pure-JS core (runs on Windows *and* Linux) with the
 GovCloud (`.mil`/`.us`) OAuth allowlist patched in, so they work on commercial **and**
 GovCloud Databricks. Provider **v1.1.2**.
+
+## Prerequisite: the Custom Data Feed runtime (separate install)
+
+The CDF runtime is **NOT bundled with ArcGIS Server** — it is a separate server component you
+must install on **every** ArcGIS Server machine, on **both Windows and Linux**, before you can
+register any `.cdpk`. Without it, register fails with
+`"Custom data feed runtime is not installed or configured properly"`.
+
+Download `ArcGIS Custom Data Feeds` for **your exact server version** from My Esri (same place
+as the ArcGIS Server installer), then:
+
+- **Linux:** extract the `.tar.gz` and run `bash CustomDataFeed-Setup.sh` **as the `arcgis`
+  user in a login shell**. It reads `~/.ESRI.properties.<host>.<ver>` to find the Server dir,
+  deploys into `<server>/framework/runtime/customdata`, then restart ArcGIS Server.
+- **Windows:** run `ArcGIS_Custom_Data_Feeds_Windows_<ver>.exe` (it extracts to
+  `Documents\ArcGIS <ver>\CustomDataFeeds\Setup.exe`; run `Setup /qn`), then restart the
+  ArcGIS Server service.
+
+A server that already serves CDF services has this installed; a *fresh* ArcGIS Server install
+does not.
 
 ## Verify before registering
 
@@ -31,7 +57,8 @@ Get-FileHash .\databricks-geospatial-provider.cdpk -Algorithm SHA256   # Windows
 ```
 
 **12.x** SHA-256: `650589608a7b8e2f30ee43c6f089ca0c50bb359c54f4312dc81b1395d897e6b7`
-(each folder's `*.cdpk.sha256` file carries its checksum).
+**11.x** SHA-256: `1e8a4afb2474a45e60fe7145ead983ceac108e99f17fa0baf2f559ae7aca1889`
+(each folder's `*.cdpk.sha256` file carries its checksum.)
 
 ## Register (Server operation; once per Server site — deploys to all machines)
 
@@ -65,11 +92,25 @@ the old one first (or use *update*). **First back up the provider directory to *
 
 ## ArcGIS 11.x note
 
-The `12.x` package targets `arcgisVersion 12.0.0`, which registers on **12.0 and 12.1**.
-An **11.x** package needs a *downgraded* manifest and is **not prebuilt here yet** — build it
-by setting `arcgisVersion` to your server version and dropping the top-level `editingEnabled`
-(keep the GovCloud OAuth patch), then drop the result in `cdpk/11.x/`. Easiest builds:
-**Windows** `windows/build-cdpk.ps1 -ArcgisVersion <your-version>` (e.g. `-ArcgisVersion 11.5`);
-**Linux** rebuild via `build-release.sh` with the manifest downgraded. One 11.x build is
-expected to cover the 11.x line; if a specific minor rejects it, rebuild for that exact
-version. CDF requires ArcGIS Server **11.2+**.
+The prebuilt `11.x` package is a single **universal** build that registers across the whole
+11.x line and on 12.x. Its manifest differs from the `12.x` one in four ways (all live-tested
+on 11.4 Linux, 11.5 Windows, and 12.1):
+
+1. **`arcgisVersion` = `11.2.0`** (the floor). A lower manifest registers on any *higher*
+   server, so one 11.2.0 build covers 11.2 → 11.5+ *and* 12.0 / 12.1. CDF requires **11.2+**.
+2. **Top-level `editingEnabled: true` is KEPT.** 11.x *tolerates* it (registers fine; just
+   shows it blank in the provider listing) and 12.x *honors* it — so keeping it means the same
+   package still enables provider-level editing on 12.x. (Earlier guidance to drop it was
+   over-cautious; dropping it would silently disable editing on 12.x.)
+3. **`properties.hosts: false` + `properties.disableIdParam: true` are added.** The 12.1
+   runtime defaults these; the 11.x runtime errors `JSONObject["hosts"] not found` without them.
+4. **A `config/default.json` = `{}` file is added.** The 11.x runtime's `import-providers.js`
+   does `readFileSync(<provider>/config/default.json)` and dies `ENOENT` without it (12.x
+   tolerates its absence). Its symptom is a generic `"Node server failed to start"`; the real
+   cause is in `<server>/framework/runtime/customdata/logs/customdataserver-*.log`.
+
+To rebuild: **Windows** `windows/build-cdpk.ps1 -ArcgisVersion 11.2` (plus the config/hosts
+additions); **Linux** rebuild via `build-release.sh` with the manifest downgraded. Match your
+server's exact `currentVersion` only if a build is rejected — the 11.2.0 floor is expected to
+cover the line. For `.mil`/GovCloud the rebuild must also carry the OAuth allowlist patch
+(build via the scripts, not a manual zip).

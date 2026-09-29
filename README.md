@@ -41,7 +41,7 @@ sudo bash publish-service.sh
 
 ## Prerequisites
 
-1. **An ArcGIS Server, 11.4 or later, with Custom Data Feeds enabled.** It ships its own Node.js runtime — you don't install Node separately. Use **12.0+** if you want feature *editing* (not just read-only maps).
+1. **An ArcGIS Server, 11.4 or later, with the Custom Data Feed runtime installed.** ⚠️ The **CDF runtime is a separate server component — NOT bundled with ArcGIS Server** — and must be installed on **every** ArcGIS Server machine, on **both Windows and Linux**, before you can register the provider. Download `ArcGIS Custom Data Feeds` for your **exact** server version from My Esri and install it (Linux: `bash CustomDataFeed-Setup.sh` as the `arcgis` user; Windows: `ArcGIS_Custom_Data_Feeds_Windows_<ver>.exe` → `Setup /qn`), then restart ArcGIS Server. Without it, register fails with *"Custom data feed runtime is not installed or configured properly."* Once installed, it ships its own Node.js runtime — you don't install Node separately. Use **12.0+** if you want feature *editing* (not just read-only maps). *(CDF itself supports 11.2+; the prebuilt `11.x` package covers the whole 11.2 → 11.5+ line — see [`cdpk/README.md`](cdpk/README.md).)*
 2. **A Databricks SQL Warehouse** (left sidebar → SQL Warehouses). This is what the provider queries. *(A Lakebase instance is optional — only needed for very low-latency maps or editing.)*
 3. **Databricks credentials** — a **Service Principal (OAuth M2M)** (recommended: a machine identity that auto-refreshes, no user dependency) *or* a **Personal Access Token (PAT)** (simplest for one person). Whichever you use, it needs **both** layers of access granted to that same identity:
    - **Compute:** `CAN USE` on the SQL Warehouse.
@@ -276,7 +276,7 @@ Benchmark on 17M Overture Maps Places, warm averages, end-to-end through ArcGIS 
 ```sql
 -- Lakehouse
 CREATE VIEW catalog.schema.my_table_geo AS
-SELECT *, ST_Point(longitude, latitude) AS geometry
+SELECT *, ST_Point(longitude, latitude, 4326) AS geometry   -- lon, lat, SRID
 FROM catalog.schema.my_table WHERE latitude IS NOT NULL;
 
 -- Lakebase
@@ -284,6 +284,8 @@ CREATE VIEW public.my_table_geo AS
 SELECT *, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326) AS geometry
 FROM public.my_table WHERE latitude IS NOT NULL;
 ```
+
+> **⚠️ Always stamp the SRID.** Databricks `ST_Point(lon, lat)` and `ST_GeomFromText(wkt)` **default to SRID 0** (undefined) — the column comes out `geometry(0)`. ArcGIS/Portal can't project SRID-0 geometry, so features return with **attributes but no geometry** (nothing draws in Map Viewer, even though a raw REST `/query` still returns the attribute rows). Pass the SRID explicitly — `ST_Point(lon, lat, 4326)` (3-arg form works on Databricks) or `ST_SetSRID(ST_Point(lon, lat), 4326)` — and confirm the column reads `geometry(4326)` via `SELECT DISTINCT ST_SRID(geometry) FROM …`. It must match the service's `srid` param (default `4326`).
 
 ---
 
@@ -323,6 +325,13 @@ Provider init failed silently. Tail the server log for `Custom_data_feeds` lines
 - **OBJECTID:** `idField` must be an integer ≤ 2,147,483,647 with unique values.
 - **Editing fails:** `capabilities:"Query,Editing"` + `editingEnabled:"true"` both set; `lakebaseHost` present (editing is Lakebase-only); ArcGIS 12.0+. On federated Portal, the user's role needs "Edit features".
 - **Slow:** Lakehouse cold start (5–15 s) after idle; add `OPTIMIZE … ZORDER BY (geom)` (Lakehouse) or `CREATE INDEX … USING GIST (geom)` (Lakebase).
+
+</details>
+
+<details>
+<summary><b>Features have attributes but no geometry (nothing draws in Portal / Map Viewer)</b></summary>
+
+The source geometry has **SRID 0** (undefined spatial reference). ArcGIS can't project it, so features come back with attributes but null geometry — a raw REST `/query` still returns the attribute rows, which masks the problem and makes it look like a Portal-only issue. Cause: geometry built without an SRID — Databricks `ST_Point(lon, lat)` / `ST_GeomFromText(wkt)` default to **SRID 0**, so the column is `geometry(0)`. Fix: stamp the SRID in the source view/table — `ST_Point(lon, lat, 4326)` or `ST_SetSRID(ST_Point(lon, lat), 4326)` — confirm the column reads `geometry(4326)` (`SELECT DISTINCT ST_SRID(geometry) FROM …`) and matches the service's `srid` param (`4326`). This is a **data** change to the source, so it's picked up on the next query — **no server restart needed** (responses aren't cached; only the geometry *format* — WKT/WKB/GEOMETRY, not SRID — is cached per column, so a restart is only needed if you change the storage *format* or credentials). Just hard-refresh Map Viewer (it caches layer metadata). Note: a *wrong-but-valid* SRID instead renders features in the wrong place (Null Island), not missing.
 
 </details>
 
