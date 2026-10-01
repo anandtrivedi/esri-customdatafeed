@@ -437,9 +437,24 @@ for w in (d if isinstance(d,list) else []):
       fi
     fi
   fi
+  # Accept the warehouse as EITHER a bare id, the full /sql/1.0/warehouses/<id> HTTP path, or a
+  # pasted full URL — and always normalize to /sql/1.0/warehouses/<id>. A bare id stored raw would
+  # 404 the @databricks/sql driver at connection time, so we build the path for the user and echo it.
   while [ -z "$WAREHOUSE_PATH" ]; do
-    ask "SQL Warehouse HTTP path" "/sql/1.0/warehouses/" WAREHOUSE_PATH
-    case "$WAREHOUSE_PATH" in ""|*/) echo "   !! Incomplete — include the warehouse id, e.g. /sql/1.0/warehouses/abc123def456."; WAREHOUSE_PATH="";; esac
+    ask "SQL Warehouse — the warehouse id, OR its full /sql/1.0/warehouses/<id> path" "/sql/1.0/warehouses/" _WHIN
+    _WHIN="$(printf '%s' "$_WHIN" | tr -d '[:space:]')"; _WHIN="${_WHIN%%\?*}"; _WHIN="${_WHIN%%#*}"
+    if [ -z "$_WHIN" ] || [ "$_WHIN" = "/sql/1.0/warehouses/" ]; then
+      echo "   !! Enter the warehouse id, or the full /sql/1.0/warehouses/<id> path."
+    elif printf '%s' "$_WHIN" | grep -qE '^[A-Za-z0-9]+$'; then
+      WAREHOUSE_PATH="/sql/1.0/warehouses/$_WHIN"; echo "   -> using $WAREHOUSE_PATH"          # bare id
+    elif printf '%s' "$_WHIN" | grep -qE '/(warehouses|endpoints)/[A-Za-z0-9]+/?$'; then
+      _WID="$(printf '%s' "$_WHIN" | sed -E 's#.*/(warehouses|endpoints)/##; s#/.*##')"        # full path/URL -> id
+      WAREHOUSE_PATH="/sql/1.0/warehouses/$_WID"
+      [ "$_WHIN" = "$WAREHOUSE_PATH" ] || echo "   -> using $WAREHOUSE_PATH"
+    else
+      echo "   !! Not recognized. Enter just the warehouse id (e.g. 1da567152244cb6f) or the full"
+      echo "      /sql/1.0/warehouses/<id> path (copy the HTTP path from the warehouse Connection details)."
+    fi
   done
 else
   while :; do ask "Lakebase host (…database.<region>.cloud.databricks.com)" "" LB_HOST; [ -n "$LB_HOST" ] && break; echo "   !! Lakebase host is required."; done
@@ -917,6 +932,14 @@ print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev
     else
       echo "!! Service query returned an error or unexpected response. Raw response:"
       printf '%s\n' "$Q" | head -c 2000; echo
+      echo "   - 500 'Error performing query operation' is GENERIC — an auth technicality OR a real provider"
+      echo "       error, so don't dismiss it until verified. On a FEDERATED server /query auth is delegated"
+      echo "       to Portal, so this script's server-minted token is rejected and returns exactly this 500"
+      echo "       even when the service is fine ('Invalid token' appears in the ArcGIS SERVER log, not this"
+      echo "       response). Verify: mint a PORTAL token and retry the SAME /query URL — succeeds => data"
+      echo "       path is healthy; still fails => real provider error, tail the 'Custom_data_feeds' log"
+      echo "       (DB/SQL/creds/grants). (client=requestip tokens can also 500 if the request IP differs —"
+      echo "       proxy/LB — even unfederated.)"
       echo "   - 404 / 'Service not found' => service did not start: wrong tableName/geometryColumn, or the"
       echo "       provider errored initializing it (table/column missing). Fix the value and re-run."
       echo "   - 'No default Databricks workspace configured' => .databrickscfg/workspace issue"

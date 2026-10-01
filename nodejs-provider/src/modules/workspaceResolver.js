@@ -188,10 +188,14 @@ function resolveWorkspace(alias) {
   if (requestedAlias !== 'default') {
     if (!profiles[requestedAlias]) {
       const available = Object.keys(profiles).join(', ') || '(none)';
-      throw new Error(
-        `Databricks workspace profile "${requestedAlias}" not found in ${getConfigFilePath()}. ` +
-        `Available profiles: ${available}.`
+      const err = new Error(
+        `Databricks workspace profile "${requestedAlias}" not found in ${getConfigFilePath()} ` +
+        `on ArcGIS Server host "${os.hostname()}". Available profiles: ${available}. ` +
+        `The profile must exist on EVERY server machine — set it up with configure-databricks.sh ` +
+        `(README Step 3); registering the .cdpk does NOT install credentials.`
       );
+      err.code = 400; // config error (publisher-fixable) — surface it, don't let it collapse into a 404
+      throw err;
     }
     return buildProfileFromIni(requestedAlias, profiles[requestedAlias]);
   }
@@ -203,11 +207,14 @@ function resolveWorkspace(alias) {
   const envDefault = buildDefaultFromEnv();
   if (envDefault) return envDefault;
 
-  throw new Error(
-    'No default Databricks workspace configured. ' +
-    'Set DATABRICKS_SERVER_HOSTNAME and DATABRICKS_ACCESS_TOKEN env vars, ' +
-    'or define a [DEFAULT] profile in your .databrickscfg.'
+  const err = new Error(
+    `No default Databricks workspace configured on ArcGIS Server host "${os.hostname()}". ` +
+    `Define a [DEFAULT] profile in ${getConfigFilePath()} (or set DATABRICKS_SERVER_HOSTNAME and ` +
+    `DATABRICKS_ACCESS_TOKEN env vars) via configure-databricks.sh (README Step 3) — ` +
+    `registering the .cdpk does NOT install credentials.`
   );
+  err.code = 400; // config error (publisher-fixable) — surface it, don't let it collapse into a 404
+  throw err;
 }
 
 module.exports = {

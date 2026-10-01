@@ -627,6 +627,80 @@ describe("model", () => {
     });
   });
 
+  describe("service parameter sentinels", () => {
+    // The publish wizard makes every field required, so publishers type a placeholder
+    // into inapplicable fields. These must be treated as "not provided".
+    const sentinels = ["-", "--", "---", " ", "   ", "na", "NA", "n/a", "N/A", "none", "None"];
+
+    sentinels.forEach((s) => {
+      it(`treats lakebaseHost ${JSON.stringify(s)} as unset -> routes to Lakehouse`, (done) => {
+        lakebaseQueryLog = [];
+        const model = new Model();
+        const req = {
+          query: { f: "json" },
+          params: {
+            lakebaseHost: s,
+            lakebasePort: s,
+            lakebaseTable: s,
+            tableName: "main.geo.towers",
+            geometryColumn: "geom",
+            idField: "objectid",
+          },
+          ip: "127.0.0.1",
+        };
+        model.getData(req, (err, result) => {
+          expect(err).to.be.null;
+          expect(result.type).to.equal("FeatureCollection");
+          // Lakebase path is never entered — its query log stays empty.
+          expect(lakebaseQueryLog).to.have.lengthOf(0);
+          done();
+        });
+      });
+    });
+
+    it("still routes to Lakebase for a real lakebaseHost", (done) => {
+      lakebaseQueryResult = { rows: [] };
+      lakebaseQueryLog = [];
+      const model = new Model();
+      const req = {
+        query: {},
+        params: {
+          lakebaseHost: "lakebase.example.com",
+          lakebaseDatabase: "testdb",
+          lakebaseTable: "cell_towers",
+        },
+        ip: "127.0.0.1",
+      };
+      model.getData(req, (err) => {
+        expect(err).to.be.null;
+        expect(lakebaseQueryLog.length).to.be.greaterThan(0);
+        done();
+      });
+    });
+
+    it("rejects editing when lakebaseHost is a sentinel", async () => {
+      const model = new Model();
+      const req = {
+        params: {
+          lakebaseHost: "-",
+          lakebaseTable: "t",
+          lakebaseDatabase: "d",
+          geometryColumn: "geom",
+          idField: "objectid",
+        },
+        ip: "127.0.0.1",
+      };
+      let threw = false;
+      try {
+        await model.editData(req, { adds: [{ attributes: {}, geometry: {} }] });
+      } catch (err) {
+        threw = true;
+        expect(err.message).to.include("lakebaseHost");
+      }
+      expect(threw).to.be.true;
+    });
+  });
+
   describe("getDataFromLakebase", () => {
     it("should route to Lakebase when lakebaseHost is set", (done) => {
       lakebaseQueryResult = {

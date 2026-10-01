@@ -52,6 +52,39 @@ const config = {
   }
 };
 
+// The ArcGIS CDF publish wizard makes EVERY declared service parameter required, so a
+// Lakehouse service still has to put something in the Lakebase-only fields (and vice-versa).
+// Publishers type a placeholder to get past the form; treat these as "not provided" so the
+// value is ignored. Crucially, a placeholder in lakebaseHost must NOT flip routing to Lakebase.
+// Sentinels (case-insensitive, after trimming): empty/whitespace, a run of dashes (-, --, ---),
+// na, n/a, none.
+const PARAM_SENTINEL_RE = /^(?:[\s-]*|na|n\/a|none)$/i;
+function cleanParam(value) {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = String(value).trim();
+  return PARAM_SENTINEL_RE.test(trimmed) ? undefined : trimmed;
+}
+
+// Service parameters that may legitimately be "not applicable" for the chosen backend.
+const SERVICE_PARAM_KEYS = [
+  'workspace', 'warehouseHttpPath', 'tableName', 'geometryColumn', 'idField',
+  'geometryFormat', 'timeColumn', 'lakebaseHost', 'lakebasePort', 'lakebaseDatabase',
+  'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled',
+];
+
+// Normalize sentinel placeholders to "absent" on req.params, so a '-' typed into an
+// inapplicable-but-required publish field behaves exactly like leaving it blank would.
+function normalizeServiceParams(req) {
+  if (!req || !req.params) return;
+  for (const key of SERVICE_PARAM_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(req.params, key)) {
+      const cleaned = cleanParam(req.params[key]);
+      if (cleaned === undefined) delete req.params[key];
+      else req.params[key] = cleaned;
+    }
+  }
+}
+
 // Resolve the workspace + warehouse for a given service request.
 // Throws with a clear message if neither a profile nor env-default is configured.
 function resolveLakehouseTarget(req) {
@@ -174,6 +207,7 @@ class Model {
    */
   getData(req, callback) {
     requestCounter++;
+    normalizeServiceParams(req); // '-', 'na', blanks etc. (publish-form placeholders) => unset
 
     // Route to Lakebase if this is an editable service
     if (req.params.lakebaseHost) {
@@ -683,6 +717,7 @@ class Model {
    */
   async editData(req, data, callback) {
     try {
+      normalizeServiceParams(req); // '-', 'na', blanks etc. (publish-form placeholders) => unset
       const rawGeometryColumn = req.params.geometryColumn || 'geometry';
       const rawIdField = req.params.idField || 'id';
       const schema = req.params.lakebaseSchema || 'public';

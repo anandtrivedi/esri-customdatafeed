@@ -53,7 +53,7 @@ sudo bash publish-service.sh
    | `<workspace>.cloud.databricks.com` | 443 | SQL Warehouse queries + Databricks API |
    | `<instance>.database.cloud.databricks.com` | 5432 | Lakebase queries/edits (only if you use Lakebase) |
 
-   If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add the ArcGIS Server's outbound IP — otherwise the first query fails with `HTTP 403`.
+   If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add **each** ArcGIS Server node's outbound IP (create your own ALLOW list — don't edit a fevm/`*-DoNotModify` managed one). Otherwise the connection fails with `HTTP 403`, which surfaces to the publisher as a **misleading `"Service not found"`** — the real `403` appears only in the `Custom_data_feeds` server log. Allow-list changes take a few minutes to propagate.
 5. **The Databricks CLI (recommended)** — writes your credential file in Step 3 and helps look up values the publish wizard asks for. Install on the server: `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh`. *(No internet on the box? It's one static binary — download it elsewhere and copy it onto the `PATH`.)*
 
 ---
@@ -112,6 +112,8 @@ A **one-time** action telling ArcGIS Server the provider exists. Do it in **ArcG
 3. Browse to `databricks-geospatial-provider.cdpk` and confirm.
 
 The **Name** shown — `databricks-geospatial-provider` — is what Feature Services point at. Then **restart ArcGIS Server** so the code loads.
+
+> ⚠️ **Registering installs the provider *code* only — NOT your Databricks credentials.** They're a separate, one-time per-box step ([Step 3](#3-configure-the-databricks-connection)): a `.databrickscfg` file owned by `arcgis`, mode `600`. The publish form only asks for a profile *name*; the secret never goes into ArcGIS (so it can't leak via the admin API or backups). Do Step 3 **before** publishing, and the provider only picks up new credentials **after a server restart** (it caches the file at startup). If you skip this, a published service fails to start with `"Service not found"` and a `SEVERE … workspace profile … not found` line in the server log.
 
 > **Prefer a script?** `sudo bash register-provider.sh` does Build + Register in one wizard (build via option 1, or register an existing `.cdpk` via option 2), auto-detects the install root, updates-vs-registers safely (snapshotting the live provider dir so a failed update can be rolled back), and restarts the server.
 >
@@ -412,7 +414,9 @@ Then, in the client: register your ArcGIS target (password set via a terminal co
 
 **Lakebase parameters:** `workspace`, `lakebaseHost` (required, selects Lakebase), `lakebasePort` (`5432`), `lakebaseDatabase` (required), `lakebaseSchema` (`public`), `lakebaseTable` (required), `geometryColumn`, `idField`, `maxRecordCount`, `srid`, `editingEnabled` (`false`).
 
-**Fill one set, not both.** A read-only **Lakehouse** service uses the Lakehouse fields (leave the Lakebase fields blank); an editable **Lakebase** service uses the Lakebase fields (leave the Lakehouse fields blank). Setting `lakebaseHost` is what switches the backend to Lakebase. `workspace`, `geometryColumn`, `idField`, `srid`, `maxRecordCount` are shared. In the Portal publish form, the `(Lakehouse)` / `(Lakebase)` tags in the field labels mark which set each belongs to.
+**Fill one set, not both.** A read-only **Lakehouse** service uses the Lakehouse fields; an editable **Lakebase** service uses the Lakebase fields. Setting `lakebaseHost` is what switches the backend to Lakebase. `workspace`, `geometryColumn`, `idField`, `srid`, `maxRecordCount` are shared. The publish-form field labels are grouped and numbered — `Common`, `Lakehouse`, `Lakebase` — so you can see at a glance which set each belongs to.
+
+> **Leaving fields empty — REST vs the Portal form.** The Admin REST call accepts empty strings for the fields that don't apply (shown below). The **Portal "Create a feature layer" form, however, requires *every* field** (Esri marks all provider parameters required — a blank field silently blocks the form). So in the GUI, enter **`-`** in each inapplicable field. The provider treats `-` (and `na`, `n/a`, `none`, or whitespace, case-insensitive) as *unset*, so a `-` in `lakebaseHost` keeps the service on Lakehouse. Defaults still apply to `srid` (4326), `maxRecordCount` (2000), `lakebasePort` (5432), and `lakebaseSchema` (public) when you enter `-`.
 
 ```bash
 curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN&f=json" \

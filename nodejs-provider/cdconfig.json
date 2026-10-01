@@ -9,78 +9,78 @@
     "serviceParameters": [
       {
         "key": "workspace",
-        "label": "Databricks Workspace Profile",
-        "description": "e.g. SP"
-      },
-      {
-        "key": "warehouseHttpPath",
-        "label": "SQL Warehouse HTTP Path (Lakehouse)",
-        "description": "e.g. /sql/1.0/warehouses/1857dd2a594736e4"
-      },
-      {
-        "key": "tableName",
-        "label": "Table Name (Lakehouse)",
-        "description": "e.g. main.geospatial.us_cell_towers"
+        "label": "1. Common - Databricks Workspace Profile",
+        "description": "BOTH backends. Name of a profile that ALREADY EXISTS in the server's .databrickscfg (set up separately via configure-databricks.sh / README Step 3 - registering the .cdpk does NOT install credentials), e.g. DEFAULT or SP. Enter - to use the default profile."
       },
       {
         "key": "geometryColumn",
-        "label": "Geometry Column",
-        "description": "e.g. geom"
+        "label": "2. Common - Geometry Column",
+        "description": "BOTH backends. Name of the column that holds the geometry, e.g. geom or shape. Required."
       },
       {
         "key": "idField",
-        "label": "ID Field",
-        "description": "e.g. objectid"
-      },
-      {
-        "key": "geometryFormat",
-        "label": "Geometry Format (Lakehouse)",
-        "description": "e.g. WKT, WKB, GEOJSON, or GEOMETRY"
-      },
-      {
-        "key": "timeColumn",
-        "label": "Time Column",
-        "description": "e.g. event_time"
-      },
-      {
-        "key": "lakebaseHost",
-        "label": "Lakebase Host",
-        "description": "e.g. ep-bold-dawn-xxxx.database.cloud.databricks.com"
-      },
-      {
-        "key": "lakebasePort",
-        "label": "Lakebase Port",
-        "description": "e.g. 5432"
-      },
-      {
-        "key": "lakebaseDatabase",
-        "label": "Lakebase Database",
-        "description": "e.g. databricks_postgres"
-      },
-      {
-        "key": "lakebaseSchema",
-        "label": "Lakebase Schema",
-        "description": "e.g. geo_demo"
-      },
-      {
-        "key": "lakebaseTable",
-        "label": "Lakebase Table",
-        "description": "e.g. cases_editable"
-      },
-      {
-        "key": "maxRecordCount",
-        "label": "Max Record Count",
-        "description": "e.g. 2000"
+        "label": "3. Common - ID Field",
+        "description": "BOTH backends. A unique integer id column (<= 2147483647, not a UUID), e.g. objectid. Required."
       },
       {
         "key": "srid",
-        "label": "Spatial Reference ID",
-        "description": "e.g. 4326"
+        "label": "4. Common - Spatial Reference ID / SRID (default 4326)",
+        "description": "BOTH backends. EPSG code of the stored geometry, e.g. 4326 (WGS84). Enter - for the default (4326)."
+      },
+      {
+        "key": "maxRecordCount",
+        "label": "5. Common - Max Record Count (default 2000)",
+        "description": "BOTH backends. Maximum rows returned per page, e.g. 2000. Enter - for the default (2000)."
+      },
+      {
+        "key": "warehouseHttpPath",
+        "label": "6. Lakehouse - SQL Warehouse HTTP Path",
+        "description": "LAKEHOUSE only. The warehouse's full HTTP path, e.g. /sql/1.0/warehouses/a1b2c3d4e5f6a7b8. Enter - for a Lakebase service."
+      },
+      {
+        "key": "tableName",
+        "label": "7. Lakehouse - Table (catalog.schema.table)",
+        "description": "LAKEHOUSE only. 3-part Unity Catalog name, e.g. main.geospatial.us_cell_towers. Enter - for a Lakebase service."
+      },
+      {
+        "key": "geometryFormat",
+        "label": "8. Lakehouse - Geometry Format",
+        "description": "LAKEHOUSE only, optional. One of WKT, WKB, GEOJSON, GEOMETRY. Enter - to auto-detect from the column (also enter - for a Lakebase service)."
+      },
+      {
+        "key": "timeColumn",
+        "label": "9. Lakehouse - Time Column",
+        "description": "LAKEHOUSE only, optional. Timestamp column for time-aware layers. Enter - if there is none (also enter - for a Lakebase service)."
+      },
+      {
+        "key": "lakebaseHost",
+        "label": "10. Lakebase - Host",
+        "description": "LAKEBASE only. e.g. instance-name.database.<region>.cloud.databricks.com. Enter - for a Lakehouse service."
+      },
+      {
+        "key": "lakebasePort",
+        "label": "11. Lakebase - Port (default 5432)",
+        "description": "LAKEBASE only, e.g. 5432. Enter - for the default (5432). For a Lakehouse service, enter - too."
+      },
+      {
+        "key": "lakebaseDatabase",
+        "label": "12. Lakebase - Database",
+        "description": "LAKEBASE only. e.g. databricks_postgres. Enter - for a Lakehouse service."
+      },
+      {
+        "key": "lakebaseSchema",
+        "label": "13. Lakebase - Schema (default public)",
+        "description": "LAKEBASE only, e.g. geo_demo. Enter - for the default (public). For a Lakehouse service, enter - too."
+      },
+      {
+        "key": "lakebaseTable",
+        "label": "14. Lakebase - Table",
+        "description": "LAKEBASE only. e.g. cases_editable. Enter - for a Lakehouse service."
       },
       {
         "key": "editingEnabled",
-        "label": "Editing Enabled (Lakebase)",
-        "description": "e.g. true"
+        "label": "15. Lakebase - Enable Editing",
+        "description": "LAKEBASE only. Enter true to allow add/update/delete. Enter - for read-only (or for a Lakehouse service)."
       }
     ]
   },
