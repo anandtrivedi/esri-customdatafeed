@@ -385,7 +385,7 @@ CREATE INDEX ON my_table USING GIST (geom);
 
 Tables created directly in Lakebase with native PostGIS geometry work fine.
 
-**Large layers rendered blank in Map Viewer (PBF feature-tiles).** The ArcGIS CDF runtime through 12.1 advertises PBF feature-tiles but does not forward `quantizationParameters` to its PBF encoder, so large layers (which clients draw as quantized tiles) come back with `transform: null` and render blank. Small layers use JSON snapshot mode and are unaffected. **The provider works around this** by defaulting `supportedQueryFormats` to `JSON,geojson` (PBF dropped) so clients fall back to JSON tiles, which quantize correctly (slightly larger payloads). To restore PBF on a runtime where Esri has fixed quantization forwarding, set the per-service `enablePbf` parameter to `true` in the Portal publish form (or via an admin service edit).
+**Large layers rendered blank in Map Viewer (PBF feature-tiles).** The ArcGIS CDF runtime through 12.1 advertises PBF feature-tiles but does not forward `quantizationParameters` to its PBF encoder, so large layers come back with `transform: null` and render blank. Small layers use JSON snapshot mode and are unaffected. **The provider works around this** by defaulting `supportedQueryFormats` to `JSON,geojson` (PBF dropped) so clients fall back to JSON tiles, which quantize correctly (slightly larger payloads). To restore PBF on a runtime where Esri has fixed quantization forwarding, set the per-service `enablePbf` parameter to `true` in the Portal publish form (or via an admin service edit).
 
 ---
 
@@ -477,7 +477,7 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 | Variable | Description |
 |---|---|
 | `DATABRICKS_SERVER_HOSTNAME` / `DATABRICKS_HTTP_PATH` / `DATABRICKS_ACCESS_TOKEN` | Lakehouse connection (env-var fallback when not using `.databrickscfg`) |
-| `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Auto-search: `~/.databrickscfg`, then `/home/arcgis/.databrickscfg` (Linux) / `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows) — set only if the file is elsewhere |
+| `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Auto-found in the service-account home — `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows); set only if the file is elsewhere |
 | `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` | Lakebase connection (token auto-generated if omitted) |
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
