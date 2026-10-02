@@ -33,8 +33,33 @@ const path = require('path');
 
 let profileCache = null;
 
+// Candidate .databrickscfg locations when DATABRICKS_CONFIG_FILE is not set, in priority
+// order. ArcGIS Server does not reliably set HOME for the provider process, so os.homedir()
+// can resolve to '/' or the wrong directory and a plain ~/.databrickscfg won't be found —
+// falling through to the well-known ArcGIS locations lets a standard install work with just
+// the credential file in place and NO DATABRICKS_CONFIG_FILE env var (nor init_user_param.sh
+// on Linux / Machine env var on Windows). The non-matching OS's path simply never exists.
+const ARCGIS_CONFIG_PATHS = [
+  '/home/arcgis/.databrickscfg',                                                              // Linux ArcGIS service-account home
+  path.join(process.env.ProgramData || 'C:\\ProgramData', 'ArcGIS', 'cdf', '.databrickscfg'), // Windows (configure-databricks.ps1 default)
+];
+
+// Pure + dependency-injected so the fallback order is unit-testable without the real fs.
+function resolveConfigPath({ env, home, exists }) {
+  if (env) return env; // explicit override always wins (even if missing — surfaces a clear error)
+  const candidates = [path.join(home, '.databrickscfg'), ...ARCGIS_CONFIG_PATHS];
+  for (const candidate of candidates) {
+    if (exists(candidate)) return candidate;
+  }
+  return candidates[0]; // nothing found anywhere: report the home-based path in errors
+}
+
 function getConfigFilePath() {
-  return process.env.DATABRICKS_CONFIG_FILE || path.join(os.homedir(), '.databrickscfg');
+  return resolveConfigPath({
+    env: process.env.DATABRICKS_CONFIG_FILE,
+    home: os.homedir(),
+    exists: fs.existsSync,
+  });
 }
 
 /**
@@ -224,5 +249,6 @@ module.exports = {
     parseIni,
     buildProfileFromIni,
     getConfigFilePath,
+    resolveConfigPath,
   },
 };

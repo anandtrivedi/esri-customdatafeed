@@ -287,4 +287,47 @@ host = a.example.com
       expect(() => resolver.resolveWorkspace('A')).to.throw(/no credentials/);
     });
   });
+
+  describe('resolveConfigPath — .databrickscfg location fallback', () => {
+    // Pure helper: picks the .databrickscfg path so a standard ArcGIS install needs
+    // only /home/arcgis/.databrickscfg — no DATABRICKS_CONFIG_FILE / init_user_param.sh.
+    const resolveConfigPath = (opts) => resolver._internal.resolveConfigPath(opts);
+
+    it('explicit DATABRICKS_CONFIG_FILE always wins, even if missing', () => {
+      const p = resolveConfigPath({ env: '/custom/path.cfg', home: '/home/arcgis', exists: () => true });
+      expect(p).to.equal('/custom/path.cfg');
+    });
+
+    it('uses the user home .databrickscfg when it exists', () => {
+      const home = '/home/alice';
+      const p = resolveConfigPath({ env: undefined, home, exists: (f) => f === `${home}/.databrickscfg` });
+      expect(p).to.equal('/home/alice/.databrickscfg');
+    });
+
+    it('falls through to /home/arcgis/.databrickscfg when HOME is unusable (ArcGIS case)', () => {
+      // ArcGIS Server often leaves HOME as '/', so os.homedir()-based path does not exist.
+      const p = resolveConfigPath({ env: undefined, home: '/', exists: (f) => f === '/home/arcgis/.databrickscfg' });
+      expect(p).to.equal('/home/arcgis/.databrickscfg');
+    });
+
+    it('falls through to the Windows ProgramData path when that is the one that exists', () => {
+      const p = resolveConfigPath({
+        env: undefined,
+        home: 'C:\\Users\\svc',
+        exists: (f) => /ProgramData[\\/]ArcGIS[\\/]cdf[\\/]\.databrickscfg$/.test(f),
+      });
+      expect(p).to.match(/ProgramData[\\/]ArcGIS[\\/]cdf[\\/]\.databrickscfg$/);
+    });
+
+    it('prefers the user home over /home/arcgis when both exist', () => {
+      const home = '/home/alice';
+      const p = resolveConfigPath({ env: undefined, home, exists: () => true });
+      expect(p).to.equal('/home/alice/.databrickscfg');
+    });
+
+    it('reports the home-based path when nothing exists anywhere', () => {
+      const p = resolveConfigPath({ env: undefined, home: '/home/alice', exists: () => false });
+      expect(p).to.equal('/home/alice/.databrickscfg');
+    });
+  });
 });
