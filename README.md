@@ -383,6 +383,8 @@ CREATE INDEX ON my_table USING GIST (geom);
 
 Tables created directly in Lakebase with native PostGIS geometry work fine.
 
+**Large layers rendered blank in Map Viewer (PBF feature-tiles).** The ArcGIS CDF runtime through 12.1 advertises PBF feature-tiles but does not forward `quantizationParameters` to its PBF encoder, so large layers (which clients draw as quantized tiles) come back with `transform: null` and render blank. Small layers use JSON snapshot mode and are unaffected. **The provider works around this** by defaulting `supportedQueryFormats` to `JSON,geojson` (PBF dropped) so clients fall back to JSON tiles, which quantize correctly — slightly larger payloads, but they render. To restore PBF on a runtime where Esri has fixed quantization forwarding, set the per-service `enablePbf` parameter to `true`.
+
 ---
 
 ## Agent-Driven Publishing (MCP)
