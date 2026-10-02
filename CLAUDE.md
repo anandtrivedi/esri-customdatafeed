@@ -79,7 +79,7 @@ Modules split by backend. Import from `modules/index.js` (the barrel export), no
 **CDF runtime compatibility:** `authorize()` and `editData()` support both calling conventions — 11.4 callback pattern `(req, callback)` and 12.0 async pattern (return/throw). `getData()` uses callback pattern (both versions).
 
 **Config layering** (2 config surfaces for users):
-- `.env` — Databricks connection credentials + operational tuning (pool sizes, timeouts, Lakebase, security). This is the only config file users need.
+- `.databrickscfg` — the one credentials file users author (auto-found at `~/.databrickscfg`, then `/home/arcgis/.databrickscfg`); profiles = workspaces. Optional env/tuning (pool sizes, timeouts, `DATABRICKS_CONFIG_FILE` override) go in ArcGIS's `init_user_param.sh`.
 - `req.params` (per-service) — Table name, geometry column, idField, maxRecordCount, srid, lakebase settings. Set during `createService`. Overrides env var defaults.
 
 ### Spatial filter handling differences
@@ -238,7 +238,7 @@ Defined in `cdconfig.json` (13 parameters). When creating a service via Admin RE
 ## Files to know about
 
 - `cdconfig.json` — Provider manifest registered with ArcGIS Server. `editingEnabled: true` enables the `editData()` interface at the provider level. `arcgisVersion: "12.0.0"` targets the 12.0 manifest format, but CDF itself works on 11.4+ (11.4 added `applyEdits` editing, 12.0 added the `editingEnabled` property).
-- `.env` / `.env.example` — Databricks credentials + operational tuning (pool sizes, timeouts, Lakebase, security). `.env.example` is the template. `.env` is gitignored.
+- `.databrickscfg` — the credentials file the provider reads (auto-found at `~` or `/home/arcgis`); profiles are workspaces. Env/tuning overrides go in `init_user_param.sh`.
 
 ## Gotchas discovered during audit
 

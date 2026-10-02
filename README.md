@@ -166,6 +166,8 @@ sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
 sudo chmod 600 /home/arcgis/.databrickscfg
 ```
 
+That's the whole setup. The provider looks for `/home/arcgis/.databrickscfg` automatically, so a standard install needs **no `DATABRICKS_CONFIG_FILE` and nothing in `init_user_param.sh`** — drop the file there and restart ArcGIS Server. (Set `DATABRICKS_CONFIG_FILE` only if the file lives somewhere else.)
+
 A hand-written PAT profile is just:
 
 ```ini
@@ -208,7 +210,7 @@ A service created **without** a `workspace` parameter resolves in order: `[DEFAU
 <details>
 <summary><b>Lakebase backend setup</b> (skip if you only use Lakehouse)</summary>
 
-Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic (the provider mints short-lived Lakebase OAuth tokens; set `LAKEBASE_PASSWORD` in `.env` to use a fixed credential instead).
+Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic (the provider mints short-lived Lakebase OAuth tokens; set `LAKEBASE_PASSWORD` in `init_user_param.sh` to use a fixed credential instead).
 
 > **Synced Tables caveat:** Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns. Store geometry as WKT in a STRING column, sync that, and convert on the Lakebase side — see [Known Limitations](#known-limitations).
 
@@ -233,12 +235,12 @@ It preflights (provider registered? config present?), auto-detects the provider,
 
 > **⚠️ Anonymous access:** by default a published CDF Feature Service is **readable by anyone who can reach the server** — no token required. If that's not what you want, mark the service **private** (the `publish-service.sh` Advanced option denies anonymous `esriEveryone` access), and confirm with the anonymous-access probe the wizard prints. On **federated** ArcGIS Enterprise, access is governed by **Portal item sharing**, not the server's `esriEveryone` lever — set the item's sharing there.
 
-**Set environment variables in `init_user_param.sh`** (typically `/opt/arcgis/server/usr/init_user_param.sh`) so credentials and tuning survive provider re-registration and are visible to the runtime at startup:
+**A standard install needs nothing here** — the provider auto-finds `/home/arcgis/.databrickscfg`. `init_user_param.sh` (typically `/opt/arcgis/server/usr/init_user_param.sh`) is only for **overrides**: a credential file in a non-standard location, or optional tuning.
 
 ```bash
-# Path to the credential file (needed if the arcgis user's home isn't /home/arcgis):
-export DATABRICKS_CONFIG_FILE=/home/arcgis/.databrickscfg
-# Default SQL Warehouse (fallback; the publish wizard sets it per-service):
+# Only if your .databrickscfg is NOT at ~/.databrickscfg or /home/arcgis/.databrickscfg:
+export DATABRICKS_CONFIG_FILE=/shared/path/.databrickscfg
+# Optional default SQL Warehouse (the publish wizard sets it per-service):
 export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 ```
 
@@ -470,12 +472,12 @@ All types: Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
 <details>
 <summary><b>Environment variables (full list)</b></summary>
 
-Set in `.env` or `init_user_param.sh`. Per-table settings are NOT here (they're per-service).
+Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-service).
 
 | Variable | Description |
 |---|---|
 | `DATABRICKS_SERVER_HOSTNAME` / `DATABRICKS_HTTP_PATH` / `DATABRICKS_ACCESS_TOKEN` | Lakehouse connection (env-var fallback when not using `.databrickscfg`) |
-| `DATABRICKS_CONFIG_FILE` | Override `.databrickscfg` path (default `~/.databrickscfg`) |
+| `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Default search: `~/.databrickscfg`, then `/home/arcgis/.databrickscfg` — only set this if the file is elsewhere |
 | `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` | Lakebase connection (token auto-generated if omitted) |
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
@@ -484,9 +486,9 @@ Set in `.env` or `init_user_param.sh`. Per-table settings are NOT here (they're 
 </details>
 
 <details>
-<summary><b>Why three config files? (.env, .databrickscfg, init_user_param.sh)</b></summary>
+<summary><b>Where configuration lives (.databrickscfg + init_user_param.sh)</b></summary>
 
-`.env` (in the provider dir) — easy for local dev, but the `.cdpk` extraction overwrites it on re-registration. `.databrickscfg` — standard Databricks file; its INI sections represent multiple workspaces (which flat `.env` can't). `init_user_param.sh` — lives outside the provider tree, set once at server startup, survives re-registration and avoids collisions when multiple providers share `process.env` → **preferred for production credentials/paths**.
+One file: **`.databrickscfg`** at `/home/arcgis/.databrickscfg` (auto-found) — its INI sections are your workspace profiles, and the publish form only names a profile. `init_user_param.sh` is optional, for overrides (non-standard config path, or pool/timeout tuning).
 
 </details>
 
@@ -494,7 +496,7 @@ Set in `.env` or `init_user_param.sh`. Per-table settings are NOT here (they're 
 <summary><b>Running the unit tests</b> (contributors)</summary>
 
 ```bash
-cd esri-customdatafeed/nodejs-provider && npm test   # 362 passing (mocha + chai)
+cd esri-customdatafeed/nodejs-provider && npm test   # 405 passing (mocha + chai)
 ```
 Exercises the SQL builders, geometry handling, sanitization, and workspace resolver in isolation — not a live deployment.
 
