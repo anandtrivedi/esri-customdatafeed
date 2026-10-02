@@ -41,7 +41,7 @@ sudo bash publish-service.sh
 
 ## Prerequisites
 
-1. **An ArcGIS Server, 11.4 or later, with Custom Data Feeds enabled.** It ships its own Node.js runtime — you don't install Node separately. Use **12.0+** if you want feature *editing* (not just read-only maps).
+1. **An ArcGIS Server, 11.4 or later, with the Custom Data Feed runtime installed.** The CDF runtime is a **separate** component (not bundled with ArcGIS Server) — install `ArcGIS Custom Data Feeds` for your exact server version from My Esri on every machine (Windows/Linux) and restart, or registration fails. It bundles Node.js (don't install Node separately). Use **12.0+** for feature *editing* (not just read-only maps).
 2. **A Databricks SQL Warehouse** (left sidebar → SQL Warehouses). This is what the provider queries. *(A Lakebase instance is optional — only needed for very low-latency maps or editing.)*
 3. **Databricks credentials** — a **Service Principal (OAuth M2M)** (recommended: a machine identity that auto-refreshes, no user dependency) *or* a **Personal Access Token (PAT)** (simplest for one person). Whichever you use, it needs **both** layers of access granted to that same identity:
    - **Compute:** `CAN USE` on the SQL Warehouse.
@@ -53,7 +53,7 @@ sudo bash publish-service.sh
    | `<workspace>.cloud.databricks.com` | 443 | SQL Warehouse queries + Databricks API |
    | `<instance>.database.cloud.databricks.com` | 5432 | Lakebase queries/edits (only if you use Lakebase) |
 
-   If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add the ArcGIS Server's outbound IP — otherwise the first query fails with `HTTP 403`.
+   If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add **each** ArcGIS Server node's outbound IP (create your own ALLOW list — don't edit a fevm/`*-DoNotModify` managed one). Otherwise the connection fails with `HTTP 403`, which surfaces to the publisher as a **misleading `"Service not found"`** — the real `403` appears only in the `Custom_data_feeds` server log. Allow-list changes take a few minutes to propagate.
 5. **The Databricks CLI (recommended)** — writes your credential file in Step 3 and helps look up values the publish wizard asks for. Install on the server: `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh`. *(No internet on the box? It's one static binary — download it elsewhere and copy it onto the `PATH`.)*
 
 ---
@@ -67,6 +67,8 @@ sudo bash publish-service.sh
 > **Install root:** Linux defaults to `/opt/arcgis/server/`, but hardened sites often use `/app/arcgis/server/` — check `ls -d /opt/arcgis /app/arcgis 2>/dev/null` and substitute yours. (`setup.sh` and `register-provider.sh` auto-detect `/opt`, `/app`, and home-directory installs; hand-typed commands below do not.)
 
 ### 1. Build the provider package (`.cdpk`)
+
+> **Most users don't build.** Grab the prebuilt package matching your ArcGIS Server major version — **`cdpk/12.x/`** (12.0 / 12.1) or **`cdpk/11.x/`** (11.2 – 11.5+) — verify the `SHA-256` against that folder's `.cdpk.sha256`, and register it (Step 2). Build from source only for a **custom version, a code change, or an air-gapped** box.
 
 The provider source lives in the **`nodejs-provider/`** subdirectory. `node_modules/` isn't shipped, so this is the one step that needs a package registry (everything after it is air-gap-friendly).
 
@@ -94,6 +96,13 @@ zip -r databricks-geospatial-provider.cdpk \
 
 </details>
 
+<details>
+<summary><b>Rebuilding an 11.x package</b></summary>
+
+The prebuilt `cdpk/11.x/` package already covers **11.2 → 11.5+**. To rebuild for a custom version, start from the 12.x manifest (`cdconfig.json`) and: set `arcgisVersion` to **`11.2.0`** (the floor — registers across the whole 11.x line), keep the top-level `editingEnabled`, add `properties.hosts: false` + `properties.disableIdParam: true`, and add a `config/default.json` = `{}` file to the zip (the 11.x CDF runtime requires all three; 12.x auto-defaults them). Windows: `windows/build-cdpk.ps1 -ArcgisVersion 11.2` (plus the config/hosts additions). Register the version-matched package on each server — the 11.x manifest is for 11.x servers, the `12.x` package for 12.x.
+
+</details>
+
 ### 2. Register the provider
 
 A **one-time** action telling ArcGIS Server the provider exists. Do it in **ArcGIS Server Manager** (no command line, no tokens):
@@ -103,6 +112,8 @@ A **one-time** action telling ArcGIS Server the provider exists. Do it in **ArcG
 3. Browse to `databricks-geospatial-provider.cdpk` and confirm.
 
 The **Name** shown — `databricks-geospatial-provider` — is what Feature Services point at. Then **restart ArcGIS Server** so the code loads.
+
+> ⚠️ **Registering installs the provider *code* only — NOT your Databricks credentials.** They're a separate, one-time per-box step ([Step 3](#3-configure-the-databricks-connection)): a `.databrickscfg` file owned by `arcgis`, mode `600`. The publish form only asks for a profile *name*; the secret never goes into ArcGIS (so it can't leak via the admin API or backups). Do Step 3 **before** publishing, and the provider only picks up new credentials **after a server restart** (it caches the file at startup). If you skip this, a published service fails to start with `"Service not found"` and a `SEVERE … workspace profile … not found` line in the server log.
 
 > **Prefer a script?** `sudo bash register-provider.sh` does Build + Register in one wizard (build via option 1, or register an existing `.cdpk` via option 2), auto-detects the install root, updates-vs-registers safely (snapshotting the live provider dir so a failed update can be rolled back), and restarts the server.
 >
@@ -155,6 +166,8 @@ sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
 sudo chmod 600 /home/arcgis/.databrickscfg
 ```
 
+The provider auto-finds the credential file at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows), so a standard install needs **no `DATABRICKS_CONFIG_FILE`** — drop the file there and restart ArcGIS Server. (Set `DATABRICKS_CONFIG_FILE` only if it lives elsewhere.)
+
 A hand-written PAT profile is just:
 
 ```ini
@@ -162,6 +175,8 @@ A hand-written PAT profile is just:
 host  = your-workspace.cloud.databricks.com
 token = dapi_your_pat_here
 ```
+
+> **Multi-machine sites:** registering the `.cdpk` is site-level (auto-propagates to every node), but `.databrickscfg` is **per-machine** — put the creds on **each** node, or point `DATABRICKS_CONFIG_FILE` (in `init_user_param.sh`) at a shared path. A one-node-only creds install makes the other nodes 404 intermittently.
 
 <details>
 <summary><b>Service principal (OAuth M2M, recommended for production) & multiple workspaces</b></summary>
@@ -195,7 +210,7 @@ A service created **without** a `workspace` parameter resolves in order: `[DEFAU
 <details>
 <summary><b>Lakebase backend setup</b> (skip if you only use Lakehouse)</summary>
 
-Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic (the provider mints short-lived Lakebase OAuth tokens; set `LAKEBASE_PASSWORD` in `.env` to use a fixed credential instead).
+Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic (the provider mints short-lived Lakebase OAuth tokens; set `LAKEBASE_PASSWORD` in `init_user_param.sh` to use a fixed credential instead).
 
 > **Synced Tables caveat:** Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns. Store geometry as WKT in a STRING column, sync that, and convert on the Lakebase side — see [Known Limitations](#known-limitations).
 
@@ -220,12 +235,12 @@ It preflights (provider registered? config present?), auto-detects the provider,
 
 > **⚠️ Anonymous access:** by default a published CDF Feature Service is **readable by anyone who can reach the server** — no token required. If that's not what you want, mark the service **private** (the `publish-service.sh` Advanced option denies anonymous `esriEveryone` access), and confirm with the anonymous-access probe the wizard prints. On **federated** ArcGIS Enterprise, access is governed by **Portal item sharing**, not the server's `esriEveryone` lever — set the item's sharing there.
 
-**Set environment variables in `init_user_param.sh`** (typically `/opt/arcgis/server/usr/init_user_param.sh`) so credentials and tuning survive provider re-registration and are visible to the runtime at startup:
+**A standard install needs nothing here** — the provider auto-finds `/home/arcgis/.databrickscfg`. `init_user_param.sh` (typically `/opt/arcgis/server/usr/init_user_param.sh`) is only for **overrides**: a credential file in a non-standard location, or optional tuning.
 
 ```bash
-# Path to the credential file (needed if the arcgis user's home isn't /home/arcgis):
-export DATABRICKS_CONFIG_FILE=/home/arcgis/.databrickscfg
-# Default SQL Warehouse (fallback; the publish wizard sets it per-service):
+# Only if your .databrickscfg is NOT at ~/.databrickscfg or /home/arcgis/.databrickscfg:
+export DATABRICKS_CONFIG_FILE=/shared/path/.databrickscfg
+# Optional default SQL Warehouse (the publish wizard sets it per-service):
 export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 ```
 
@@ -276,7 +291,7 @@ Benchmark on 17M Overture Maps Places, warm averages, end-to-end through ArcGIS 
 ```sql
 -- Lakehouse
 CREATE VIEW catalog.schema.my_table_geo AS
-SELECT *, ST_Point(longitude, latitude) AS geometry
+SELECT *, ST_Point(longitude, latitude, 4326) AS geometry   -- lon, lat, SRID
 FROM catalog.schema.my_table WHERE latitude IS NOT NULL;
 
 -- Lakebase
@@ -284,6 +299,8 @@ CREATE VIEW public.my_table_geo AS
 SELECT *, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326) AS geometry
 FROM public.my_table WHERE latitude IS NOT NULL;
 ```
+
+> **⚠️ Always stamp the SRID.** Databricks `ST_Point(lon, lat)` / `ST_GeomFromText(wkt)` **default to SRID 0**, which ArcGIS can't project — features come back with attributes but **no geometry**. Use `ST_Point(lon, lat, 4326)` (or `ST_SetSRID(…, 4326)`) so the column reads `geometry(4326)`, matching the service's `srid` param. (Details in [Troubleshooting](#troubleshooting).)
 
 ---
 
@@ -322,7 +339,15 @@ Provider init failed silently. Tail the server log for `Custom_data_feeds` lines
 - **No data:** verify the fully-qualified table name + geometry column; test the warehouse independently.
 - **OBJECTID:** `idField` must be an integer ≤ 2,147,483,647 with unique values.
 - **Editing fails:** `capabilities:"Query,Editing"` + `editingEnabled:"true"` both set; `lakebaseHost` present (editing is Lakebase-only); ArcGIS 12.0+. On federated Portal, the user's role needs "Edit features".
+- **Lakebase service 404s (native login):** a native-login table (`LAKEBASE_USER`/`LAKEBASE_PASSWORD`) needs `workspace` set to a **PAT** profile. With an **OAuth-M2M** profile the provider uses the SP `client_id` as the Postgres user instead — wrong user, so the FeatureServer 404s with no logged error.
 - **Slow:** Lakehouse cold start (5–15 s) after idle; add `OPTIMIZE … ZORDER BY (geom)` (Lakehouse) or `CREATE INDEX … USING GIST (geom)` (Lakebase).
+
+</details>
+
+<details>
+<summary><b>Features have attributes but no geometry (nothing draws in Portal / Map Viewer)</b></summary>
+
+The source geometry has **SRID 0** (undefined spatial reference). ArcGIS can't project it, so features come back with attributes but null geometry — a raw REST `/query` still returns the attribute rows, which masks the problem and makes it look like a Portal-only issue. Cause: geometry built without an SRID — Databricks `ST_Point(lon, lat)` / `ST_GeomFromText(wkt)` default to **SRID 0**, so the column is `geometry(0)`. Fix: stamp the SRID in the source view/table — `ST_Point(lon, lat, 4326)` or `ST_SetSRID(ST_Point(lon, lat), 4326)` — confirm the column reads `geometry(4326)` (`SELECT DISTINCT ST_SRID(geometry) FROM …`) and matches the service's `srid` param (`4326`). This is a **data** change to the source, so it's picked up on the next query — **no server restart needed** (responses aren't cached; only the geometry *format* — WKT/WKB/GEOMETRY, not SRID — is cached per column, so a restart is only needed if you change the storage *format* or credentials). Just hard-refresh Map Viewer (it caches layer metadata). Note: a *wrong-but-valid* SRID instead renders features in the wrong place (Null Island), not missing.
 
 </details>
 
@@ -360,6 +385,8 @@ CREATE INDEX ON my_table USING GIST (geom);
 
 Tables created directly in Lakebase with native PostGIS geometry work fine.
 
+**Large layers rendered blank in Map Viewer (PBF feature-tiles).** The ArcGIS CDF runtime through 12.1 advertises PBF feature-tiles but does not forward `quantizationParameters` to its PBF encoder, so large layers (which clients draw as quantized tiles) come back with `transform: null` and render blank. Small layers use JSON snapshot mode and are unaffected. **The provider works around this** by defaulting `supportedQueryFormats` to `JSON,geojson` (PBF dropped) so clients fall back to JSON tiles, which quantize correctly (slightly larger payloads). To restore PBF on a runtime where Esri has fixed quantization forwarding, set the per-service `enablePbf` parameter to `true` in the Portal publish form (or via an admin service edit).
+
 ---
 
 ## Agent-Driven Publishing (MCP)
@@ -390,6 +417,10 @@ Then, in the client: register your ArcGIS target (password set via a terminal co
 **Lakehouse parameters:** `workspace` (profile; default env), `warehouseHttpPath` (default `DATABRICKS_HTTP_PATH`), `tableName` (required), `geometryColumn` (`geometry`), `idField` (`id`), `geometryFormat` (auto: `WKT`/`WKB`/`GEOJSON`/`GEOMETRY`), `timeColumn`, `maxRecordCount` (`2000`), `srid` (`4326`).
 
 **Lakebase parameters:** `workspace`, `lakebaseHost` (required, selects Lakebase), `lakebasePort` (`5432`), `lakebaseDatabase` (required), `lakebaseSchema` (`public`), `lakebaseTable` (required), `geometryColumn`, `idField`, `maxRecordCount`, `srid`, `editingEnabled` (`false`).
+
+**Fill one set, not both.** A read-only **Lakehouse** service uses the Lakehouse fields; an editable **Lakebase** service uses the Lakebase fields. Setting `lakebaseHost` is what switches the backend to Lakebase. `workspace`, `geometryColumn`, `idField`, `srid`, `maxRecordCount` are shared. The publish-form field labels are grouped and numbered — `Common`, `Lakehouse`, `Lakebase` — so you can see at a glance which set each belongs to.
+
+> **Leaving fields empty — REST vs the Portal form.** The Admin REST call accepts empty strings for the fields that don't apply (shown below). The **Portal "Create a feature layer" form, however, requires *every* field** (Esri marks all provider parameters required — a blank field silently blocks the form). So in the GUI, enter **`-`** in each inapplicable field. The provider treats `-` (and `na`, `n/a`, `none`, or whitespace, case-insensitive) as *unset*, so a `-` in `lakebaseHost` keeps the service on Lakehouse. Defaults still apply to `srid` (4326), `maxRecordCount` (2000), `lakebasePort` (5432), and `lakebaseSchema` (public) when you enter `-`.
 
 ```bash
 curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN&f=json" \
@@ -441,12 +472,12 @@ All types: Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
 <details>
 <summary><b>Environment variables (full list)</b></summary>
 
-Set in `.env` or `init_user_param.sh`. Per-table settings are NOT here (they're per-service).
+Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-service).
 
 | Variable | Description |
 |---|---|
 | `DATABRICKS_SERVER_HOSTNAME` / `DATABRICKS_HTTP_PATH` / `DATABRICKS_ACCESS_TOKEN` | Lakehouse connection (env-var fallback when not using `.databrickscfg`) |
-| `DATABRICKS_CONFIG_FILE` | Override `.databrickscfg` path (default `~/.databrickscfg`) |
+| `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Auto-search: `~/.databrickscfg`, then `/home/arcgis/.databrickscfg` (Linux) / `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows) — set only if the file is elsewhere |
 | `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` | Lakebase connection (token auto-generated if omitted) |
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
@@ -455,9 +486,9 @@ Set in `.env` or `init_user_param.sh`. Per-table settings are NOT here (they're 
 </details>
 
 <details>
-<summary><b>Why three config files? (.env, .databrickscfg, init_user_param.sh)</b></summary>
+<summary><b>Where configuration lives (.databrickscfg; init_user_param.sh = overrides only)</b></summary>
 
-`.env` (in the provider dir) — easy for local dev, but the `.cdpk` extraction overwrites it on re-registration. `.databrickscfg` — standard Databricks file; its INI sections represent multiple workspaces (which flat `.env` can't). `init_user_param.sh` — lives outside the provider tree, set once at server startup, survives re-registration and avoids collisions when multiple providers share `process.env` → **preferred for production credentials/paths**.
+One file: **`.databrickscfg`**, auto-found at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows) — its INI sections are your workspace profiles, and the publish form only names a profile. `init_user_param.sh` (Linux) or a Machine env var (Windows) is optional, for overrides: a non-standard config path, or pool/timeout tuning.
 
 </details>
 
@@ -465,7 +496,7 @@ Set in `.env` or `init_user_param.sh`. Per-table settings are NOT here (they're 
 <summary><b>Running the unit tests</b> (contributors)</summary>
 
 ```bash
-cd esri-customdatafeed/nodejs-provider && npm test   # 362 passing (mocha + chai)
+cd esri-customdatafeed/nodejs-provider && npm test   # 405 passing (mocha + chai)
 ```
 Exercises the SQL builders, geometry handling, sanitization, and workspace resolver in isolation — not a live deployment.
 

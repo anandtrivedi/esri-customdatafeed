@@ -28,12 +28,19 @@ function getGeometryQuery(
   dbSR = 4326,
   geometryFormat = null
 ) {
-  // Parse geometry - can be comma delimited or JSON
-  let rawGeomFilter = "";
-  try {
-    rawGeomFilter = JSON.parse(geometry);
-  } catch (error) {
-    rawGeomFilter = geometry.split(",").map((item) => Number(item.trim()));
+  // Parse geometry - may arrive as an already-parsed object, a JSON string, or a
+  // comma-delimited bbox string. The Map Viewer's feature-tile / quantized queries
+  // hand the provider an envelope OBJECT (not a string), so calling .split on it threw
+  // "geometry.split is not a function" (HTTP 500) and broke tiled rendering of large layers.
+  let rawGeomFilter;
+  if (geometry && typeof geometry === "object") {
+    rawGeomFilter = geometry;
+  } else {
+    try {
+      rawGeomFilter = JSON.parse(geometry);
+    } catch (error) {
+      rawGeomFilter = String(geometry).split(",").map((item) => Number(item.trim()));
+    }
   }
 
   // Convert to GeoJSON format for ST_GeomFromGeoJSON
@@ -142,6 +149,30 @@ function buildCrossesExpression(A, B) {
 }
 
 /**
+ * Heuristic: does this filter geometry carry coordinates outside valid WGS84
+ * (|x| > 180)? ArcGIS clients — notably the Map Viewer's feature-tile / quantized
+ * queries — can send a Web Mercator envelope with NEITHER an inSR param NOR an
+ * embedded spatialReference. Without this check we'd read the meter values as
+ * degrees, build a filter that matches no features, and return empty tiles
+ * (a blank map on large layers). Checks envelopes, bbox arrays, points, rings, paths.
+ */
+function looksProjectedGeometry(g) {
+  if (!g || typeof g !== "object") return false;
+  const xs = [];
+  const ys = [];
+  if (Array.isArray(g)) { xs.push(g[0], g[2]); ys.push(g[1], g[3]); }
+  if (typeof g.xmin === "number") { xs.push(g.xmin, g.xmax); ys.push(g.ymin, g.ymax); }
+  if (typeof g.x === "number") { xs.push(g.x); ys.push(g.y); }
+  const lines = g.rings || g.paths;
+  if (Array.isArray(lines) && Array.isArray(lines[0]) && Array.isArray(lines[0][0])) { xs.push(lines[0][0][0]); ys.push(lines[0][0][1]); }
+  if (Array.isArray(g.points) && Array.isArray(g.points[0])) { xs.push(g.points[0][0]); ys.push(g.points[0][1]); }
+  // |x| > 360 (not 180) stays clear of antimeridian 4326 extents (xmax ~185); |y| > 90
+  // catches the latitude axis. Web Mercator meters are in the millions, so this is unambiguous.
+  return xs.some((v) => typeof v === "number" && Math.abs(v) > 360)
+      || ys.some((v) => typeof v === "number" && Math.abs(v) > 90);
+}
+
+/**
  * Extract spatial reference from geometry or parameters
  */
 function getSpatialReference(rawGeomFilter, inSR, dbSR) {
@@ -168,6 +199,13 @@ function getSpatialReference(rawGeomFilter, inSR, dbSR) {
       // TODO: implement WKT parsing if needed
       throw new Error("WKT string parsing not supported");
     }
+  }
+  // No explicit SR, but coordinates are clearly projected (out of 4326 range) → assume
+  // Web Mercator. Last-resort fallback for clients that send a tile envelope with no SR;
+  // warn so this stays visible (the correct source is inSR / embedded SR / quantization SR).
+  if (dbSR === 4326 && looksProjectedGeometry(rawGeomFilter)) {
+    console.warn("[geometry] filter has no SR and out-of-4326-range coords; assuming Web Mercator (3857)");
+    return 3857;
   }
   return dbSR;
 }

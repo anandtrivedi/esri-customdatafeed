@@ -682,6 +682,16 @@ else
     *)       echo " ${ACTION^} done — verification INCONCLUSIVE (couldn't read the provider list)."; RC=2 ;;
   esac
 fi
+echo
+echo " IMPORTANT — this installs the provider CODE only, NOT Databricks credentials."
+echo "   The publish form asks only for a workspace-profile NAME. The actual credentials"
+echo "   must already exist on THIS server (and every node) in /home/arcgis/.databrickscfg,"
+echo "   owned by the arcgis user, mode 600 — the provider reads them at runtime, and ArcGIS"
+echo "   never stores them. Set them up BEFORE publishing:"
+echo "      sudo bash configure-databricks.sh      # writes .databrickscfg (chown arcgis, chmod 600)"
+echo "   then RESTART the server (the provider caches the file at startup):"
+echo "      sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+echo
 echo " Next: publish tables against it with publish-service.sh."
 echo "============================================================"
 exit "$RC"
