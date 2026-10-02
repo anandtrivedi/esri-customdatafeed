@@ -70,7 +70,34 @@ const SERVICE_PARAM_KEYS = [
   'workspace', 'warehouseHttpPath', 'tableName', 'geometryColumn', 'idField',
   'geometryFormat', 'timeColumn', 'lakebaseHost', 'lakebasePort', 'lakebaseDatabase',
   'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled',
+  'enablePbf',
 ];
+
+// supportedQueryFormats override for the "blank large layer in Map Viewer" bug.
+//
+// The Esri CDF FeatureServer (through 12.1.0) advertises supportedQueryFormats
+// 'JSON,geojson,PBF' but never forwards quantizationParameters to its PBF encoder.
+// Clients that render large layers as quantized PBF feature-tiles (Map Viewer,
+// Experience Builder, Dashboards) then get tiles with transform:null — unquantized
+// coordinates land off-screen and the layer draws BLANK. Small layers use JSON
+// snapshot mode and are unaffected; that's why only large layers broke.
+//
+// Fix: drop PBF from the advertised formats so clients fall back to JSON feature-tiles,
+// which the runtime quantizes correctly. The runtime's overridables joi allow-list only
+// permits 'JSON' or 'JSON,geojson' (metadata-defaults.js) — so PBF can only be REMOVED
+// via this field, never re-added. To re-enable PBF (e.g. once Esri forwards quantization
+// in a later release) set the per-service enablePbf parameter: we then OMIT the key
+// entirely so the runtime's own 'JSON,geojson,PBF' default applies. Never emit a string
+// containing PBF — that value fails joi validation and 500s the metadata request.
+const SUPPORTED_QUERY_FORMATS_NO_PBF = 'JSON,geojson';
+function isPbfEnabled(params) {
+  return params?.enablePbf === true || params?.enablePbf === 'true';
+}
+// Returns an object to spread into layer metadata: the no-PBF override by default, or
+// {} (key omitted → runtime default) when the service opts back into PBF.
+function supportedQueryFormatsOverride(params) {
+  return isPbfEnabled(params) ? {} : { supportedQueryFormats: SUPPORTED_QUERY_FORMATS_NO_PBF };
+}
 
 // Normalize sentinel placeholders to "absent" on req.params, so a '-' typed into an
 // inapplicable-but-required publish field behaves exactly like leaving it blank would.
@@ -423,6 +450,7 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
+            ...supportedQueryFormatsOverride(req.params),
             ...(dbExtent && { extent: dbExtent }),
             ...(sourceConfig.timeColumn && {
               timeInfo: {
@@ -555,6 +583,7 @@ class Model {
     return {
       idField: req?.params?.idField || 'id',
       inputCrs: parseInt(req?.params?.srid) || config.databricks.srid || 4326,
+      ...supportedQueryFormatsOverride(req?.params),
     };
   }
 
@@ -675,6 +704,7 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields,
+            ...supportedQueryFormatsOverride(req.params),
             templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)],
           };
         }

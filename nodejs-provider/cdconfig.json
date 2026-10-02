@@ -81,6 +81,11 @@
         "key": "editingEnabled",
         "label": "15. Lakebase - Enable Editing",
         "description": "LAKEBASE only. Enter true to allow add/update/delete. Enter - for read-only (or for a Lakehouse service)."
+      },
+      {
+        "key": "enablePbf",
+        "label": "16. Common - Enable PBF Tiles (default off)",
+        "description": "BOTH backends, optional. Leave as - (recommended). The Esri CDF runtime through 12.1 advertises PBF feature-tiles but does not quantize them, so large layers render BLANK in Map Viewer; by default this provider drops PBF so clients use JSON tiles that render correctly. Enter true ONLY on a runtime where Esri has fixed PBF quantization, to restore PBF."
       }
     ]
   },
