@@ -932,8 +932,8 @@ describe("model", () => {
       expect(metadata.inputCrs).to.equal(3857);
     });
 
-    // PBF always on: supportedQueryFormats is never set, so the runtime default 'JSON,geojson,PBF' applies. The
-    // deprecated enablePbf parameter (kept in the manifest so older services validate) is ignored.
+    // PBF always on: supportedQueryFormats is never set, so the runtime default 'JSON,geojson,PBF' applies. The old
+    // enablePbf parameter was removed from the manifest; a service that still has it stored is unaffected (ignored).
     for (const params of [undefined, {}, { enablePbf: "false" }, { enablePbf: false }, { enablePbf: "true" }, { enablePbf: "-" }]) {
       it(`getMetadata never sets supportedQueryFormats (params ${JSON.stringify(params)})`, async () => {
         const metadata = await new Model().getMetadata(params === undefined ? undefined : { params });

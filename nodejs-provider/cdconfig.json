@@ -81,11 +81,6 @@
         "key": "editingEnabled",
         "label": "15. Lakebase - Enable Editing",
         "description": "LAKEBASE only. Enter true to allow add/update/delete. Enter - for read-only (or for a Lakehouse service)."
-      },
-      {
-        "key": "enablePbf",
-        "label": "16. Deprecated - leave as -",
-        "description": "Ignored. PBF feature tiles are always on (about 3-9x smaller than JSON). Kept only so services published with earlier versions still validate; will be removed in a later release."
       }
     ]
   },
