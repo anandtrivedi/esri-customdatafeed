@@ -242,6 +242,8 @@ Defined in `cdconfig.json` (13 parameters). When creating a service via Admin RE
 
 ## Gotchas discovered during audit
 
+- **Client WHERE is parenthesized** before the time/geometry/objectId filters are ANDed on (both backends). Unwrapped, `a OR b` let those filters apply to `b` only — on a 28B-row table that was a near-full scan per request, which filled the connection pool and made every service on the box hang.
+- **Metadata extent is cached, time-boxed, and de-duped** (`model.js` `getLayerExtent`): `ST_Envelope_Agg` over the whole table runs once per table (24 h cache, `CDF_EXTENT_CACHE_MS`); past `CDF_EXTENT_WAIT_MS` (10 s) it's cancelled, metadata goes out without an extent, and the table isn't retried for `CDF_EXTENT_RETRY_MS` (1 h); a non-timeout error is negatively cached only briefly (`CDF_EXTENT_ERROR_RETRY_MS`, 1 min). Concurrent cold-cache requests share one in-flight query, so a burst after an ArcGIS restart doesn't fire N full scans. Cache key includes the pool identity (workspace|warehouse) so same-named tables in different workspaces don't collide. The cancelled operation's `fetchAll()` rejection is sunk (`.catch`) to avoid an unhandled rejection.
 - **`resultRecordCount` is capped** to `maxRecordCountPerPage` (default 2000) in both Lakehouse and Lakebase paths. Users cannot request unbounded result sets.
 - **Lakebase SSL**: `LAKEBASE_SSL_VERIFY` defaults to `false` (accepts any cert). The Databricks API helper also skips cert verification (`rejectUnauthorized: false`). Fine for Databricks-issued certs, but be aware in custom PKI environments.
 - **Operation cleanup in model.js**: extent and query operations are closed in independent try-catch blocks so one failure doesn't prevent the other from being cleaned up.

@@ -88,7 +88,7 @@ describe("sql", () => {
 
     it("should build WHERE clause from where parameter", () => {
       const sql = build({ where: "status = 'active'" });
-      expect(sql).to.include("WHERE status = 'active'");
+      expect(sql).to.include("WHERE (status = 'active')");
     });
 
     it("should build WHERE clause from objectIds", () => {
@@ -98,7 +98,7 @@ describe("sql", () => {
 
     it("should combine multiple WHERE conditions with AND", () => {
       const sql = build({ where: "status = 'active'", objectIds: "1,2" });
-      expect(sql).to.include("WHERE status = 'active' AND OBJECTID IN (1,2)");
+      expect(sql).to.include("WHERE (status = 'active') AND OBJECTID IN (1,2)");
     });
 
     it("should return empty WHERE when no filters", () => {
@@ -185,13 +185,22 @@ describe("sql", () => {
     it("should allow normal WHERE clauses", () => {
       const sql = build({ where: "status = 'active' AND count > 10" });
       expect(sql).to.include(
-        "WHERE status = 'active' AND count > 10"
+        "WHERE (status = 'active' AND count > 10)"
       );
     });
 
     it("should allow 1=1 WHERE clause (ArcGIS default)", () => {
       const sql = build({ where: "1=1" });
-      expect(sql).to.include("WHERE 1=1");
+      expect(sql).to.include("WHERE (1=1)");
+    });
+
+    it("keeps an OR in the client WHERE from escaping the time and geometry filters", () => {
+      const sql = build(
+        { where: "vessel_type = 70 OR vessel_type = 80", time: "1720094400000,1720098000000" },
+        { timeColumn: "base_datetime" }
+      );
+      // without the parentheses AND binds first and the time filter only applies to the last OR term
+      expect(sql).to.match(/WHERE \(vessel_type = 70 OR vessel_type = 80\) AND .*base_datetime/);
     });
 
     it("should allow valid comma-separated outFields", () => {

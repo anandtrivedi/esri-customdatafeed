@@ -95,8 +95,16 @@ describe("lakebaseQuery", () => {
         { where: "height > 100" },
         baseConfig
       );
-      expect(sql).to.include("WHERE height > 100");
+      expect(sql).to.include("WHERE (height > 100)");
       expect(params).to.have.lengthOf(0);
+    });
+
+    it("keeps an OR in the client WHERE from escaping the ANDed filters", () => {
+      const { sql } = buildLakebaseSelectSql(
+        { where: "kind = 1 OR kind = 2", objectIds: "1,2" },
+        baseConfig
+      );
+      expect(sql).to.include("WHERE (kind = 1 OR kind = 2) AND id IN (");
     });
 
     it("should reject dangerous WHERE clause", () => {
@@ -133,7 +141,7 @@ describe("lakebaseQuery", () => {
         { where: "height > 50", objectIds: "1,2", geometry: envelope },
         baseConfig
       );
-      expect(sql).to.include("WHERE height > 50 AND id IN ($1, $2) AND ST_Intersects");
+      expect(sql).to.include("WHERE (height > 50) AND id IN ($1, $2) AND ST_Intersects");
       expect(params).to.have.lengthOf(3); // 2 objectIds + 1 geometry
     });
 
