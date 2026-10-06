@@ -71,34 +71,14 @@ const SERVICE_PARAM_KEYS = [
   'workspace', 'warehouseHttpPath', 'tableName', 'geometryColumn', 'idField',
   'geometryFormat', 'timeColumn', 'lakebaseHost', 'lakebasePort', 'lakebaseDatabase',
   'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled',
-  'enablePbf',
 ];
 
-// supportedQueryFormats override for the "blank large layer in Map Viewer" bug.
-//
-// The Esri CDF FeatureServer (through 12.1.0) advertises supportedQueryFormats
-// 'JSON,geojson,PBF' but never forwards quantizationParameters to its PBF encoder.
-// Clients that render large layers as quantized PBF feature-tiles (Map Viewer,
-// Experience Builder, Dashboards) then get tiles with transform:null — unquantized
-// coordinates land off-screen and the layer draws BLANK. Small layers use JSON
-// snapshot mode and are unaffected; that's why only large layers broke.
-//
-// Fix: drop PBF from the advertised formats so clients fall back to JSON feature-tiles,
-// which the runtime quantizes correctly. The runtime's overridables joi allow-list only
-// permits 'JSON' or 'JSON,geojson' (metadata-defaults.js) — so PBF can only be REMOVED
-// via this field, never re-added. To re-enable PBF (e.g. once Esri forwards quantization
-// in a later release) set the per-service enablePbf parameter: we then OMIT the key
-// entirely so the runtime's own 'JSON,geojson,PBF' default applies. Never emit a string
-// containing PBF — that value fails joi validation and 500s the metadata request.
-const SUPPORTED_QUERY_FORMATS_NO_PBF = 'JSON,geojson';
-function isPbfEnabled(params) {
-  return params?.enablePbf === true || params?.enablePbf === 'true';
-}
-// Returns an object to spread into layer metadata: the no-PBF override by default, or
-// {} (key omitted → runtime default) when the service opts back into PBF.
-function supportedQueryFormatsOverride(params) {
-  return isPbfEnabled(params) ? {} : { supportedQueryFormats: SUPPORTED_QUERY_FORMATS_NO_PBF };
-}
+// supportedQueryFormats is deliberately never set: the runtime default 'JSON,geojson,PBF' applies, so clients get PBF
+// feature tiles. Verified on the 12.1.0 CDF runtime: quantized PBF tiles carry a correct transform and render the same
+// features as JSON in Map Viewer and the JS SDK, at roughly 3-9x smaller payloads. (v1.1.3-1.1.4 dropped PBF after
+// large layers drew blank in Map Viewer; that was the provider's own Web Mercator tile-geometry bug, fixed in v1.1.3,
+// not the runtime.) If it's ever needed again: the runtime's joi allow-list only accepts 'JSON' or 'JSON,geojson' —
+// a string containing PBF fails validation and 500s the metadata request.
 
 // Normalize sentinel placeholders to "absent" on req.params, so a '-' typed into an
 // inapplicable-but-required publish field behaves exactly like leaving it blank would.
@@ -148,6 +128,7 @@ const EXTENT_TIMED_OUT = Symbol("extent-timed-out");
 const TIME_EXTENT_BG_MS = parseInt(process.env.CDF_TIME_EXTENT_BG_MS) || 120 * 1000;
 const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: ms }
 const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
+const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
 
 // Graceful shutdown: release pooled connections on process exit
 // Guard with try/catch — CDF runtime manages process lifecycle
@@ -537,6 +518,10 @@ class Model {
           this.logger.info(`Query ${requestCounter}: ${sqlQuery.substring(0, 150)}...`);
 
           // Calculate extent for metadata requests (cached, time-boxed, de-duped — see getLayerExtent)
+          if (isMetadataRequest && !sourceConfig.timeColumn && !warnedNoTimeColumn.has(sourceConfig.tableName)) {
+            warnedNoTimeColumn.add(sourceConfig.tableName);
+            this.logger.warn(`${sourceConfig.tableName}: no timeColumn configured — the layer isn't time-enabled, so clients (Map Viewer) request every date in each tile. Set timeColumn for any table with more than one record per place over time.`);
+          }
           let dbExtent = null;
           // timeInfo goes out on every response; outside metadata requests use whatever is cached, never compute
           const timeKey = `${pool.poolLabel()}|${sourceConfig.tableName}|time|${sourceConfig.timeColumn}`;
@@ -611,7 +596,6 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
-            ...supportedQueryFormatsOverride(req.params),
             ...(dbExtent && { extent: dbExtent }),
             ...(sourceConfig.timeColumn && {
               timeInfo: {
@@ -740,7 +724,6 @@ class Model {
     return {
       idField: req?.params?.idField || 'id',
       inputCrs: parseInt(req?.params?.srid) || config.databricks.srid || 4326,
-      ...supportedQueryFormatsOverride(req?.params),
     };
   }
 
@@ -861,7 +844,6 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields,
-            ...supportedQueryFormatsOverride(req.params),
             templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)],
           };
         }

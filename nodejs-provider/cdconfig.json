@@ -50,7 +50,7 @@
       {
         "key": "timeColumn",
         "label": "9. Lakehouse - Time Column",
-        "description": "LAKEHOUSE only, optional. Timestamp column for time-aware layers. Enter - if there is none (also enter - for a Lakebase service)."
+        "description": "LAKEHOUSE only. STRONGLY RECOMMENDED for any table with more than one record per place over time (tracks, sensor readings, daily aggregates). Without it the layer isn't time-enabled: Map Viewer and other clients request every date in each tile, a full scan on large multi-year tables. With it, clients get a time slider over the data's range (computed automatically) and query one interval at a time. Enter - only if the table has no time dimension (also enter - for a Lakebase service)."
       },
       {
         "key": "lakebaseHost",
@@ -84,8 +84,8 @@
       },
       {
         "key": "enablePbf",
-        "label": "16. Common - Enable PBF Tiles (default off)",
-        "description": "BOTH backends, optional. Leave as - (recommended). The Esri CDF runtime through 12.1 advertises PBF feature-tiles but does not quantize them, so large layers render BLANK in Map Viewer; by default this provider drops PBF so clients use JSON tiles that render correctly. Enter true ONLY on a runtime where Esri has fixed PBF quantization, to restore PBF."
+        "label": "16. Deprecated - leave as -",
+        "description": "Ignored. PBF feature tiles are always on (about 3-9x smaller than JSON). Kept only so services published with earlier versions still validate; will be removed in a later release."
       }
     ]
   },

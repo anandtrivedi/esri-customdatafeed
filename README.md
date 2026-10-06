@@ -385,7 +385,11 @@ CREATE INDEX ON my_table USING GIST (geom);
 
 Tables created directly in Lakebase with native PostGIS geometry work fine.
 
-**Large layers rendered blank in Map Viewer (PBF feature-tiles).** The ArcGIS CDF runtime through 12.1 advertises PBF feature-tiles but does not forward `quantizationParameters` to its PBF encoder, so large layers come back with `transform: null` and render blank. Small layers use JSON snapshot mode and are unaffected. **The provider works around this** by defaulting `supportedQueryFormats` to `JSON,geojson` (PBF dropped) so clients fall back to JSON tiles, which quantize correctly (slightly larger payloads). To restore PBF on a runtime where Esri has fixed quantization forwarding, set the per-service `enablePbf` parameter to `true` in the Portal publish form (or via an admin service edit).
+**PBF feature tiles are on.** Clients get quantized PBF tiles (about 3–9× smaller than JSON), which render in Map Viewer and the JS SDK on ArcGIS 12.1. Versions 1.1.3–1.1.4 turned PBF off after large layers drew blank in Map Viewer; that turned out to be the provider's own Web Mercator tile-geometry bug (fixed in 1.1.3), not the ArcGIS runtime. The old `enablePbf` service parameter is ignored and kept only so existing services validate.
+
+**Set a time column for anything with history.** Without one the layer isn't time-enabled, and Map Viewer and other clients request every date in each tile — a full scan on a large multi-year table, slow enough to back up every service on the server. With one, the provider reports the data's time range (computed once and cached), clients show a time slider, and they query one interval at a time. The publish wizard suggests a DATE/TIMESTAMP column and asks you to confirm before publishing without one.
+
+**Polygons and lines crossing the 180° meridian** are unwrapped on output (negative longitudes shifted by +360 for that shape), so they no longer draw as bands across the map. Filters still run against the stored geometry.
 
 ---
 

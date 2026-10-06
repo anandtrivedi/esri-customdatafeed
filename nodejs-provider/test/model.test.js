@@ -586,9 +586,9 @@ describe("model", () => {
     });
   });
 
-  describe("supportedQueryFormats (PBF drop for Map Viewer)", () => {
+  describe("supportedQueryFormats (never set: PBF always on)", () => {
     // The feature data response's metadata is what the CDF runtime extracts the layer
-    // capabilities from, so the PBF drop must appear there too, not only in getMetadata.
+    // capabilities from, so the setting must appear there too, not only in getMetadata.
     const rows = [{ id: 1, name: "a", geometry: '{"type":"Point","coordinates":[-77,38]}' }];
     const lhReq = (extra = {}) => ({
       query: { f: "json" },
@@ -614,41 +614,25 @@ describe("model", () => {
       ip: "127.0.0.1",
     });
 
-    it("Lakehouse getData metadata drops PBF by default", (done) => {
-      lakehouseQueryRows = rows;
-      new Model().getData(lhReq(), (err, result) => {
-        expect(err).to.be.null;
-        expect(result.metadata.supportedQueryFormats).to.equal("JSON,geojson");
-        done();
+    for (const extra of [{}, { enablePbf: "false" }, { enablePbf: "true" }]) {
+      it(`Lakehouse getData metadata never sets supportedQueryFormats (params ${JSON.stringify(extra)})`, (done) => {
+        lakehouseQueryRows = rows;
+        new Model().getData(lhReq(extra), (err, result) => {
+          expect(err).to.be.null;
+          expect(result.metadata).to.not.have.property("supportedQueryFormats");
+          done();
+        });
       });
-    });
 
-    it("Lakehouse getData metadata omits the key when enablePbf=true", (done) => {
-      lakehouseQueryRows = rows;
-      new Model().getData(lhReq({ enablePbf: "true" }), (err, result) => {
-        expect(err).to.be.null;
-        expect(result.metadata).to.not.have.property("supportedQueryFormats");
-        done();
+      it(`Lakebase getData metadata never sets supportedQueryFormats (params ${JSON.stringify(extra)})`, (done) => {
+        lakebaseQueryResult = { rows };
+        new Model().getData(lbReq(extra), (err, result) => {
+          expect(err).to.be.null;
+          expect(result.metadata).to.not.have.property("supportedQueryFormats");
+          done();
+        });
       });
-    });
-
-    it("Lakebase getData metadata drops PBF by default", (done) => {
-      lakebaseQueryResult = { rows };
-      new Model().getData(lbReq(), (err, result) => {
-        expect(err).to.be.null;
-        expect(result.metadata.supportedQueryFormats).to.equal("JSON,geojson");
-        done();
-      });
-    });
-
-    it("Lakebase getData metadata omits the key when enablePbf=true", (done) => {
-      lakebaseQueryResult = { rows };
-      new Model().getData(lbReq({ enablePbf: "true" }), (err, result) => {
-        expect(err).to.be.null;
-        expect(result.metadata).to.not.have.property("supportedQueryFormats");
-        done();
-      });
-    });
+    }
   });
 
   describe("connection release on error", () => {
@@ -948,35 +932,14 @@ describe("model", () => {
       expect(metadata.inputCrs).to.equal(3857);
     });
 
-    // Drops PBF from supportedQueryFormats by default so large layers render in Map
-    // Viewer (the 12.1 runtime advertises PBF tiles but never quantizes them → blank).
-    // The exact literal matters: the runtime's joi allow-list only permits
-    // 'JSON' or 'JSON,geojson', so any whitespace/case drift would 500 the metadata call.
-    it("drops PBF: supportedQueryFormats defaults to the exact 'JSON,geojson' literal", async () => {
-      const model = new Model();
-      const metadata = await model.getMetadata({ params: {} });
-      expect(metadata.supportedQueryFormats).to.equal("JSON,geojson");
-    });
-
-    it("drops PBF: supportedQueryFormats present even with no request", async () => {
-      const model = new Model();
-      const metadata = await model.getMetadata();
-      expect(metadata.supportedQueryFormats).to.equal("JSON,geojson");
-    });
-
-    // Re-enabling PBF OMITS the key (so the runtime default 'JSON,geojson,PBF' applies);
-    // it must NEVER emit a PBF-containing string, which the runtime's joi allow-list rejects.
-    it("enablePbf=true omits supportedQueryFormats (never emits a PBF string)", async () => {
-      const model = new Model();
-      const metadata = await model.getMetadata({ params: { enablePbf: "true" } });
-      expect(metadata).to.not.have.property("supportedQueryFormats");
-    });
-
-    it("enablePbf boolean true also omits supportedQueryFormats", async () => {
-      const model = new Model();
-      const metadata = await model.getMetadata({ params: { enablePbf: true } });
-      expect(metadata).to.not.have.property("supportedQueryFormats");
-    });
+    // PBF always on: supportedQueryFormats is never set, so the runtime default 'JSON,geojson,PBF' applies. The
+    // deprecated enablePbf parameter (kept in the manifest so older services validate) is ignored.
+    for (const params of [undefined, {}, { enablePbf: "false" }, { enablePbf: false }, { enablePbf: "true" }, { enablePbf: "-" }]) {
+      it(`getMetadata never sets supportedQueryFormats (params ${JSON.stringify(params)})`, async () => {
+        const metadata = await new Model().getMetadata(params === undefined ? undefined : { params });
+        expect(metadata).to.not.have.property("supportedQueryFormats");
+      });
+    }
   });
 
   describe("editData", () => {

@@ -352,7 +352,10 @@ if not idc:
     m=[n for n in ints if n.lower().endswith('_id')]
     if m: idc=m[0]
 if not idc and ints: idc=ints[0]
-print((geom or '_')+' '+(idc or '_'))
+# time column: TIMESTAMP before DATE; among those prefer names that say time/date
+tcols=[n for n,t in cols if t.startswith('TIMESTAMP')]+[n for n,t in cols if t=='DATE' or t.startswith('DATE')]
+tc=next((n for n in tcols if any(h in n.lower() for h in ('time','date','_ts','timestamp','dt'))), tcols[0] if tcols else '')
+print((geom or '_')+' '+(idc or '_')+' '+(tc or '_'))
 "
 }
 
@@ -643,11 +646,12 @@ while true; do
       if printf '%s' "$TABLE" | grep -qE '^[^[:space:].]+\.[^[:space:].]+\.[^[:space:].]+$'; then break; fi
       echo "   !! Use a 3-part Unity Catalog name: catalog.schema.table — try again."
     done
-    SUG_GEOM=""; SUG_ID=""
+    SUG_GEOM=""; SUG_ID=""; SUG_TIME=""
     if [ "$CLI_OK" = 1 ]; then
-      read -r SUG_GEOM SUG_ID < <(timeout 15 databricks tables get "$TABLE" --profile "$WORKSPACE" -o json 2>/dev/null | guess_cols) || true
+      read -r SUG_GEOM SUG_ID SUG_TIME < <(timeout 15 databricks tables get "$TABLE" --profile "$WORKSPACE" -o json 2>/dev/null | guess_cols) || true
       [ "$SUG_GEOM" = "_" ] && SUG_GEOM=""
       [ "$SUG_ID" = "_" ] && SUG_ID=""
+      [ "$SUG_TIME" = "_" ] && SUG_TIME=""
       [ -n "$SUG_GEOM$SUG_ID" ] && echo "  (auto-detected from the table — geometry: '${SUG_GEOM:-?}', id: '${SUG_ID:-?}'; press Enter to accept)"
     fi
     while :; do ask "Geometry column" "$SUG_GEOM" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
@@ -658,7 +662,19 @@ while true; do
     esac
     while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "$SUG_ID" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
     ask_int "SRID (EPSG code)" "4326" SRID 1 999999
-    ask "Time column (optional; blank if none)" "" TIME_COL
+    # Strongly recommended: without a time column the layer isn't time-enabled, and Map Viewer and other clients
+    # request every date in each tile — a full scan on a large multi-year table. With one, clients get a time slider
+    # over the data's range (the provider computes it) and query one interval at a time.
+    echo "  Time column — STRONGLY RECOMMENDED for any table with more than one record per place over time"
+    echo "  (tracks, sensor readings, daily aggregates). Without it, clients request every date in every tile."
+    ask "Time column${SUG_TIME:+ (detected: $SUG_TIME)}" "$SUG_TIME" TIME_COL
+    [ "$TIME_COL" = "-" ] && TIME_COL=""
+    if [ -z "$TIME_COL" ] && [ -n "$SUG_TIME" ]; then
+      echo "   !! '$TABLE' has a date/time column ($SUG_TIME) but you left Time column blank."
+      echo "      Map Viewer will then pull ALL dates for every tile — slow, and a full-table scan on big tables."
+      ask "   Publish WITHOUT a time column anyway? (y/N)" "n" NOTIME
+      case "$NOTIME" in y|Y|yes|YES) ;; *) TIME_COL="$SUG_TIME"; echo "   -> using $TIME_COL";; esac
+    fi
     ask_int "Max record count per page" "2000" MAXREC 1 100000
     CAPABILITIES="Query"; EDITING=""
   else
