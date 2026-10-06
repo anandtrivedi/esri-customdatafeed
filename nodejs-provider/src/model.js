@@ -130,6 +130,16 @@ const auditLogger = getAuditLogger();
 
 let requestCounter = 0;
 
+// Layer extent for metadata responses, per table. ST_Envelope_Agg is a full-table aggregate, so on a multi-billion-row
+// table it runs for minutes and every metadata request (ArcGIS asks after each restart) piled one more onto the
+// warehouse and onto the connection pool. Computed once, cached; if it doesn't finish inside the wait budget it's
+// cancelled, the metadata goes out without an extent (clients fall back to the data's own bounds), and the table is
+// remembered as too big to try again for a while.
+const EXTENT_CACHE_MS = parseInt(process.env.CDF_EXTENT_CACHE_MS) || 24 * 3600 * 1000;
+const EXTENT_WAIT_MS = parseInt(process.env.CDF_EXTENT_WAIT_MS) || 10000;
+const EXTENT_RETRY_MS = parseInt(process.env.CDF_EXTENT_RETRY_MS) || 3600 * 1000;
+const extentCache = new Map(); // key -> { extent: object|null, at: ms, tooBig: bool }
+
 // Graceful shutdown: release pooled connections on process exit
 // Guard with try/catch — CDF runtime manages process lifecycle
 try {
@@ -364,32 +374,46 @@ class Model {
           // Calculate extent for metadata requests
           let dbExtent = null;
           if (isMetadataRequest) {
-            try {
-              // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
-              const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, resolvedFormat);
-
-              // ST_Envelope_Agg computes the bounding box in a single aggregate pass
-              const extentQuery = `
-                SELECT ST_AsGeoJSON(ST_Envelope_Agg(${geomExpression})) AS extent
-                FROM ${sourceConfig.tableName}
-              `;
-
-              extentOperation = await connection.session.executeStatement(extentQuery, {
-                runAsync: true,
-                queryTimeout: config.databricks.queryTimeout
-              });
-              const extentRows = await extentOperation.fetchAll();
-              await extentOperation.close();
-              extentOperation = null;
-
-              if (extentRows.length > 0 && extentRows[0].extent) {
-                dbExtent = getExtentFromGeoJson(
-                  JSON.parse(extentRows[0].extent),
-                  sourceConfig.dbWKID
-                );
+            // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
+            const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, resolvedFormat);
+            const cacheKey = `${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
+            const cached = extentCache.get(cacheKey);
+            const now = Date.now();
+            if (cached && now - cached.at < (cached.tooBig ? EXTENT_RETRY_MS : EXTENT_CACHE_MS)) {
+              dbExtent = cached.extent;
+            } else {
+              try {
+                // ST_Envelope_Agg computes the bounding box in a single aggregate pass
+                const extentQuery = `
+                  SELECT ST_AsGeoJSON(ST_Envelope_Agg(${geomExpression})) AS extent
+                  FROM ${sourceConfig.tableName}
+                `;
+                extentOperation = await connection.session.executeStatement(extentQuery, {
+                  runAsync: true,
+                  queryTimeout: config.databricks.queryTimeout
+                });
+                let timer;
+                const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(null), EXTENT_WAIT_MS); });
+                const extentRows = await Promise.race([extentOperation.fetchAll(), timedOut]);
+                clearTimeout(timer);
+                if (extentRows === null) {
+                  this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelled; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
+                  try { await extentOperation.cancel(); } catch (e) { /* already finished */ }
+                  extentCache.set(cacheKey, { extent: null, at: now, tooBig: true });
+                } else {
+                  if (extentRows.length > 0 && extentRows[0].extent) {
+                    dbExtent = getExtentFromGeoJson(
+                      JSON.parse(extentRows[0].extent),
+                      sourceConfig.dbWKID
+                    );
+                  }
+                  extentCache.set(cacheKey, { extent: dbExtent, at: now, tooBig: false });
+                }
+                await extentOperation.close();
+                extentOperation = null;
+              } catch (error) {
+                this.logger.warn(`Failed to calculate extent: ${error.message}`);
               }
-            } catch (error) {
-              this.logger.warn(`Failed to calculate extent: ${error.message}`);
             }
           }
 
@@ -958,3 +982,4 @@ class Model {
 }
 
 module.exports = Model;
+module.exports._extentCache = extentCache; // tests reset it between cases
