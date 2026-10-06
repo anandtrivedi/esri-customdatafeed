@@ -60,18 +60,24 @@ function formatFeature(values, columns, idField, geometryField, dbWKID) {
  * wrap correctly. Applied per polygon (outer ring decides; holes get the same shift so the rings stay consistent) and
  * per line. Only for geographic coordinates (4326 / unset), and not poleward of ±85° — a ring around a pole really
  * does span every longitude. Filters still run against the stored geometry in Databricks; this only changes output.
+ *
+ * Detection is a consecutive-edge test (some segment's |Δlon| > 180), NOT a bounding-box span: a bbox wider than 180°
+ * also matches genuinely wide shapes through Greenwich (e.g. -100..100) and sub-85° circumpolar rings, and shifting
+ * those corrupts them. Only an edge that actually jumps across ±180 marks a true dateline crossing. For a GeoJSON ring
+ * the closing edge is covered because first === last; an open LineString has no closing edge.
  */
 function normalizeAntimeridian(geometry, dbWKID) {
   if (!geometry || typeof geometry !== "object") return geometry;
   if (dbWKID != null && Number(dbWKID) !== 4326) return geometry;
-  const spansDateline = (ring) => {
-    let lo = Infinity, hi = -Infinity, polar = false;
-    for (const p of ring) {
+  const spansDateline = (pts) => {
+    let polar = false, jump = false;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
       if (!Array.isArray(p)) return false;
-      lo = Math.min(lo, p[0]); hi = Math.max(hi, p[0]);
       if (Math.abs(p[1]) > 85) polar = true;
+      if (i > 0 && Math.abs(p[0] - pts[i - 1][0]) > 180) jump = true;
     }
-    return !polar && hi - lo > 180;
+    return !polar && jump;
   };
   const shift = (ring) => ring.map((p) => (p[0] < 0 ? [p[0] + 360, ...p.slice(1)] : p));
   const polygon = (rings) => (rings.length && spansDateline(rings[0]) ? rings.map(shift) : rings);

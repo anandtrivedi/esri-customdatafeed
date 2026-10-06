@@ -7,6 +7,7 @@ const proxyquire = require("proxyquire").noCallThru();
 let timeCalls = 0;
 let timeSlowMs = 0;
 let timeFails = false;
+let timeNull = false; // simulate an empty table / all-NULL time column: min/max come back NULL
 let acquireCount = 0; // connections borrowed from the pool (request + any background recompute)
 let releaseCount = 0; // connections returned to the pool
 const T0 = 1420070400000; // 2015-01-01
@@ -30,6 +31,7 @@ const connectionPoolStub = {
                 if (isTime) {
                   if (timeFails) throw new Error("boom");
                   if (timeSlowMs) await new Promise((r) => setTimeout(r, timeSlowMs));
+                  if (timeNull) return [{ t0: null, t1: null }]; // empty table / all-NULL column → min/max NULL
                   return [{ t0: String(T0), t1: String(T1) }]; // the driver returns BIGINT as strings
                 }
                 return [{ id: 1, geometry: point }];
@@ -78,7 +80,7 @@ describe("Lakehouse metadata time extent", function () {
   });
 
   beforeEach(() => {
-    timeCalls = 0; timeSlowMs = 0; timeFails = false; acquireCount = 0; releaseCount = 0;
+    timeCalls = 0; timeSlowMs = 0; timeFails = false; timeNull = false; acquireCount = 0; releaseCount = 0;
     Model._extentCache.clear();
   });
 
@@ -132,5 +134,19 @@ describe("Lakehouse metadata time extent", function () {
     const res = await getData(new Model(), req("catalog.schema.t1"));
     expect(res.metadata.timeInfo.timeExtent).to.equal(null);
     expect(res.features).to.have.lengthOf(1);
+  });
+
+  it("returns null (not [0,0]) when the table is empty / the time column is all NULL", async () => {
+    timeNull = true;
+    const res = await getData(new Model(), req("catalog.schema.empty"));
+    expect(res.metadata.timeInfo.timeExtent).to.equal(null); // NOT [0, 0] from Number(null)
+  });
+
+  it("degrades to null (no 500) when the time column name is invalid", async () => {
+    // validateFieldName throws on a bad column; it must be caught, not propagate out and 500 every metadata request
+    const res = await getData(new Model(), req("catalog.schema.t1", { timeColumn: "bad; name" }));
+    expect(res.metadata.timeInfo.timeExtent).to.equal(null);
+    expect(res.features).to.have.lengthOf(1);
+    expect(timeCalls).to.equal(0); // never reached executeStatement
   });
 });

@@ -130,11 +130,15 @@ const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: 
 const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
 
-// [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / values are non-finite.
+// [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / the column is all-NULL /
+// values are non-finite. Guard against SQL NULL first: an empty table or all-NULL column makes min/max return NULL,
+// and Number(null) === 0 would otherwise surface as a bogus [0, 0] (1970) time extent.
 function timeRowsToRange(rows) {
-  const t0 = rows && rows.length ? Number(rows[0].t0) : NaN;
-  const t1 = rows && rows.length ? Number(rows[0].t1) : NaN;
-  return Number.isFinite(t0) && Number.isFinite(t1) ? [t0, t1] : null;
+  if (!rows || !rows.length) return null;
+  const { t0, t1 } = rows[0];
+  if (t0 == null || t1 == null) return null;
+  const n0 = Number(t0), n1 = Number(t1);
+  return Number.isFinite(n0) && Number.isFinite(n1) ? [n0, n1] : null;
 }
 
 // Graceful shutdown: release pooled connections on process exit
@@ -284,10 +288,12 @@ class Model {
 
   async _computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
     const now = Date.now();
-    const timeQuery = this._timeExtentQuery(sourceConfig);
     let op;
     let timer;
     try {
+      // Build the query (validateFieldName) inside the try: a bad timeColumn should degrade to a negative cache + null
+      // like a SQL error, not throw out of this "never rejects" method and 500 every metadata request forever.
+      const timeQuery = this._timeExtentQuery(sourceConfig);
       op = await connection.session.executeStatement(timeQuery, {
         runAsync: true,
         queryTimeout: config.databricks.queryTimeout
@@ -299,11 +305,14 @@ class Model {
       if (rows === EXTENT_TIMED_OUT) {
         // Too slow for the metadata budget. Cancel it on THIS request's connection so that connection returns to the
         // pool clean — never released with a live operation, never shared with the next request. Then recompute in the
-        // background on a SEPARATE borrowed connection (see _backgroundTimeExtent). A short negative cache entry keeps
-        // concurrent/follow-up metadata requests from each spawning their own background recompute.
+        // background on a SEPARATE borrowed connection (see _backgroundTimeExtent). The negative cache entry keeps
+        // concurrent/follow-up metadata requests from each spawning their own background recompute — stamped NOW (not
+        // function entry) and given the full background cap, so it stays valid for the entire background window (the
+        // background can run until ~now+EXTENT_WAIT_MS+TIME_EXTENT_BG_MS; anchoring at entry would expire it early and
+        // let a second request start a duplicate query / clobber a fresh result).
         this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — recomputing in the background on its own connection (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
         try { await op.cancel(); } catch (e) { /* may already be finished */ }
-        extentCache.set(cacheKey, { extent: null, at: now, ttl: TIME_EXTENT_BG_MS });
+        extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: TIME_EXTENT_BG_MS + EXTENT_WAIT_MS });
         this._backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig);
         return null;
       }

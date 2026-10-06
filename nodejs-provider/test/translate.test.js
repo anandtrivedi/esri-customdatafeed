@@ -183,6 +183,17 @@ describe("normalizeAntimeridian", () => {
     expect(normalizeAntimeridian(null, 4326)).to.equal(null);
   });
 
+  it("leaves a wide polygon through Greenwich alone (no edge actually jumps the dateline)", () => {
+    // Bbox span > 180° but sampled finely so no consecutive edge exceeds 180°, and it crosses 0 not 180. The old
+    // bbox-span heuristic would have shifted (corrupted) this; the edge-jump test correctly leaves it untouched.
+    const wide = { type: "Polygon", coordinates: [[
+      [-100, 10], [-50, 10], [0, 10], [50, 10], [100, 10],
+      [100, 20], [50, 20], [0, 20], [-50, 20], [-100, 20], [-100, 10],
+    ]] };
+    expect(span(wide.coordinates[0])).to.be.above(180); // would trip the old detector
+    expect(normalizeAntimeridian(wide, 4326)).to.deep.equal(wide);
+  });
+
   it("is applied by translateToGeoJSON", () => {
     const fc = translateToGeoJSON(
       [{ id: 1, geometry: JSON.stringify({ type: "Polygon", coordinates: [wrapped] }) }],
