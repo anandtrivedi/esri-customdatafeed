@@ -134,11 +134,15 @@ let requestCounter = 0;
 // table it runs for minutes and every metadata request (ArcGIS asks after each restart) piled one more onto the
 // warehouse and onto the connection pool. Computed once, cached; if it doesn't finish inside the wait budget it's
 // cancelled, the metadata goes out without an extent (clients fall back to the data's own bounds), and the table is
-// remembered as too big to try again for a while.
+// remembered as too big to try again for a while. Concurrent cold-cache callers share one in-flight query (see
+// getLayerExtent) so a burst of metadata requests doesn't fire N full scans.
 const EXTENT_CACHE_MS = parseInt(process.env.CDF_EXTENT_CACHE_MS) || 24 * 3600 * 1000;
 const EXTENT_WAIT_MS = parseInt(process.env.CDF_EXTENT_WAIT_MS) || 10000;
 const EXTENT_RETRY_MS = parseInt(process.env.CDF_EXTENT_RETRY_MS) || 3600 * 1000;
-const extentCache = new Map(); // key -> { extent: object|null, at: ms, tooBig: bool }
+const EXTENT_ERROR_RETRY_MS = parseInt(process.env.CDF_EXTENT_ERROR_RETRY_MS) || 60 * 1000;
+const EXTENT_TIMED_OUT = Symbol("extent-timed-out");
+const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: ms }
+const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
 
 // Graceful shutdown: release pooled connections on process exit
 // Guard with try/catch — CDF runtime manages process lifecycle
@@ -232,6 +236,76 @@ class Model {
     } catch (err) {
       if (typeof callback === 'function') return callback(err, false);
       throw err;
+    }
+  }
+
+  /**
+   * Resolve the layer extent for a metadata request: serve a fresh value from the cache if one is valid, otherwise
+   * compute it (de-duping concurrent cold-cache callers so a burst of metadata requests shares a single query).
+   * Always resolves to an extent object or null — never rejects — so callers can serve metadata either way.
+   */
+  async getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter) {
+    const cached = extentCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < cached.ttl) {
+      return cached.extent;
+    }
+    let inflight = extentInFlight.get(cacheKey);
+    if (!inflight) {
+      inflight = this._computeLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter)
+        .finally(() => extentInFlight.delete(cacheKey));
+      extentInFlight.set(cacheKey, inflight);
+    }
+    return inflight;
+  }
+
+  /**
+   * Run the full-table ST_Envelope_Agg, time-boxed by EXTENT_WAIT_MS. Caches the result (long TTL), a timeout
+   * (medium TTL — "too big"), or an error (short TTL — often transient) so none re-runs on every metadata request.
+   */
+  async _computeLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter) {
+    const now = Date.now();
+    // ST_Envelope_Agg computes the bounding box in a single aggregate pass
+    const extentQuery = `
+      SELECT ST_AsGeoJSON(ST_Envelope_Agg(${geomExpression})) AS extent
+      FROM ${sourceConfig.tableName}
+    `;
+    let op;
+    let timer;
+    try {
+      op = await connection.session.executeStatement(extentQuery, {
+        runAsync: true,
+        queryTimeout: config.databricks.queryTimeout
+      });
+      // Promise.race doesn't cancel the loser. Once we cancel() a timed-out operation, the still-pending fetchAll()
+      // rejects in the real @databricks/sql driver — attach a sink so that rejection isn't unhandled (which would
+      // crash the process on Node >= 15). The test stub resolves it artificially, so this guard is only exercised live.
+      const fetchP = op.fetchAll();
+      fetchP.catch(() => {});
+      const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
+      const extentRows = await Promise.race([fetchP, timedOut]);
+      if (extentRows === EXTENT_TIMED_OUT) {
+        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelled; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
+        try { await op.cancel(); } catch (e) { /* already finished */ }
+        extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_RETRY_MS });
+        return null;
+      }
+      let extent = null;
+      if (extentRows.length > 0 && extentRows[0].extent) {
+        extent = getExtentFromGeoJson(JSON.parse(extentRows[0].extent), sourceConfig.dbWKID);
+      }
+      extentCache.set(cacheKey, { extent, at: now, ttl: EXTENT_CACHE_MS });
+      return extent;
+    } catch (error) {
+      this.logger.warn(`Query ${requestCounter}: Failed to calculate extent for ${sourceConfig.tableName}: ${error.message}`);
+      // Negatively cache non-timeout failures too (short TTL — they're often transient) so a persistent error doesn't
+      // re-run the full-table scan on every metadata request.
+      extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_ERROR_RETRY_MS });
+      return null;
+    } finally {
+      clearTimeout(timer); // always clear — the success path and the reject path both land here
+      if (op) {
+        try { await op.close(); } catch (e) { /* best-effort; op may already be closed/cancelled */ }
+      }
     }
   }
 
@@ -334,7 +408,6 @@ class Model {
       .then(async (conn) => {
         connection = conn;
         let queryOperation;
-        let extentOperation;
         let queryFailed = false;
 
         try {
@@ -371,50 +444,15 @@ class Model {
 
           this.logger.info(`Query ${requestCounter}: ${sqlQuery.substring(0, 150)}...`);
 
-          // Calculate extent for metadata requests
+          // Calculate extent for metadata requests (cached, time-boxed, de-duped — see getLayerExtent)
           let dbExtent = null;
           if (isMetadataRequest) {
             // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
             const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, resolvedFormat);
-            const cacheKey = `${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
-            const cached = extentCache.get(cacheKey);
-            const now = Date.now();
-            if (cached && now - cached.at < (cached.tooBig ? EXTENT_RETRY_MS : EXTENT_CACHE_MS)) {
-              dbExtent = cached.extent;
-            } else {
-              try {
-                // ST_Envelope_Agg computes the bounding box in a single aggregate pass
-                const extentQuery = `
-                  SELECT ST_AsGeoJSON(ST_Envelope_Agg(${geomExpression})) AS extent
-                  FROM ${sourceConfig.tableName}
-                `;
-                extentOperation = await connection.session.executeStatement(extentQuery, {
-                  runAsync: true,
-                  queryTimeout: config.databricks.queryTimeout
-                });
-                let timer;
-                const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(null), EXTENT_WAIT_MS); });
-                const extentRows = await Promise.race([extentOperation.fetchAll(), timedOut]);
-                clearTimeout(timer);
-                if (extentRows === null) {
-                  this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelled; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
-                  try { await extentOperation.cancel(); } catch (e) { /* already finished */ }
-                  extentCache.set(cacheKey, { extent: null, at: now, tooBig: true });
-                } else {
-                  if (extentRows.length > 0 && extentRows[0].extent) {
-                    dbExtent = getExtentFromGeoJson(
-                      JSON.parse(extentRows[0].extent),
-                      sourceConfig.dbWKID
-                    );
-                  }
-                  extentCache.set(cacheKey, { extent: dbExtent, at: now, tooBig: false });
-                }
-                await extentOperation.close();
-                extentOperation = null;
-              } catch (error) {
-                this.logger.warn(`Failed to calculate extent: ${error.message}`);
-              }
-            }
+            // Key by connection identity (workspace|warehouse) so a same-named table in another workspace sharing this
+            // process can't collide and serve the wrong extent (or inherit the wrong negative cache).
+            const cacheKey = `${pool.poolLabel()}|${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
+            dbExtent = await this.getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter);
           }
 
           // Execute main query
@@ -512,12 +550,8 @@ class Model {
           this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
           callback(error);
         } finally {
-          // Clean up operations independently (not connection - it goes back to pool)
-          if (extentOperation) {
-            try { await extentOperation.close(); } catch (e) {
-              this.logger.error(`Query ${requestCounter}: Error closing extent operation: ${e.message}`);
-            }
-          }
+          // Clean up operations independently (not connection - it goes back to pool).
+          // The extent operation is opened and closed entirely within getLayerExtent, so it's not handled here.
           if (queryOperation) {
             try { await queryOperation.close(); } catch (e) {
               this.logger.error(`Query ${requestCounter}: Error closing query operation: ${e.message}`);
