@@ -23,3 +23,29 @@ the customer-facing scripts at the repo root:
 
 These are kept in the repo for the maintainer's convenience and are **not supported** as customer
 install tooling.
+
+## Updating an already-registered provider (new `.cdpk` onto a live server)
+
+Updating in place is **not** the same as a fresh register, and it has two gotchas worth knowing:
+
+1. **Re-register — do not just patch files.** Editing `src/*.js` under
+   `…/customdata/providers/databricks-geospatial-provider/` and restarting *looks* like it works,
+   but ArcGIS re-extracts the **registered** `.cdpk` from the config-store on restart, so a bare
+   file-patch is silently reverted by the next (often off-hours automatic) restart. For a durable
+   update, upload the new `.cdpk` and call `POST …/admin/services/types/customdataproviders/update`
+   (`id=<uploaded itemID>`), then restart the server so the runtime reloads it. Back up the provider
+   directory to a path **outside** `providers/` first — a *failed* update can delete the provider
+   dir and prune siblings.
+2. **Token type depends on federation.**
+   - **Standalone server:** a Server-admin token works — `…/admin/generateToken` with
+     `client=requestip`. (`register-provider.sh` uses this path.)
+   - **Federated server (fronted by Portal):** the site will not issue a Server-admin token to a
+     non-local account, so `register-provider.sh` fails. Mint a **Portal** token instead
+     (`<portal>/sharing/rest/generateToken` with `client=referer&referer=<portal>`) and send a
+     matching `Referer` header on the admin calls.
+
+   After the restart, a metadata request's first hit may 404 while the service SOC cold-starts —
+   retry for ~30–60s before concluding anything is wrong.
+
+Both update flows (standalone + federated) are small wrappers around the steps above; the
+maintainer keeps the environment-specific copies with their box's hostnames/certs out of this repo.
