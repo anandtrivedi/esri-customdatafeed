@@ -280,6 +280,23 @@ Benchmark on 17M Overture Maps Places, warm averages, end-to-end through ArcGIS 
 
 **Lakebase is 8–30× faster for spatial** (PostGIS GIST indexes vs file-level scanning) and all queries are sub-200 ms (interactive). **COUNT is the one case Lakehouse wins** (columnar stats). Config: Lakebase CU_4 + GIST, Lakehouse Large Serverless (Z-ordered), ArcGIS 12.0 on m5.xlarge.
 
+### Preparing large tables
+
+Lessons from serving 28B AIS reports (10 years) through one CDF box:
+
+- **Store geometry as native `GEOMETRY` (SRID 4326).** No parsing per row.
+- **Keep `idField` within 32-bit int (≤ 2,147,483,647).** Larger ids (e.g. 64-bit `bigid`) log an `Invalid ID value` warning per feature, which costs CPU on a busy box.
+- **Set a `timeColumn` on anything with history.** Without it Map Viewer shows no time slider and every tile scans all of history: ~10 s per tile over 10 years vs ~1 s for one day.
+- **Liquid-cluster on time + spatial key** (e.g. `CLUSTER BY (event_date, h3_cell)`).
+- **Run `OPTIMIZE` after an `UPDATE`/`MERGE` fix-up.** The corrected rows land in new files that span every date, so every query has to read them.
+- **Pre-aggregate for small scales.** Serve H3 hex tables zoomed out; raw points only zoomed in.
+- **Precompute "latest per entity" as its own table.** The CDF serves rows; it can't pick the newest row per vessel/asset.
+- **Unwrap dateline-crossing polygons.** v1.1.5+ does this on output; fixing the data too keeps other clients clean.
+- **Leave PBF on** (default from v1.1.5). Pages are ~9× smaller than JSON.
+- **Raise `maxRecordCount` to ~8,000, not unlimited.** Each page is one SQL round trip; very large pages (~3–4 MB) failed.
+- **Large results need the box to reach the workspace storage bucket** (CloudFetch). If egress is blocked, keep pages small.
+- **One CDF Node process serves every request.** A single heavy client (e.g. Map Viewer with no time filter) slows every other user.
+
 ---
 
 ## Working with Existing Tables
