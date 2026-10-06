@@ -1,0 +1,152 @@
+const { expect } = require("chai");
+const proxyquire = require("proxyquire").noCallThru();
+
+// timeInfo.timeExtent: [min, max] of the configured time column, so clients (Map Viewer's time slider) request one
+// interval at a time instead of every year at once. Cached, time-boxed, and finished in the background when slow.
+
+let timeCalls = 0;
+let timeSlowMs = 0;
+let timeFails = false;
+let timeNull = false; // simulate an empty table / all-NULL time column: min/max come back NULL
+let acquireCount = 0; // connections borrowed from the pool (request + any background recompute)
+let releaseCount = 0; // connections returned to the pool
+const T0 = 1420070400000; // 2015-01-01
+const T1 = 1735689599000; // 2024-12-31 23:59:59
+const point = '{"type":"Point","coordinates":[-77,38]}';
+
+const connectionPoolStub = {
+  getPool: () => ({
+    poolLabel: () => "test-pool",
+    acquire: async () => {
+      acquireCount++;
+      return {
+        id: `test-conn-${acquireCount}`,
+        session: {
+          executeStatement: async (sql) => {
+            const isTime = /unix_millis/.test(sql);
+            if (isTime) timeCalls++;
+            return {
+              fetchAll: async () => {
+                if (/^\s*DESCRIBE/i.test(sql) || /ST_Envelope_Agg/.test(sql)) return [];
+                if (isTime) {
+                  if (timeFails) throw new Error("boom");
+                  if (timeSlowMs) await new Promise((r) => setTimeout(r, timeSlowMs));
+                  if (timeNull) return [{ t0: null, t1: null }]; // empty table / all-NULL column → min/max NULL
+                  return [{ t0: String(T0), t1: String(T1) }]; // the driver returns BIGINT as strings
+                }
+                return [{ id: 1, geometry: point }];
+              },
+              cancel: async () => {},
+              close: async () => {},
+            };
+          },
+        },
+      };
+    },
+    release: () => { releaseCount++; },
+  }),
+  shutdownPool: async () => {},
+  getAllPoolStats: () => [],
+};
+
+describe("Lakehouse metadata time extent", function () {
+  let Model;
+  const req = (table, extra = {}) => ({
+    query: { f: "json" },
+    params: { tableName: table, geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY", timeColumn: "event_date", ...extra },
+    ip: "127.0.0.1",
+  });
+  const getData = (model, r) => new Promise((resolve, reject) => model.getData(r, (err, res) => (err ? reject(err) : resolve(res))));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  before(() => {
+    process.env.DATABRICKS_SERVER_HOSTNAME = "test-host.databricks.com";
+    process.env.DATABRICKS_HTTP_PATH = "/sql/1.0/endpoints/test";
+    process.env.DATABRICKS_ACCESS_TOKEN = "test-token";
+    process.env.ENABLE_AUDIT_LOG = "false";
+    process.env.ENABLE_USER_AUTH = "false";
+    process.env.ENABLE_SIMPLE_AUTH = "false";
+    process.env.CDF_EXTENT_WAIT_MS = "50";
+    process.env.CDF_TIME_EXTENT_BG_MS = "2000";
+    Model = proxyquire("../src/model", {
+      "./modules/connectionPool": connectionPoolStub,
+      "./modules/lakebasePool": { getLakebasePool: async () => ({}), shutdownLakebasePools: async () => {} },
+      "./modules/workspaceResolver": {
+        resolveWorkspace: (alias) => ({ workspaceAlias: alias || "default", hostname: "test-host.databricks.com", authType: "pat", token: "t" }),
+        clearProfileCache: () => {},
+      },
+      dotenv: { config: () => {} },
+    });
+  });
+
+  beforeEach(() => {
+    timeCalls = 0; timeSlowMs = 0; timeFails = false; timeNull = false; acquireCount = 0; releaseCount = 0;
+    Model._extentCache.clear();
+  });
+
+  after(() => { delete process.env.CDF_EXTENT_WAIT_MS; delete process.env.CDF_TIME_EXTENT_BG_MS; });
+
+  it("fills timeInfo.timeExtent with [min, max] of the time column as numbers", async () => {
+    const res = await getData(new Model(), req("catalog.schema.t1"));
+    expect(res.metadata.timeInfo.startTimeField).to.equal("event_date");
+    expect(res.metadata.timeInfo.timeExtent).to.deep.equal([T0, T1]);
+  });
+
+  it("computes it once per table and serves later requests from the cache", async () => {
+    const model = new Model();
+    await getData(model, req("catalog.schema.t1"));
+    await getData(model, req("catalog.schema.t1"));
+    expect(timeCalls).to.equal(1);
+  });
+
+  it("serves a cached time extent on data (non-metadata) responses without computing", async () => {
+    const model = new Model();
+    await getData(model, req("catalog.schema.t1"));
+    const data = await getData(model, { ...req("catalog.schema.t1"), query: { f: "json", where: "1=1", resultRecordCount: "5" } });
+    expect(data.metadata.timeInfo.timeExtent).to.deep.equal([T0, T1]);
+    expect(timeCalls).to.equal(1);
+  });
+
+  it("when slow, answers without it, recomputes in the background on its OWN connection, and the next request has it", async () => {
+    timeSlowMs = 300; // longer than the 50 ms wait, shorter than the 2 s background cap
+    const model = new Model();
+    const first = await getData(model, req("catalog.schema.big"));
+    expect(first.metadata.timeInfo.timeExtent).to.equal(null);
+    await sleep(400); // the background recompute (own connection) finishes and fills the cache
+    // Foreground timed out on the request's connection; a fresh background query ran on a separate borrowed
+    // connection (so no live op ever rides the request's released connection, and no two statements share a session).
+    expect(timeCalls).to.equal(2);
+    expect(acquireCount).to.equal(2); // one for the request, one dedicated to the background recompute
+    expect(releaseCount).to.equal(2); // both were returned to the pool
+    const second = await getData(model, req("catalog.schema.big"));
+    expect(second.metadata.timeInfo.timeExtent).to.deep.equal([T0, T1]);
+    expect(timeCalls).to.equal(2); // second request served from cache, no new query
+  });
+
+  it("has no timeInfo at all when no time column is configured", async () => {
+    const res = await getData(new Model(), req("catalog.schema.t1", { timeColumn: undefined }));
+    expect(res.metadata).to.not.have.property("timeInfo");
+    expect(timeCalls).to.equal(0);
+  });
+
+  it("still answers (timeExtent null) when the min/max query fails", async () => {
+    timeFails = true;
+    const res = await getData(new Model(), req("catalog.schema.t1"));
+    expect(res.metadata.timeInfo.timeExtent).to.equal(null);
+    expect(res.features).to.have.lengthOf(1);
+  });
+
+  it("returns null (not [0,0]) when the table is empty / the time column is all NULL", async () => {
+    timeNull = true;
+    const res = await getData(new Model(), req("catalog.schema.empty"));
+    expect(res.metadata.timeInfo.timeExtent).to.equal(null); // NOT [0, 0] from Number(null)
+  });
+
+  it("degrades to null (no 500) when the time column name is invalid", async () => {
+    // validateFieldName throws on a bad column; it must be caught, not propagate out and 500 every metadata request
+    const res = await getData(new Model(), req("catalog.schema.t1", { timeColumn: "bad; name" }));
+    expect(res.metadata.timeInfo.timeExtent).to.equal(null);
+    expect(res.features).to.have.lengthOf(1);
+    expect(timeCalls).to.equal(0); // never reached executeStatement
+  });
+});

@@ -28,6 +28,7 @@ const {
   getGeometryFieldExpression,
   resolveGeometryFormat,
   validateIdentifier,
+  validateFieldName,
 } = require('./modules');
 const { getPool, shutdownPool } = require('./modules/connectionPool');
 const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
@@ -70,34 +71,14 @@ const SERVICE_PARAM_KEYS = [
   'workspace', 'warehouseHttpPath', 'tableName', 'geometryColumn', 'idField',
   'geometryFormat', 'timeColumn', 'lakebaseHost', 'lakebasePort', 'lakebaseDatabase',
   'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled',
-  'enablePbf',
 ];
 
-// supportedQueryFormats override for the "blank large layer in Map Viewer" bug.
-//
-// The Esri CDF FeatureServer (through 12.1.0) advertises supportedQueryFormats
-// 'JSON,geojson,PBF' but never forwards quantizationParameters to its PBF encoder.
-// Clients that render large layers as quantized PBF feature-tiles (Map Viewer,
-// Experience Builder, Dashboards) then get tiles with transform:null — unquantized
-// coordinates land off-screen and the layer draws BLANK. Small layers use JSON
-// snapshot mode and are unaffected; that's why only large layers broke.
-//
-// Fix: drop PBF from the advertised formats so clients fall back to JSON feature-tiles,
-// which the runtime quantizes correctly. The runtime's overridables joi allow-list only
-// permits 'JSON' or 'JSON,geojson' (metadata-defaults.js) — so PBF can only be REMOVED
-// via this field, never re-added. To re-enable PBF (e.g. once Esri forwards quantization
-// in a later release) set the per-service enablePbf parameter: we then OMIT the key
-// entirely so the runtime's own 'JSON,geojson,PBF' default applies. Never emit a string
-// containing PBF — that value fails joi validation and 500s the metadata request.
-const SUPPORTED_QUERY_FORMATS_NO_PBF = 'JSON,geojson';
-function isPbfEnabled(params) {
-  return params?.enablePbf === true || params?.enablePbf === 'true';
-}
-// Returns an object to spread into layer metadata: the no-PBF override by default, or
-// {} (key omitted → runtime default) when the service opts back into PBF.
-function supportedQueryFormatsOverride(params) {
-  return isPbfEnabled(params) ? {} : { supportedQueryFormats: SUPPORTED_QUERY_FORMATS_NO_PBF };
-}
+// supportedQueryFormats is deliberately never set: the runtime default 'JSON,geojson,PBF' applies, so clients get PBF
+// feature tiles. Verified on the 12.1.0 CDF runtime: quantized PBF tiles carry a correct transform and render the same
+// features as JSON in Map Viewer and the JS SDK, at roughly 3-9x smaller payloads. (v1.1.3-1.1.4 dropped PBF after
+// large layers drew blank in Map Viewer; that was the provider's own Web Mercator tile-geometry bug, fixed in v1.1.3,
+// not the runtime.) If it's ever needed again: the runtime's joi allow-list only accepts 'JSON' or 'JSON,geojson' —
+// a string containing PBF fails validation and 500s the metadata request.
 
 // Normalize sentinel placeholders to "absent" on req.params, so a '-' typed into an
 // inapplicable-but-required publish field behaves exactly like leaving it blank would.
@@ -141,8 +122,24 @@ const EXTENT_WAIT_MS = parseInt(process.env.CDF_EXTENT_WAIT_MS) || 10000;
 const EXTENT_RETRY_MS = parseInt(process.env.CDF_EXTENT_RETRY_MS) || 3600 * 1000;
 const EXTENT_ERROR_RETRY_MS = parseInt(process.env.CDF_EXTENT_ERROR_RETRY_MS) || 60 * 1000;
 const EXTENT_TIMED_OUT = Symbol("extent-timed-out");
+// The time extent (min/max of the time column) is usually answered from file statistics in a few seconds, but on a
+// very large table it can take longer than the metadata wait. Then the metadata goes out without it and the query keeps
+// running in the background (capped here), filling the cache for the next metadata request.
+const TIME_EXTENT_BG_MS = parseInt(process.env.CDF_TIME_EXTENT_BG_MS) || 120 * 1000;
 const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: ms }
 const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
+const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
+
+// [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / the column is all-NULL /
+// values are non-finite. Guard against SQL NULL first: an empty table or all-NULL column makes min/max return NULL,
+// and Number(null) === 0 would otherwise surface as a bogus [0, 0] (1970) time extent.
+function timeRowsToRange(rows) {
+  if (!rows || !rows.length) return null;
+  const { t0, t1 } = rows[0];
+  if (t0 == null || t1 == null) return null;
+  const n0 = Number(t0), n1 = Number(t1);
+  return Number.isFinite(n0) && Number.isFinite(n1) ? [n0, n1] : null;
+}
 
 // Graceful shutdown: release pooled connections on process exit
 // Guard with try/catch — CDF runtime manages process lifecycle
@@ -256,6 +253,116 @@ class Model {
       extentInFlight.set(cacheKey, inflight);
     }
     return inflight;
+  }
+
+  /**
+   * Resolve the layer's time extent ([startMs, endMs] of the time column) for timeInfo.timeExtent. Without it, clients
+   * like Map Viewer have no range for a time slider and request every time at once — on a multi-year table each tile
+   * then pulls every year, which is slow and saturates the CDF runtime. Same cache / de-dupe / time box as the spatial
+   * extent; resolves to [start, end] or null, never rejects.
+   */
+  async getLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
+    const cached = extentCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < cached.ttl) {
+      return cached.extent;
+    }
+    let inflight = extentInFlight.get(cacheKey);
+    if (!inflight) {
+      inflight = this._computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter)
+        .finally(() => extentInFlight.delete(cacheKey));
+      extentInFlight.set(cacheKey, inflight);
+    }
+    return inflight;
+  }
+
+  // SQL for [min,max] of the time column as epoch-ms BIGINTs. CAST to TIMESTAMP so DATE and TIMESTAMP both work;
+  // min/max is usually answered from Delta file statistics, so it's cheap even on huge tables.
+  _timeExtentQuery(sourceConfig) {
+    const col = validateFieldName(sourceConfig.timeColumn);
+    return `
+      SELECT CAST(unix_millis(CAST(min(${col}) AS TIMESTAMP)) AS BIGINT) AS t0,
+             CAST(unix_millis(CAST(max(${col}) AS TIMESTAMP)) AS BIGINT) AS t1
+      FROM ${sourceConfig.tableName}
+    `;
+  }
+
+  async _computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
+    const now = Date.now();
+    let op;
+    let timer;
+    try {
+      // Build the query (validateFieldName) inside the try: a bad timeColumn should degrade to a negative cache + null
+      // like a SQL error, not throw out of this "never rejects" method and 500 every metadata request forever.
+      const timeQuery = this._timeExtentQuery(sourceConfig);
+      op = await connection.session.executeStatement(timeQuery, {
+        runAsync: true,
+        queryTimeout: config.databricks.queryTimeout
+      });
+      const fetchP = op.fetchAll();
+      fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
+      const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
+      const rows = await Promise.race([fetchP, timedOut]);
+      if (rows === EXTENT_TIMED_OUT) {
+        // Too slow for the metadata budget. Cancel it on THIS request's connection so that connection returns to the
+        // pool clean — never released with a live operation, never shared with the next request. Then recompute in the
+        // background on a SEPARATE borrowed connection (see _backgroundTimeExtent). The negative cache entry keeps
+        // concurrent/follow-up metadata requests from each spawning their own background recompute — stamped NOW (not
+        // function entry) and given the full background cap, so it stays valid for the entire background window (the
+        // background can run until ~now+EXTENT_WAIT_MS+TIME_EXTENT_BG_MS; anchoring at entry would expire it early and
+        // let a second request start a duplicate query / clobber a fresh result).
+        this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — recomputing in the background on its own connection (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
+        try { await op.cancel(); } catch (e) { /* may already be finished */ }
+        extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: TIME_EXTENT_BG_MS + EXTENT_WAIT_MS });
+        this._backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig);
+        return null;
+      }
+      const range = timeRowsToRange(rows);
+      extentCache.set(cacheKey, { extent: range, at: now, ttl: EXTENT_CACHE_MS });
+      return range;
+    } catch (error) {
+      this.logger.warn(`Query ${requestCounter}: Failed to calculate time extent for ${sourceConfig.tableName}: ${error.message}`);
+      extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_ERROR_RETRY_MS });
+      return null;
+    } finally {
+      clearTimeout(timer);
+      if (op) {
+        try { await op.close(); } catch (e) { /* best-effort */ }
+      }
+    }
+  }
+
+  // Fire-and-forget background recompute of a slow time extent, on its OWN pooled connection — never the request's, so
+  // no live operation ever rides a connection that getData has released, and no two statements share one session.
+  // Borrows a connection, runs the min/max capped at TIME_EXTENT_BG_MS, writes the cache, and always releases.
+  _backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig) {
+    (async () => {
+      let conn, op, timer;
+      try {
+        conn = await pool.acquire();
+        op = await conn.session.executeStatement(timeQuery, {
+          runAsync: true,
+          queryTimeout: config.databricks.queryTimeout
+        });
+        const fetchP = op.fetchAll();
+        fetchP.catch(() => {}); // a cancelled op's pending fetch rejects later
+        const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
+        const rows = await Promise.race([fetchP, cap]);
+        if (rows === EXTENT_TIMED_OUT) {
+          try { await op.cancel(); } catch (e) { /* already finished */ }
+          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
+          this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
+        } else {
+          extentCache.set(cacheKey, { extent: timeRowsToRange(rows), at: Date.now(), ttl: EXTENT_CACHE_MS });
+        }
+      } catch (e) {
+        extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+        this.logger.warn(`background time extent of ${sourceConfig.tableName} failed: ${e.message}`);
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (op) { try { await op.close(); } catch (e) { /* best-effort */ } }
+        if (conn) { try { pool.release(conn); } catch (e) { /* best-effort */ } }
+      }
+    })();
   }
 
   /**
@@ -445,7 +552,15 @@ class Model {
           this.logger.info(`Query ${requestCounter}: ${sqlQuery.substring(0, 150)}...`);
 
           // Calculate extent for metadata requests (cached, time-boxed, de-duped — see getLayerExtent)
+          if (isMetadataRequest && !sourceConfig.timeColumn && !warnedNoTimeColumn.has(sourceConfig.tableName)) {
+            warnedNoTimeColumn.add(sourceConfig.tableName);
+            this.logger.warn(`${sourceConfig.tableName}: no timeColumn configured — the layer isn't time-enabled, so clients (Map Viewer) request every date in each tile. Set timeColumn for any table with more than one record per place over time.`);
+          }
           let dbExtent = null;
+          // timeInfo goes out on every response; outside metadata requests use whatever is cached, never compute
+          const timeKey = `${pool.poolLabel()}|${sourceConfig.tableName}|time|${sourceConfig.timeColumn}`;
+          const cachedTime = sourceConfig.timeColumn ? extentCache.get(timeKey) : null;
+          let dbTimeExtent = cachedTime && Date.now() - cachedTime.at < cachedTime.ttl ? cachedTime.extent : null;
           if (isMetadataRequest) {
             // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
             const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, resolvedFormat);
@@ -453,6 +568,9 @@ class Model {
             // process can't collide and serve the wrong extent (or inherit the wrong negative cache).
             const cacheKey = `${pool.poolLabel()}|${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
             dbExtent = await this.getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter);
+            if (sourceConfig.timeColumn) {
+              dbTimeExtent = await this.getLayerTimeExtent(pool, connection, timeKey, sourceConfig, requestCounter);
+            }
           }
 
           // Execute main query
@@ -512,14 +630,13 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
-            ...supportedQueryFormatsOverride(req.params),
             ...(dbExtent && { extent: dbExtent }),
             ...(sourceConfig.timeColumn && {
               timeInfo: {
                 startTimeField: sourceConfig.timeColumn,
                 endTimeField: null,
                 trackIdField: null,
-                timeExtent: null,
+                timeExtent: dbTimeExtent,
                 timeReference: null,
                 exportOptions: {
                   useTime: true,
@@ -641,7 +758,6 @@ class Model {
     return {
       idField: req?.params?.idField || 'id',
       inputCrs: parseInt(req?.params?.srid) || config.databricks.srid || 4326,
-      ...supportedQueryFormatsOverride(req?.params),
     };
   }
 
@@ -762,7 +878,6 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields,
-            ...supportedQueryFormatsOverride(req.params),
             templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)],
           };
         }
