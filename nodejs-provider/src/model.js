@@ -28,6 +28,7 @@ const {
   getGeometryFieldExpression,
   resolveGeometryFormat,
   validateIdentifier,
+  validateFieldName,
 } = require('./modules');
 const { getPool, shutdownPool } = require('./modules/connectionPool');
 const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
@@ -141,6 +142,10 @@ const EXTENT_WAIT_MS = parseInt(process.env.CDF_EXTENT_WAIT_MS) || 10000;
 const EXTENT_RETRY_MS = parseInt(process.env.CDF_EXTENT_RETRY_MS) || 3600 * 1000;
 const EXTENT_ERROR_RETRY_MS = parseInt(process.env.CDF_EXTENT_ERROR_RETRY_MS) || 60 * 1000;
 const EXTENT_TIMED_OUT = Symbol("extent-timed-out");
+// The time extent (min/max of the time column) is usually answered from file statistics in a few seconds, but on a
+// very large table it can take longer than the metadata wait. Then the metadata goes out without it and the query keeps
+// running in the background (capped here), filling the cache for the next metadata request.
+const TIME_EXTENT_BG_MS = parseInt(process.env.CDF_TIME_EXTENT_BG_MS) || 120 * 1000;
 const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: ms }
 const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
 
@@ -256,6 +261,93 @@ class Model {
       extentInFlight.set(cacheKey, inflight);
     }
     return inflight;
+  }
+
+  /**
+   * Resolve the layer's time extent ([startMs, endMs] of the time column) for timeInfo.timeExtent. Without it, clients
+   * like Map Viewer have no range for a time slider and request every time at once — on a multi-year table each tile
+   * then pulls every year, which is slow and saturates the CDF runtime. Same cache / de-dupe / time box as the spatial
+   * extent; resolves to [start, end] or null, never rejects.
+   */
+  async getLayerTimeExtent(connection, cacheKey, sourceConfig, requestCounter) {
+    const cached = extentCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < cached.ttl) {
+      return cached.extent;
+    }
+    let inflight = extentInFlight.get(cacheKey);
+    if (!inflight) {
+      inflight = this._computeLayerTimeExtent(connection, cacheKey, sourceConfig, requestCounter)
+        .finally(() => extentInFlight.delete(cacheKey));
+      extentInFlight.set(cacheKey, inflight);
+    }
+    return inflight;
+  }
+
+  async _computeLayerTimeExtent(connection, cacheKey, sourceConfig, requestCounter) {
+    const now = Date.now();
+    const col = validateFieldName(sourceConfig.timeColumn);
+    // min/max of a column is usually answered from Delta file statistics, so this is cheap even on huge tables;
+    // CAST to TIMESTAMP so DATE and TIMESTAMP columns both work
+    const timeQuery = `
+      SELECT CAST(unix_millis(CAST(min(${col}) AS TIMESTAMP)) AS BIGINT) AS t0,
+             CAST(unix_millis(CAST(max(${col}) AS TIMESTAMP)) AS BIGINT) AS t1
+      FROM ${sourceConfig.tableName}
+    `;
+    let op;
+    let timer;
+    try {
+      op = await connection.session.executeStatement(timeQuery, {
+        runAsync: true,
+        queryTimeout: config.databricks.queryTimeout
+      });
+      const fetchP = op.fetchAll();
+      fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
+      const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
+      const toRange = (rows) => {
+        const t0 = rows && rows.length ? Number(rows[0].t0) : NaN;
+        const t1 = rows && rows.length ? Number(rows[0].t1) : NaN;
+        return Number.isFinite(t0) && Number.isFinite(t1) ? [t0, t1] : null;
+      };
+      const rows = await Promise.race([fetchP, timedOut]);
+      if (rows === EXTENT_TIMED_OUT) {
+        // Serve this metadata without it, but let the query finish in the background (capped) and fill the cache.
+        // Until then a short negative entry keeps later metadata requests from starting a second copy.
+        this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — finishing in the background (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
+        extentCache.set(cacheKey, { extent: null, at: now, ttl: TIME_EXTENT_BG_MS });
+        const bgOp = op;
+        op = null; // the background handler owns it now (finally must not close it)
+        let bgTimer;
+        const cap = new Promise((resolve) => { bgTimer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
+        Promise.race([fetchP, cap]).then(async (late) => {
+          clearTimeout(bgTimer);
+          if (late === EXTENT_TIMED_OUT) {
+            try { await bgOp.cancel(); } catch (e) { /* already finished */ }
+            extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
+            this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
+          } else {
+            extentCache.set(cacheKey, { extent: toRange(late), at: Date.now(), ttl: EXTENT_CACHE_MS });
+          }
+        }).catch(() => {
+          clearTimeout(bgTimer);
+          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+        }).finally(async () => {
+          try { await bgOp.close(); } catch (e) { /* best-effort */ }
+        });
+        return null;
+      }
+      const range = toRange(rows);
+      extentCache.set(cacheKey, { extent: range, at: now, ttl: EXTENT_CACHE_MS });
+      return range;
+    } catch (error) {
+      this.logger.warn(`Query ${requestCounter}: Failed to calculate time extent for ${sourceConfig.tableName}: ${error.message}`);
+      extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_ERROR_RETRY_MS });
+      return null;
+    } finally {
+      clearTimeout(timer);
+      if (op) {
+        try { await op.close(); } catch (e) { /* best-effort */ }
+      }
+    }
   }
 
   /**
@@ -446,6 +538,10 @@ class Model {
 
           // Calculate extent for metadata requests (cached, time-boxed, de-duped — see getLayerExtent)
           let dbExtent = null;
+          // timeInfo goes out on every response; outside metadata requests use whatever is cached, never compute
+          const timeKey = `${pool.poolLabel()}|${sourceConfig.tableName}|time|${sourceConfig.timeColumn}`;
+          const cachedTime = sourceConfig.timeColumn ? extentCache.get(timeKey) : null;
+          let dbTimeExtent = cachedTime && Date.now() - cachedTime.at < cachedTime.ttl ? cachedTime.extent : null;
           if (isMetadataRequest) {
             // Handle all geometry formats (WKT, WKB, GeoJSON, native GEOMETRY)
             const geomExpression = getGeometryFieldExpression(sourceConfig.geometryColumn, sourceConfig.dbWKID, resolvedFormat);
@@ -453,6 +549,9 @@ class Model {
             // process can't collide and serve the wrong extent (or inherit the wrong negative cache).
             const cacheKey = `${pool.poolLabel()}|${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
             dbExtent = await this.getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter);
+            if (sourceConfig.timeColumn) {
+              dbTimeExtent = await this.getLayerTimeExtent(connection, timeKey, sourceConfig, requestCounter);
+            }
           }
 
           // Execute main query
@@ -519,7 +618,7 @@ class Model {
                 startTimeField: sourceConfig.timeColumn,
                 endTimeField: null,
                 trackIdField: null,
-                timeExtent: null,
+                timeExtent: dbTimeExtent,
                 timeReference: null,
                 exportOptions: {
                   useTime: true,
