@@ -91,7 +91,8 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
 
   if (where) {
     checkWhereClauseSafety(where);
-    whereClauses.push(where);
+    // Parenthesized so the filters ANDed on below can't be split by an OR in the client's clause
+    whereClauses.push(`(${where})`);
   }
 
   if (objectIds) {
