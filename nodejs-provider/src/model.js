@@ -130,6 +130,13 @@ const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: 
 const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
 
+// [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / values are non-finite.
+function timeRowsToRange(rows) {
+  const t0 = rows && rows.length ? Number(rows[0].t0) : NaN;
+  const t1 = rows && rows.length ? Number(rows[0].t1) : NaN;
+  return Number.isFinite(t0) && Number.isFinite(t1) ? [t0, t1] : null;
+}
+
 // Graceful shutdown: release pooled connections on process exit
 // Guard with try/catch — CDF runtime manages process lifecycle
 try {
@@ -250,30 +257,34 @@ class Model {
    * then pulls every year, which is slow and saturates the CDF runtime. Same cache / de-dupe / time box as the spatial
    * extent; resolves to [start, end] or null, never rejects.
    */
-  async getLayerTimeExtent(connection, cacheKey, sourceConfig, requestCounter) {
+  async getLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
     const cached = extentCache.get(cacheKey);
     if (cached && Date.now() - cached.at < cached.ttl) {
       return cached.extent;
     }
     let inflight = extentInFlight.get(cacheKey);
     if (!inflight) {
-      inflight = this._computeLayerTimeExtent(connection, cacheKey, sourceConfig, requestCounter)
+      inflight = this._computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter)
         .finally(() => extentInFlight.delete(cacheKey));
       extentInFlight.set(cacheKey, inflight);
     }
     return inflight;
   }
 
-  async _computeLayerTimeExtent(connection, cacheKey, sourceConfig, requestCounter) {
-    const now = Date.now();
+  // SQL for [min,max] of the time column as epoch-ms BIGINTs. CAST to TIMESTAMP so DATE and TIMESTAMP both work;
+  // min/max is usually answered from Delta file statistics, so it's cheap even on huge tables.
+  _timeExtentQuery(sourceConfig) {
     const col = validateFieldName(sourceConfig.timeColumn);
-    // min/max of a column is usually answered from Delta file statistics, so this is cheap even on huge tables;
-    // CAST to TIMESTAMP so DATE and TIMESTAMP columns both work
-    const timeQuery = `
+    return `
       SELECT CAST(unix_millis(CAST(min(${col}) AS TIMESTAMP)) AS BIGINT) AS t0,
              CAST(unix_millis(CAST(max(${col}) AS TIMESTAMP)) AS BIGINT) AS t1
       FROM ${sourceConfig.tableName}
     `;
+  }
+
+  async _computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
+    const now = Date.now();
+    const timeQuery = this._timeExtentQuery(sourceConfig);
     let op;
     let timer;
     try {
@@ -284,39 +295,19 @@ class Model {
       const fetchP = op.fetchAll();
       fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
-      const toRange = (rows) => {
-        const t0 = rows && rows.length ? Number(rows[0].t0) : NaN;
-        const t1 = rows && rows.length ? Number(rows[0].t1) : NaN;
-        return Number.isFinite(t0) && Number.isFinite(t1) ? [t0, t1] : null;
-      };
       const rows = await Promise.race([fetchP, timedOut]);
       if (rows === EXTENT_TIMED_OUT) {
-        // Serve this metadata without it, but let the query finish in the background (capped) and fill the cache.
-        // Until then a short negative entry keeps later metadata requests from starting a second copy.
-        this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — finishing in the background (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
+        // Too slow for the metadata budget. Cancel it on THIS request's connection so that connection returns to the
+        // pool clean — never released with a live operation, never shared with the next request. Then recompute in the
+        // background on a SEPARATE borrowed connection (see _backgroundTimeExtent). A short negative cache entry keeps
+        // concurrent/follow-up metadata requests from each spawning their own background recompute.
+        this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — recomputing in the background on its own connection (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
+        try { await op.cancel(); } catch (e) { /* may already be finished */ }
         extentCache.set(cacheKey, { extent: null, at: now, ttl: TIME_EXTENT_BG_MS });
-        const bgOp = op;
-        op = null; // the background handler owns it now (finally must not close it)
-        let bgTimer;
-        const cap = new Promise((resolve) => { bgTimer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
-        Promise.race([fetchP, cap]).then(async (late) => {
-          clearTimeout(bgTimer);
-          if (late === EXTENT_TIMED_OUT) {
-            try { await bgOp.cancel(); } catch (e) { /* already finished */ }
-            extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
-            this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
-          } else {
-            extentCache.set(cacheKey, { extent: toRange(late), at: Date.now(), ttl: EXTENT_CACHE_MS });
-          }
-        }).catch(() => {
-          clearTimeout(bgTimer);
-          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
-        }).finally(async () => {
-          try { await bgOp.close(); } catch (e) { /* best-effort */ }
-        });
+        this._backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig);
         return null;
       }
-      const range = toRange(rows);
+      const range = timeRowsToRange(rows);
       extentCache.set(cacheKey, { extent: range, at: now, ttl: EXTENT_CACHE_MS });
       return range;
     } catch (error) {
@@ -329,6 +320,40 @@ class Model {
         try { await op.close(); } catch (e) { /* best-effort */ }
       }
     }
+  }
+
+  // Fire-and-forget background recompute of a slow time extent, on its OWN pooled connection — never the request's, so
+  // no live operation ever rides a connection that getData has released, and no two statements share one session.
+  // Borrows a connection, runs the min/max capped at TIME_EXTENT_BG_MS, writes the cache, and always releases.
+  _backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig) {
+    (async () => {
+      let conn, op, timer;
+      try {
+        conn = await pool.acquire();
+        op = await conn.session.executeStatement(timeQuery, {
+          runAsync: true,
+          queryTimeout: config.databricks.queryTimeout
+        });
+        const fetchP = op.fetchAll();
+        fetchP.catch(() => {}); // a cancelled op's pending fetch rejects later
+        const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
+        const rows = await Promise.race([fetchP, cap]);
+        if (rows === EXTENT_TIMED_OUT) {
+          try { await op.cancel(); } catch (e) { /* already finished */ }
+          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
+          this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
+        } else {
+          extentCache.set(cacheKey, { extent: timeRowsToRange(rows), at: Date.now(), ttl: EXTENT_CACHE_MS });
+        }
+      } catch (e) {
+        extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+        this.logger.warn(`background time extent of ${sourceConfig.tableName} failed: ${e.message}`);
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (op) { try { await op.close(); } catch (e) { /* best-effort */ } }
+        if (conn) { try { pool.release(conn); } catch (e) { /* best-effort */ } }
+      }
+    })();
   }
 
   /**
@@ -535,7 +560,7 @@ class Model {
             const cacheKey = `${pool.poolLabel()}|${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
             dbExtent = await this.getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter);
             if (sourceConfig.timeColumn) {
-              dbTimeExtent = await this.getLayerTimeExtent(connection, timeKey, sourceConfig, requestCounter);
+              dbTimeExtent = await this.getLayerTimeExtent(pool, connection, timeKey, sourceConfig, requestCounter);
             }
           }
 

@@ -7,6 +7,8 @@ const proxyquire = require("proxyquire").noCallThru();
 let timeCalls = 0;
 let timeSlowMs = 0;
 let timeFails = false;
+let acquireCount = 0; // connections borrowed from the pool (request + any background recompute)
+let releaseCount = 0; // connections returned to the pool
 const T0 = 1420070400000; // 2015-01-01
 const T1 = 1735689599000; // 2024-12-31 23:59:59
 const point = '{"type":"Point","coordinates":[-77,38]}';
@@ -14,29 +16,32 @@ const point = '{"type":"Point","coordinates":[-77,38]}';
 const connectionPoolStub = {
   getPool: () => ({
     poolLabel: () => "test-pool",
-    acquire: async () => ({
-      id: "test-conn",
-      session: {
-        executeStatement: async (sql) => {
-          const isTime = /unix_millis/.test(sql);
-          if (isTime) timeCalls++;
-          return {
-            fetchAll: async () => {
-              if (/^\s*DESCRIBE/i.test(sql) || /ST_Envelope_Agg/.test(sql)) return [];
-              if (isTime) {
-                if (timeFails) throw new Error("boom");
-                if (timeSlowMs) await new Promise((r) => setTimeout(r, timeSlowMs));
-                return [{ t0: String(T0), t1: String(T1) }]; // the driver returns BIGINT as strings
-              }
-              return [{ id: 1, geometry: point }];
-            },
-            cancel: async () => {},
-            close: async () => {},
-          };
+    acquire: async () => {
+      acquireCount++;
+      return {
+        id: `test-conn-${acquireCount}`,
+        session: {
+          executeStatement: async (sql) => {
+            const isTime = /unix_millis/.test(sql);
+            if (isTime) timeCalls++;
+            return {
+              fetchAll: async () => {
+                if (/^\s*DESCRIBE/i.test(sql) || /ST_Envelope_Agg/.test(sql)) return [];
+                if (isTime) {
+                  if (timeFails) throw new Error("boom");
+                  if (timeSlowMs) await new Promise((r) => setTimeout(r, timeSlowMs));
+                  return [{ t0: String(T0), t1: String(T1) }]; // the driver returns BIGINT as strings
+                }
+                return [{ id: 1, geometry: point }];
+              },
+              cancel: async () => {},
+              close: async () => {},
+            };
+          },
         },
-      },
-    }),
-    release: () => {},
+      };
+    },
+    release: () => { releaseCount++; },
   }),
   shutdownPool: async () => {},
   getAllPoolStats: () => [],
@@ -73,7 +78,7 @@ describe("Lakehouse metadata time extent", function () {
   });
 
   beforeEach(() => {
-    timeCalls = 0; timeSlowMs = 0; timeFails = false;
+    timeCalls = 0; timeSlowMs = 0; timeFails = false; acquireCount = 0; releaseCount = 0;
     Model._extentCache.clear();
   });
 
@@ -100,15 +105,20 @@ describe("Lakehouse metadata time extent", function () {
     expect(timeCalls).to.equal(1);
   });
 
-  it("when slow, answers without it, finishes in the background, and the next request has it", async () => {
+  it("when slow, answers without it, recomputes in the background on its OWN connection, and the next request has it", async () => {
     timeSlowMs = 300; // longer than the 50 ms wait, shorter than the 2 s background cap
     const model = new Model();
     const first = await getData(model, req("catalog.schema.big"));
     expect(first.metadata.timeInfo.timeExtent).to.equal(null);
-    await sleep(400);
+    await sleep(400); // the background recompute (own connection) finishes and fills the cache
+    // Foreground timed out on the request's connection; a fresh background query ran on a separate borrowed
+    // connection (so no live op ever rides the request's released connection, and no two statements share a session).
+    expect(timeCalls).to.equal(2);
+    expect(acquireCount).to.equal(2); // one for the request, one dedicated to the background recompute
+    expect(releaseCount).to.equal(2); // both were returned to the pool
     const second = await getData(model, req("catalog.schema.big"));
     expect(second.metadata.timeInfo.timeExtent).to.deep.equal([T0, T1]);
-    expect(timeCalls).to.equal(1); // the background query was reused, not restarted
+    expect(timeCalls).to.equal(2); // second request served from cache, no new query
   });
 
   it("has no timeInfo at all when no time column is configured", async () => {
