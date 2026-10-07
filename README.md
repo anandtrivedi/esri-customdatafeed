@@ -249,7 +249,7 @@ Restart ArcGIS Server after editing it. Credentials stay in `.databrickscfg`, no
 <details>
 <summary><b>Optional tuning knobs & admin-token binding (requestip vs referer)</b></summary>
 
-Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABRICKS_QUERY_TIMEOUT`, `DATABRICKS_USE_CLOUDFETCH`, `DATABRICKS_TILE_QUERY_TIMEOUT`, `ENABLE_AUDIT_LOG`, pool sizes — see [Environment Variables](#reference).
+Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABRICKS_QUERY_TIMEOUT`, `DATABRICKS_USE_CLOUDFETCH`, `DATABRICKS_TILE_QUERY_TIMEOUT`, `DATABRICKS_MAX_RETURN_IDS`, `ENABLE_AUDIT_LOG`, pool sizes — see [Environment Variables](#reference).
 
 **Admin-token binding:** `client=requestip` (used throughout this guide) ties the token to your IP — no `Referer` header on admin calls, simplest on the box. `client=referer` ties it to a URL and **every** admin call must send a matching `Referer` header (mismatch → `HTTP 498`). Note: a feature-service `/query` validates more strictly and may reject a `requestip` token — query it with a `referer`-bound token **plus** a matching `Referer` header (the publish wizard does this for its verify step).
 
@@ -497,6 +497,7 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
 | `DATABRICKS_USE_CLOUDFETCH` (`false`) | `true` lets the driver download large results from presigned cloud-storage URLs. Leave off unless the ArcGIS host can reach the workspace's storage bucket: a refused download (403) crashed the whole CDF process with @databricks/sql 1.12.0. Results come back inline when off; CDF pages are far below the size where that matters. |
 | `DATABRICKS_TILE_QUERY_TIMEOUT` (`30000`) | Cancel a feature-tile query (`resultType=tile`) after this many ms; `0` disables. ArcGIS Server doesn't pass a browser's abort to the CDF, so an abandoned tile otherwise runs until the statement timeout. Sessions also get a warehouse-enforced `STATEMENT_TIMEOUT` from `DATABRICKS_QUERY_TIMEOUT` (`120000`). |
+| `DATABRICKS_MAX_RETURN_IDS` (`500000`) | Ceiling on how many object ids a `returnIdsOnly` request may return. Such requests carry no page limit (clients expect every matching id), so on a very large table they can return millions of ids inline — with CloudFetch off, that memory lands in the CDF process. If a request would exceed this, it **errors** (asking the caller to narrow the query with `where`/`time`/`geometry`) rather than returning a truncated, wrong id set. Raise it if a box has memory to spare and genuinely needs larger selections; set `0` to disable the ceiling. |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
 | `ENABLE_USER_AUTH` / `ENABLE_AUDIT_LOG` / `DATABRICKS_API_SSL_VERIFY` | Security |
 

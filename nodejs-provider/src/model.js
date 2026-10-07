@@ -59,7 +59,25 @@ const config = {
     // Feature-tile queries (resultType=tile) are cancelled after this many ms; 0 disables. ArcGIS Server doesn't pass a
     // browser's abort through to the CDF, so an abandoned tile otherwise runs to the session STATEMENT_TIMEOUT (default
     // 2 min) while holding a pool connection. Tiles are a drawing sample, so failing one fast is the better trade.
-    tileQueryTimeout: parseInt(process.env.DATABRICKS_TILE_QUERY_TIMEOUT ?? '30000', 10)
+    tileQueryTimeout: parseInt(process.env.DATABRICKS_TILE_QUERY_TIMEOUT ?? '30000', 10),
+    // returnIdsOnly must return ALL matching object ids (clients page through them), so it carries no row limit.
+    // On a huge table an unbounded ids-only query can return millions of ids inline (seen: 1.95M ids / ~559 MB RSS),
+    // which — now that CloudFetch is off — all lands in the CDF process and can exhaust its memory. This is a hard
+    // ceiling: the query fetches at most this many ids, and if the result would exceed it the request ERRORS (rather
+    // than silently returning a truncated, wrong id set) telling the caller to narrow the query or raise the limit.
+    // Set DATABRICKS_MAX_RETURN_IDS to the largest id set this box's memory can hold; 0 disables the ceiling.
+    // Fail safe: a malformed value (NaN, negative) falls back to the default rather than silently disabling the
+    // ceiling (fail-open), which would reintroduce the very OOM risk this guards against.
+    maxReturnIds: (() => {
+      const raw = process.env.DATABRICKS_MAX_RETURN_IDS;
+      if (raw === undefined || raw === '') return 500000;
+      const n = parseInt(raw, 10);
+      if (!Number.isInteger(n) || n < 0) {
+        console.warn(`[CDF] Invalid DATABRICKS_MAX_RETURN_IDS="${raw}"; using default 500000 (a non-negative integer; 0 disables the ceiling).`);
+        return 500000;
+      }
+      return n;
+    })()
   }
 };
 
@@ -603,7 +621,8 @@ class Model {
             sourceConfig.dbWKID,
             fetchSize,
             resolvedFormat,
-            sourceConfig.timeColumn
+            sourceConfig.timeColumn,
+            config.databricks.maxReturnIds
           );
 
           // The time and objectIds filters come after the (long) geometry filter, so a plain prefix hid them; log the
@@ -660,6 +679,20 @@ class Model {
           queryOperation = null;
 
           this.logger.info(`Query ${requestCounter}: Received ${rows.length} rows`);
+
+          // returnIdsOnly is fetched with LIMIT maxReturnIds + 1 (see buildSqlQuery). If we got the extra row the id
+          // set is larger than the ceiling; return an actionable error rather than a silently-truncated (wrong) set.
+          const idCeiling = config.databricks.maxReturnIds;
+          if (geoserviceParams.returnIdsOnly && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
+            this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
+            const tooMany = new Error(
+              `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` +
+              `Narrow the request with where / time / geometry filters, or raise the DATABRICKS_MAX_RETURN_IDS ` +
+              `environment variable on the server (set it to 0 to disable the ceiling).`
+            );
+            tooMany.code = 400; // client should narrow the query — a 4xx, not a generic server error
+            return respond(tooMany);
+          }
 
           // Initialize GeoJSON response
           let geojson = { type: "FeatureCollection", features: [] };

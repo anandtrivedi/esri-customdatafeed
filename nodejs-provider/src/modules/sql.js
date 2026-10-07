@@ -22,7 +22,8 @@ function buildSqlQuery(
   dbWKID,
   fetchSize,
   geometryFormat = null,
-  timeColumn = null
+  timeColumn = null,
+  maxReturnIds = 0
 ) {
   const {
     where,
@@ -95,11 +96,16 @@ function buildSqlQuery(
   // Build DISTINCT clause
   const distinctClause = returnDistinctValues ? `DISTINCT ` : "";
 
-  // Build LIMIT and OFFSET clauses
-  const limitClause =
-    fetchSize && !returnIdsOnly && !returnDistinctValues
-      ? ` LIMIT ${fetchSize + 1}`
-      : "";
+  // Build LIMIT and OFFSET clauses.
+  // returnIdsOnly carries no page LIMIT (clients expect every matching id), but on a huge table that can pull millions
+  // of ids inline. A positive maxReturnIds bounds the fetch to maxReturnIds + 1 rows — the caller (model.js) detects
+  // the extra row and errors rather than returning a truncated id set. 0/absent keeps the old unbounded behaviour.
+  let limitClause = "";
+  if (returnIdsOnly && !returnCountOnly) {
+    limitClause = maxReturnIds > 0 ? ` LIMIT ${maxReturnIds + 1}` : "";
+  } else if (fetchSize && !returnIdsOnly && !returnDistinctValues) {
+    limitClause = ` LIMIT ${fetchSize + 1}`;
+  }
   const sanitizedOffset = resultOffset ? validateInteger(resultOffset, 0) : 0;
   const offsetClause =
     sanitizedOffset && !returnIdsOnly ? ` OFFSET ${sanitizedOffset}` : "";
@@ -221,7 +227,9 @@ function buildTimeFilter(timeParam, timeColumn) {
   // either end ("null,t2" / "t1,null"). Map Viewer's time slider sends an instant in instant mode. This used to accept
   // only "t1,t2": an instant parsed as NaN, the filter was dropped, and the query scanned all of history.
   // An unreadable value is an error rather than "no filter", for the same reason.
-  const sanitizedColumn = timeColumn.replace(/[^a-zA-Z0-9_]/g, "");
+  // Fail closed on a misconfigured timeColumn (shared validator) rather than silently stripping characters into a
+  // different column name, matching how outFields are sanitized above.
+  const sanitizedColumn = validateFieldName(timeColumn);
   const toIso = (raw) => {
     const v = String(raw).trim();
     if (v === "" || v.toLowerCase() === "null") return null;

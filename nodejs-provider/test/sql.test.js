@@ -10,6 +10,7 @@ describe("sql", () => {
     fetchSize: 2000,
     geometryFormat: "GEOMETRY",
     timeColumn: null,
+    maxReturnIds: 0,
   };
 
   function build(geoParams, overrides = {}) {
@@ -22,7 +23,8 @@ describe("sql", () => {
       args.dbWKID,
       args.fetchSize,
       args.geometryFormat,
-      args.timeColumn
+      args.timeColumn,
+      args.maxReturnIds
     );
   }
 
@@ -260,6 +262,37 @@ describe("sql", () => {
     it("should not add time filter without timeColumn", () => {
       const sql = build({ time: "1704067200000,1704153600000" });
       expect(sql).to.not.include(">=");
+    });
+
+    it("rejects a malformed timeColumn via the shared validator instead of silently stripping it", () => {
+      // Previously the column was run through a private /[^a-zA-Z0-9_]/ strip, which could mutate a misconfigured
+      // name into a different valid-looking column. It now fails closed through validateFieldName.
+      expect(() => build({ time: "1704067200000" }, { timeColumn: "base;DROP" })).to.throw(/Invalid field name/);
+      // a normal column still works and is interpolated verbatim
+      expect(build({ time: "1704067200000" }, { timeColumn: "base_datetime" })).to.include("base_datetime = '");
+    });
+  });
+
+  describe("returnIdsOnly ceiling", () => {
+    it("bounds a returnIdsOnly query to maxReturnIds + 1 so an over-ceiling result can be detected", () => {
+      const sql = build({ returnIdsOnly: true }, { maxReturnIds: 500000 });
+      expect(sql).to.include("LIMIT 500001");
+    });
+
+    it("leaves returnIdsOnly unbounded when the ceiling is disabled (maxReturnIds = 0)", () => {
+      const sql = build({ returnIdsOnly: true }, { maxReturnIds: 0 });
+      expect(sql).to.not.include("LIMIT");
+    });
+
+    it("does not apply the id ceiling to a normal feature query (still LIMIT fetchSize + 1)", () => {
+      const sql = build({ outFields: "*" }, { maxReturnIds: 500000, fetchSize: 2000 });
+      expect(sql).to.include("LIMIT 2001");
+    });
+
+    it("does not add the id ceiling LIMIT to a returnIdsOnly + returnCountOnly (count) request", () => {
+      const sql = build({ returnIdsOnly: true, returnCountOnly: true }, { maxReturnIds: 500000 });
+      expect(sql).to.include("COUNT(1)");
+      expect(sql).to.not.include("LIMIT 500001");
     });
   });
 });

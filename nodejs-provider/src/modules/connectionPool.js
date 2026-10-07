@@ -106,6 +106,9 @@ class DatabricksConnectionPool {
       return connection;
     } catch (error) {
       console.error(`[Pool ${this.poolLabel()}] Failed to create connection:`, error.message);
+      // connect() may have already succeeded before openSession() threw (e.g. a bad STATEMENT_TIMEOUT or a transient
+      // session-open error). Close the client so a connected-but-sessionless socket isn't leaked on every failed open.
+      try { await client.close(); } catch (closeErr) { /* client may be unconnected; nothing to close */ }
       throw error;
     }
   }
