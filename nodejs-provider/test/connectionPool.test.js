@@ -203,4 +203,21 @@ describe('connectionPool', () => {
       await cp.shutdownPool();
     });
   });
+
+  describe('new connections are checked out before they join the pool', () => {
+    it('a connection created for acquire() is already inUse when it is pushed to the pool', async () => {
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: class {
+        async connect() {} async openSession() { return { close: async () => {} }; } async close() {} } } });
+      const ws = { workspaceAlias: 'R', hostname: 'r.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/r', { min: 0, max: 2 });
+      const seenAtPush = [];
+      const push = pool.pool.push.bind(pool.pool);
+      pool.pool.push = (c) => { seenAtPush.push(c.inUse); return push(c); };
+      const c = await pool.acquire();
+      expect(seenAtPush).to.deep.equal([true]); // visible to other acquires only once it's taken
+      expect(c.inUse).to.equal(true);
+      pool.release(c);
+      await cp.shutdownPool();
+    });
+  });
 });

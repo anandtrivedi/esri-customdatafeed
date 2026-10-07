@@ -7,7 +7,7 @@ const proxyquire = require("proxyquire").noCallThru().noPreserveCache();
 
 const point = '{"type":"Point","coordinates":[-77,38]}';
 let log;
-function harness({ acquireDelayMs = 0 } = {}) {
+function harness({ acquireDelayMs = 0, fetchMs = 300, cancelFails = false } = {}) {
   log = { executed: 0, cancelled: 0, released: [] };
   const pool = {
     poolLabel: () => "test-pool",
@@ -20,10 +20,10 @@ function harness({ acquireDelayMs = 0 } = {}) {
             if (/^\s*DESCRIBE/i.test(sql)) return { fetchAll: async () => [], close: async () => {} };
             log.executed++;
             let rejectFetch;
-            const fetchP = new Promise((resolve, reject) => { rejectFetch = reject; setTimeout(() => resolve([{ id: 1, geometry: point }]), 300); });
+            const fetchP = new Promise((resolve, reject) => { rejectFetch = reject; setTimeout(() => resolve([{ id: 1, geometry: point }]), fetchMs); });
             return {
               fetchAll: () => fetchP,
-              cancel: async () => { log.cancelled++; rejectFetch(new Error("Operation canceled")); },
+              cancel: async () => { log.cancelled++; if (cancelFails) throw new Error("cancel RPC failed"); rejectFetch(new Error("Operation canceled")); },
               close: async () => {},
             };
           },
@@ -39,10 +39,10 @@ function harness({ acquireDelayMs = 0 } = {}) {
     dotenv: { config: () => {} },
   });
 }
-const mkReq = () => {
+const mkReq = (query = {}) => {
   const res = new EventEmitter(); res.writableEnded = false;
   // a data request (not metadata) so only the main query runs
-  return { res, req: { res, query: { f: "json", where: "1=1", outFields: "*", resultRecordCount: 10 }, params: { tableName: "c.s.t", geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY" }, ip: "127.0.0.1" } };
+  return { res, req: { res, query: { f: "json", where: "1=1", outFields: "*", resultRecordCount: 10, ...query }, params: { tableName: "c.s.t", geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY" }, ip: "127.0.0.1" } };
 };
 const run = (Model, req) => new Promise((resolve) => new Model().getData(req, (err, data) => resolve({ err, data })));
 
@@ -91,5 +91,54 @@ describe("client goes away", function () {
     const { req } = mkReq(); delete req.res;
     const { err } = await run(Model, req);
     expect(err).to.equal(null);
+  });
+});
+
+describe("tile query timeout and single response", function () {
+  before(() => {
+    process.env.DATABRICKS_SERVER_HOSTNAME = "h"; process.env.DATABRICKS_HTTP_PATH = "/p"; process.env.DATABRICKS_ACCESS_TOKEN = "t";
+    process.env.ENABLE_AUDIT_LOG = "false"; process.env.ENABLE_USER_AUTH = "false"; process.env.ENABLE_SIMPLE_AUTH = "false";
+    process.env.DATABRICKS_TILE_QUERY_TIMEOUT = "60"; // ms, read when model.js loads
+  });
+  after(() => { delete process.env.DATABRICKS_TILE_QUERY_TIMEOUT; });
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+
+  it("cancels a tile query that runs past DATABRICKS_TILE_QUERY_TIMEOUT and reuses the connection", async () => {
+    const Model = harness({ fetchMs: 500 });
+    const { req } = mkReq({ resultType: "tile" });
+    const { err } = await run(Model, req);
+    await settle();
+    expect(err.message).to.match(/Tile query cancelled: tile query over/);
+    expect(log.cancelled).to.equal(1);
+    expect(log.released).to.deep.equal(["released"]);
+  });
+
+  it("doesn't apply the tile timeout to non-tile queries", async () => {
+    const Model = harness({ fetchMs: 150 });
+    const { req } = mkReq();
+    const { err, data } = await run(Model, req);
+    expect(err).to.equal(null);
+    expect(data.features).to.have.lengthOf(1);
+    expect(log.cancelled).to.equal(0);
+  });
+
+  it("destroys the session when our cancel itself fails", async () => {
+    const Model = harness({ fetchMs: 200, cancelFails: true });
+    const { req } = mkReq({ resultType: "tile" });
+    const { err } = await run(Model, req);
+    await settle();
+    expect(err).to.be.an("error");
+    expect(log.released).to.deep.equal(["destroyed"]);
+  });
+
+  it("answers once even if the callback throws", async () => {
+    const Model = harness({ fetchMs: 10 });
+    const { req } = mkReq();
+    let calls = 0;
+    await new Promise((resolve) => {
+      new Model().getData(req, () => { calls++; setTimeout(resolve, 50); throw new Error("socket gone"); });
+    });
+    expect(calls).to.equal(1);
+    expect(log.released).to.deep.equal(["released"]);
   });
 });

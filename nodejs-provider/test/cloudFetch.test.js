@@ -101,3 +101,30 @@ describe("CloudFetch is off by default on every statement", function () {
     });
   }
 });
+
+describe("minScale service parameter", function () {
+  before(() => {
+    process.env.DATABRICKS_SERVER_HOSTNAME = "test-host.databricks.com";
+    process.env.DATABRICKS_HTTP_PATH = "/sql/1.0/endpoints/test";
+    process.env.DATABRICKS_ACCESS_TOKEN = "test-token";
+  });
+  const meta = async (minScale) => {
+    const Model = loadModel();
+    const r = req(); if (minScale !== undefined) r.params.minScale = minScale;
+    return (await getData(new Model(), r)).metadata;
+  };
+
+  it("advertises minScale in layer metadata from a zoom level or a scale", async () => {
+    expect((await meta("zoom 11")).minScale).to.equal(288895);
+    expect((await meta("577791")).minScale).to.equal(577791);
+  });
+
+  it("omits minScale when unset or '-'", async () => {
+    expect(await meta()).to.not.have.property("minScale");
+    expect(await meta("-")).to.not.have.property("minScale");
+  });
+
+  it("ignores a malformed minScale instead of failing the request", async () => {
+    expect(await meta("very far")).to.not.have.property("minScale");
+  });
+});

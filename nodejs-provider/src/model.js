@@ -29,6 +29,7 @@ const {
   resolveGeometryFormat,
   validateIdentifier,
   validateFieldName,
+  parseMinScale,
 } = require('./modules');
 const { getPool, shutdownPool } = require('./modules/connectionPool');
 const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
@@ -54,7 +55,11 @@ const config = {
     // In @databricks/sql 1.12.0 a failed download (e.g. 403) is caught for the request, but the driver's other
     // concurrent downloads reject unhandled and Node exits the whole CDF process. Off by default: results come back
     // inline over the warehouse connection. Set DATABRICKS_USE_CLOUDFETCH=true only where the host can reach storage.
-    useCloudFetch: /^(1|true|yes)$/i.test(process.env.DATABRICKS_USE_CLOUDFETCH || '')
+    useCloudFetch: /^(1|true|yes)$/i.test(process.env.DATABRICKS_USE_CLOUDFETCH || ''),
+    // Feature-tile queries (resultType=tile) are cancelled after this many ms; 0 disables. ArcGIS Server doesn't pass a
+    // browser's abort through to the CDF, so an abandoned tile otherwise runs to the session STATEMENT_TIMEOUT (default
+    // 2 min) while holding a pool connection. Tiles are a drawing sample, so failing one fast is the better trade.
+    tileQueryTimeout: parseInt(process.env.DATABRICKS_TILE_QUERY_TIMEOUT ?? '30000', 10)
   }
 };
 
@@ -85,7 +90,7 @@ function cleanParam(value) {
 const SERVICE_PARAM_KEYS = [
   'workspace', 'warehouseHttpPath', 'tableName', 'geometryColumn', 'idField',
   'geometryFormat', 'timeColumn', 'lakebaseHost', 'lakebasePort', 'lakebaseDatabase',
-  'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled',
+  'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled', 'minScale',
 ];
 
 // supportedQueryFormats is deliberately never set: the runtime default 'JSON,geojson,PBF' applies, so clients get PBF
@@ -97,6 +102,18 @@ const SERVICE_PARAM_KEYS = [
 
 // Normalize sentinel placeholders to "absent" on req.params, so a '-' typed into an
 // inapplicable-but-required publish field behaves exactly like leaving it blank would.
+// minScale is a display hint: a malformed value is logged once and ignored rather than failing the service.
+const warnedMinScale = new Set();
+function minScaleFor(req, logger) {
+  try {
+    return parseMinScale(req.params.minScale);
+  } catch (e) {
+    const key = `${req.params.tableName}|${req.params.minScale}`;
+    if (!warnedMinScale.has(key)) { warnedMinScale.add(key); logger.warn(`${req.params.tableName}: ${e.message}; ignoring it`); }
+    return null;
+  }
+}
+
 function normalizeServiceParams(req) {
   if (!req || !req.params) return;
   for (const key of SERVICE_PARAM_KEYS) {
@@ -484,6 +501,7 @@ class Model {
       timeColumn: req.params.timeColumn || null,
       dbWKID: parseInt(req.params.srid) || config.databricks.srid || 4326,
       maxRecordCountPerPage: parseInt(req.params.maxRecordCount) || config.databricks.maxRecordCount || 2000,
+      minScale: minScaleFor(req, this.logger),
       name: req.params.tableName ? req.params.tableName.split('.').pop() : 'DatabricksLayer',
       description: `Databricks table: ${req.params.tableName}`
     };
@@ -533,6 +551,15 @@ class Model {
     };
     if (res && typeof res.once === 'function') res.once('close', markClientGone);
     const stopWatchingClient = () => { if (res && typeof res.off === 'function') res.off('close', markClientGone); };
+    // Answer exactly once: a callback that throws (e.g. writing to a dead socket) must not trigger a second callback
+    // from the catch below.
+    let responded = false;
+    const respond = (err, data) => {
+      if (responded) return;
+      responded = true;
+      try { callback(err, data); } catch (e) { this.logger.error(`Query ${requestCounter}: response callback threw: ${e.message}`); }
+    };
+    const isTile = String(geoserviceParams.resultType || '').toLowerCase() === 'tile';
 
     // Acquire connection and execute query
     pool.acquire()
@@ -540,12 +567,14 @@ class Model {
         connection = conn;
         let queryOperation;
         let queryFailed = false;
+        let cancelReason = null; // set when we cancel the statement ourselves (client gone, tile timeout)
+        let cancelP = null;      // resolves true if that cancel succeeded
 
         if (clientGone) {
           stopWatchingClient();
           pool.release(connection);
           this.logger.info(`Query ${requestCounter}: client went away while queued; not running it`);
-          return callback(new Error('Client closed the request'));
+          return respond(new Error('Client closed the request'));
         }
 
         try {
@@ -604,12 +633,27 @@ class Model {
           // Execute main query
           queryOperation = await connection.session.executeStatement(sqlQuery, statementOptions());
           const op = queryOperation;
-          onClientGone = () => {
-            this.logger.info(`Query ${requestCounter}: cancelling its SQL`);
-            op.cancel().catch((e) => this.logger.debug(`Query ${requestCounter}: cancel failed: ${e.message}`));
+          const cancelQuery = (reason) => {
+            if (cancelP) return;
+            cancelReason = reason;
+            this.logger.info(`Query ${requestCounter}: cancelling its SQL (${reason})`);
+            cancelP = op.cancel().then(() => true, (e) => {
+              this.logger.warn(`Query ${requestCounter}: cancel failed: ${e.message}`);
+              return false;
+            });
           };
+          onClientGone = () => cancelQuery('client went away');
           if (clientGone) onClientGone();
-          const rows = await queryOperation.fetchAll();
+          const tileMs = config.databricks.tileQueryTimeout;
+          const tileTimer = isTile && tileMs > 0
+            ? setTimeout(() => cancelQuery(`tile query over ${Math.round(tileMs / 1000)} s`), tileMs)
+            : null;
+          let rows;
+          try { rows = await queryOperation.fetchAll(); } finally { clearTimeout(tileTimer); }
+          if (cancelReason) {
+            // fetchAll finished before the cancel took effect; don't build a response for a client that's gone
+            throw new Error(`Query cancelled: ${cancelReason}`);
+          }
           await queryOperation.close();
           queryOperation = null;
 
@@ -619,7 +663,7 @@ class Model {
           let geojson = { type: "FeatureCollection", features: [] };
 
           if (rows.length === 0) {
-            return callback(null, geojson);
+            return respond(null, geojson);
           }
 
           // Check if we exceeded transfer limit.
@@ -657,6 +701,7 @@ class Model {
             description: sourceConfig.description,
             geometryType: this.inferGeometryType(rows, sourceConfig.geometryColumn),
             maxRecordCount: sourceConfig.maxRecordCountPerPage,
+            ...(sourceConfig.minScale && { minScale: sourceConfig.minScale }),
             exceededTransferLimit,
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
@@ -691,20 +736,25 @@ class Model {
           const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
           auditLogger.logQuery(username, sourceConfig.tableName, geoserviceParams, recordCount, ipAddress);
 
-          callback(null, geojson);
+          respond(null, geojson);
 
         } catch (error) {
-          if (clientGone) {
-            // our own cancel: the session is fine, so the connection goes back to the pool rather than being destroyed
-            this.logger.info(`Query ${requestCounter}: cancelled after the client went away`);
+          if (cancelReason) {
+            // our own cancel: the session is fine (destroyed below only if the cancel itself failed)
+            this.logger.info(`Query ${requestCounter}: cancelled (${cancelReason})`);
+            if (!clientGone) error = new Error(`Tile query cancelled: ${cancelReason}`);
+          } else if (clientGone) {
+            this.logger.info(`Query ${requestCounter}: ended after the client went away`);
           } else {
             queryFailed = true;
             this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
           }
-          callback(error);
+          respond(error);
         } finally {
           stopWatchingClient();
           onClientGone = null;
+          // wait for our cancel to settle before closing/reusing the session; an uncertain cancel isn't reusable
+          if (cancelP && !(await cancelP)) queryFailed = true;
           // Clean up operations independently (not connection - it goes back to pool).
           // The extent operation is opened and closed entirely within getLayerExtent, so it's not handled here.
           if (queryOperation) {
@@ -728,7 +778,7 @@ class Model {
       .catch((error) => {
         stopWatchingClient();
         this.logger.error(`Query ${requestCounter}: Error acquiring connection: ${error.message}`);
-        callback(error);
+        respond(error);
 
         // Ensure connection is released even on acquisition error
         if (connection) {
@@ -838,6 +888,7 @@ class Model {
       idField: rawIdField,
       dbWKID: parseInt(req.params.srid) || config.databricks.srid || 4326,
       maxRecordCountPerPage: parseInt(req.params.maxRecordCount) || config.databricks.maxRecordCount || 2000,
+      minScale: minScaleFor(req, this.logger),
       name: req.params.lakebaseTable || 'LakebaseLayer',
       description: `Lakebase table: ${req.params.lakebaseSchema || 'public'}.${req.params.lakebaseTable}`,
     };
@@ -914,6 +965,7 @@ class Model {
             description: sourceConfig.description,
             geometryType,
             maxRecordCount: sourceConfig.maxRecordCountPerPage,
+            ...(sourceConfig.minScale && { minScale: sourceConfig.minScale }),
             exceededTransferLimit,
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,

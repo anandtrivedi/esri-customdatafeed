@@ -60,7 +60,9 @@ class DatabricksConnectionPool {
     }
   }
 
-  async createConnection() {
+  // inUse: create it already checked out when it's for a caller. It joins this.pool before createConnection returns,
+  // so created idle, another acquire() could take it before the caller's `await` resumes and marks it.
+  async createConnection({ inUse = false } = {}) {
     const client = new DBSQLClient();
     const baseOptions = {
       host: this.workspaceConfig.hostname,
@@ -93,7 +95,7 @@ class DatabricksConnectionPool {
       const connection = {
         client,
         session,
-        inUse: false,
+        inUse,
         createdAt: Date.now(),
         lastUsed: Date.now(),
         id: Math.random().toString(36).substr(2, 9),
@@ -126,7 +128,7 @@ class DatabricksConnectionPool {
     if (this.pool.length + this.creating < this.maxConnections) {
       this.creating++;
       let newConnection;
-      try { newConnection = await this.createConnection(); } finally { this.creating--; }
+      try { newConnection = await this.createConnection({ inUse: true }); } finally { this.creating--; }
       newConnection.inUse = true;
       this.activeConnections++;
       return newConnection;
@@ -178,11 +180,11 @@ class DatabricksConnectionPool {
       return;
     }
     this.creating++;
-    this.createConnection()
+    this.createConnection({ inUse: true })
       .finally(() => { this.creating--; })
       .then((conn) => {
         const waiter = this.waitQueue.shift();
-        if (!waiter) return; // all waiters timed out — connection stays idle in pool
+        if (!waiter) { conn.inUse = false; return; } // all waiters timed out — connection stays idle in pool
         clearTimeout(waiter.timeoutId);
         conn.inUse = true;
         this.activeConnections++;

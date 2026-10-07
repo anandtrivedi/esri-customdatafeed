@@ -81,6 +81,11 @@
         "key": "editingEnabled",
         "label": "15. Lakebase - Enable Editing",
         "description": "LAKEBASE only. Enter true to allow add/update/delete. Enter - for read-only (or for a Lakehouse service)."
+      },
+      {
+        "key": "minScale",
+        "label": "16. Common - Minimum Scale (don't draw when zoomed out)",
+        "description": "Optional. The most zoomed-out view at which clients draw this layer: a scale (577791) or a zoom level (zoom 10). Map Viewer, Pro and the JS SDK stop requesting features further out, so a huge point table isn't queried for a whole continent. Rule of thumb by row count: under 10 million rows, enter -; 10 million to 1 billion, zoom 8 (about 1:2,311,000, a metro region); over 1 billion and clients send a time window, zoom 8-10; over 1 billion and clients may not send one (a layer opened straight from its URL), zoom 11 or 12 (about 1:289,000-1:144,000, a harbor). Polygon/H3 density layers usually need none. Enter - for no limit."
       }
     ]
   },
