@@ -165,8 +165,14 @@ createService REST example. CLAUDE.md: parameter count, gotchas for each change 
   `CopMap.tsx`; box log shows its windows, and its one-hour San Pedro view drew 11,095 reports).
 - The server side is correct: a PBF tile requested with the slider's window decodes to points inside the tile with
   `base_datetime` (Date field) inside the window (`trident-ais/.uitest/pbfattrs.py`).
-- Why the SDK filters client-side for the view time extent (rather than sending it) is inferred from what it sent, not
-  from SDK docs/source.
+- **Confirmed in the SDK source (`@arcgis/core` 4.34.8, minified):** the 2D feature source query is built with
+  `timeExtent: this.layer.timeExtent` (`views/2d/layers/features/layerAdapters/FeatureLayerAdapter.js`) — the
+  *layer's* time extent. The *view's* time extent (the slider) is combined in `FeatureLayerView2D.timeExtent` and goes
+  into `ye(...)`, which builds a `FeatureFilter` with that `timeExtent` for the layer view — a display filter over
+  fetched features. `SourceSchema.js` fetches hosted (or small) feature services as `snapshot`/`paged-tile` (all
+  features), but non-hosted services like a CDF as capped tiles, so the client-side time filter only sees a 5,000-row
+  sample per tile. By design, not a provider bug; arguably a limitation for very large non-hosted time-aware layers.
+  Worth asking Esri whether Map Viewer can apply the slider server-side for such layers.
 - Implications: a provider "default window when `time=` is absent" would not help here (the window would be wrong);
   `minScale` and pre-aggregated density layers do help; in Map Viewer, a layer **filter** on `base_datetime` (sent as
   `where`) should work where the slider doesn't (to verify).
