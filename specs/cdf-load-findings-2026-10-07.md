@@ -33,7 +33,7 @@ ten-year scan (`WHERE (1=1) AND ST_Intersects(…)`) → slow queries held all p
 
 Recommended fixes, roughly in priority order:
 
-0. **Drop `ORDER BY` on tile queries.** Map Viewer's feature-tile requests carry `resultType=tile`,
+0. **[Fixed on this branch] Drop `ORDER BY` on tile queries.** Map Viewer's feature-tile requests carry `resultType=tile`,
    `orderByFields=bigid ASC` (the objectId), `returnExceededLimitFeatures=false`, a 5,000-row page. The provider passes
    the order through, so "first 5,000 by bigid in this tile" means scanning and sorting every matching row. Measured on
    the warehouse, NY-harbor tile, all history: **33.1 s with `ORDER BY bigid ASC LIMIT 5001`, 2.2 s without** (same
@@ -53,10 +53,10 @@ Recommended fixes, roughly in priority order:
    `timeColumn`, not the range). Persist the last good `[min, max]` per table (file next to the provider, or a
    service setting with a static range) and serve it immediately after a restart while the background refresh runs. A
    time-enabled layer should never go out without a range.
-3. **Enforce the statement timeout.** `DATABRICKS_QUERY_TIMEOUT` defaults to 120 s, yet provider queries ran 395 s and
+3. **[Fixed on this branch: session `STATEMENT_TIMEOUT`, verified live] Enforce the statement timeout.** `DATABRICKS_QUERY_TIMEOUT` defaults to 120 s, yet provider queries ran 395 s and
    415 s. Check whether `queryTimeout` is honoured with `runAsync: true` in 1.12.0; if not, cancel the operation from the
    provider after the timeout.
-4. **Pool counter exceeds its max.** Log shows `active: 12/10`. Find the path that increments `activeConnections`
+4. **[Fixed on this branch: in-flight creations count against max] Pool counter exceeds its max.** Log shows `active: 12/10`. Find the path that increments `activeConnections`
    without a matching decrement or bypasses the max (likely around destroy-after-error or the time-extent background
    connection).
 5. **Don't let tile traffic starve metadata.** Metadata requests (and other services' requests) wait behind heavy tile

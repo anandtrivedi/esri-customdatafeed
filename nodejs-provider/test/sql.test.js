@@ -86,6 +86,23 @@ describe("sql", () => {
       expect(sql).to.include("ORDER BY name ASC, id DESC");
     });
 
+    it("drops ORDER BY on feature-tile requests (resultType=tile)", () => {
+      // Map Viewer sends orderByFields=<objectId> ASC on every tile; the sort is the cost, not the order
+      const sql = build({ orderByFields: "id ASC", resultType: "tile" });
+      expect(sql).to.not.include("ORDER BY");
+      expect(sql).to.include("LIMIT");
+    });
+
+    it("keeps ORDER BY on tile requests that page with resultOffset", () => {
+      const sql = build({ orderByFields: "id ASC", resultType: "tile", resultOffset: "5000" });
+      expect(sql).to.include("ORDER BY id ASC");
+    });
+
+    it("keeps ORDER BY for standard (non-tile) queries", () => {
+      expect(build({ orderByFields: "id ASC", resultType: "standard" })).to.include("ORDER BY id ASC");
+      expect(build({ orderByFields: "id ASC" })).to.include("ORDER BY id ASC");
+    });
+
     it("should build WHERE clause from where parameter", () => {
       const sql = build({ where: "status = 'active'" });
       expect(sql).to.include("WHERE (status = 'active')");

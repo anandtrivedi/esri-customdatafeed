@@ -38,6 +38,7 @@ function buildSqlQuery(
     returnDistinctValues,
     returnGeometry = true,
     time,
+    resultType,
   } = geoParams;
 
   // Build SELECT clause
@@ -85,8 +86,11 @@ function buildSqlQuery(
     geometryFormat,
   });
 
-  // Build ORDER BY clause with sanitization
-  const orderByClause = buildOrderByClause(orderByFields);
+  // Build ORDER BY clause with sanitization. Feature-tile requests (resultType=tile, no offset) don't page and draw in
+  // any order, but clients still send orderByFields=<objectId> ASC. On a large table that forces a sort of every row in
+  // the tile before the LIMIT (33 s vs 2 s on a 28B-row table), so tiles get no ORDER BY.
+  const unorderedTile = String(resultType || "").toLowerCase() === "tile" && !resultOffset;
+  const orderByClause = unorderedTile ? "" : buildOrderByClause(orderByFields);
 
   // Build DISTINCT clause
   const distinctClause = returnDistinctValues ? `DISTINCT ` : "";
