@@ -78,6 +78,22 @@ Recommended fixes, roughly in priority order:
    an opt-in default time window applied when a request on a time-enabled layer has no `time=`. Both are publisher
    choices, documented in the README.
 
+Correction and Map Viewer findings (18:3x UTC):
+
+- **Log-based "no time filter" claims were wrong.** `sql.js` appends the time condition after the geometry condition, and
+  the provider logged only the first 150 characters, so the time window never showed. Claims based on request URLs stand
+  (the anonymous headless Map Viewer sent `time: null`); claims based only on logged SQL ("184 queries with no time
+  filter") don't. [Fixed on this branch: the log shows the SQL head and tail, so the time window is always visible.]
+- **Signed-in Map Viewer with the time slider on defaults to a one-year window** (12/31/2014–1/1/2016, the first year of
+  the extent), every time, and the slider is hard to set to a short window by dragging. So a "default window when
+  `time=` is absent" would not apply to slider users; each tile is a year of data (2.6–9.5 s per tile, capped at 5,000).
+  This makes the parked `timeInterval` setting worth testing: if Map Viewer derives its default step/window from
+  `timeInfo.timeInterval`, advertising "1 hour" would make the first view light. Untested.
+- **Reports above 85°N draw off the top of the map.** 2,668 rows in ten years (683 vessels in one longitude band, many at
+  exactly 90.0°, at US longitudes): bad position fixes. Web Mercator ends at ~85.05°, so they render above the map, and
+  they appear first because polar tiles are nearly empty and return fast. A data-quality filter in the source view
+  (lat between -85 and 85, lon between -180 and 180) is the fix; it's not a provider issue.
+
 Logging made this hard to troubleshoot (found while testing cancel-on-abandon):
 
 - **[Fixed on this branch] Log ids were shared across requests.** `requestCounter` was module-level and read after

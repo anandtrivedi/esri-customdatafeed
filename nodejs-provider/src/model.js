@@ -606,7 +606,9 @@ class Model {
             sourceConfig.timeColumn
           );
 
-          this.logger.info(`Query ${requestCounter}: ${sqlQuery.substring(0, 150)}...`);
+          // The time and objectIds filters come after the (long) geometry filter, so a plain prefix hid them; log the
+          // start plus the tail so the time window always shows.
+          this.logger.info(`Query ${requestCounter}: ${sqlQuery.length > 400 ? `${sqlQuery.substring(0, 160)} … ${sqlQuery.slice(-240)}` : sqlQuery}`);
 
           // Calculate extent for metadata requests (cached, time-boxed, de-duped — see getLayerExtent)
           if (isMetadataRequest && !sourceConfig.timeColumn && !warnedNoTimeColumn.has(sourceConfig.tableName)) {
@@ -930,7 +932,7 @@ class Model {
       this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
       return callback(validationError);
     }
-    this.logger.info(`Query ${requestCounter}: ${sql.substring(0, 150)}...`);
+    this.logger.info(`Query ${requestCounter}: ${sql.length > 400 ? `${sql.substring(0, 160)} … ${sql.slice(-240)}` : sql}`);
 
     pool.query(sql, params)
       .then((result) => {
