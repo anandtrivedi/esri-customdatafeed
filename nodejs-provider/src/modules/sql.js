@@ -215,28 +215,33 @@ function buildOrderByClause(orderByFields) {
  * @param {string|null} timeColumn - Name of the timestamp column (configured per service)
  */
 function buildTimeFilter(timeParam, timeColumn) {
-  if (!timeParam || !timeColumn) return null;
+  if (timeParam === undefined || timeParam === null || timeParam === "" || !timeColumn) return null;
 
-  try {
-    const [startMs, endMs] = timeParam.split(",").map(Number);
+  // ArcGIS REST `time` takes three forms: an instant ("t"), a range ("t1,t2"), or an open-ended range with null for
+  // either end ("null,t2" / "t1,null"). Map Viewer's time slider sends an instant in instant mode. This used to accept
+  // only "t1,t2": an instant parsed as NaN, the filter was dropped, and the query scanned all of history.
+  // An unreadable value is an error rather than "no filter", for the same reason.
+  const sanitizedColumn = timeColumn.replace(/[^a-zA-Z0-9_]/g, "");
+  const toIso = (raw) => {
+    const v = String(raw).trim();
+    if (v === "" || v.toLowerCase() === "null") return null;
+    const ms = Number(v);
+    if (!Number.isFinite(ms)) throw new Error(`Invalid time parameter: ${timeParam}`);
+    return new Date(ms).toISOString();
+  };
 
-    if (isNaN(startMs) || isNaN(endMs)) {
-      console.error("Invalid time parameter:", timeParam);
-      return null;
-    }
-
-    // Sanitize column name (allow alphanumeric and underscore only)
-    const sanitizedColumn = timeColumn.replace(/[^a-zA-Z0-9_]/g, "");
-
-    // Convert milliseconds to ISO timestamp
-    const startTime = new Date(startMs).toISOString();
-    const endTime = new Date(endMs).toISOString();
-
-    return `${sanitizedColumn} >= '${startTime}' AND ${sanitizedColumn} <= '${endTime}'`;
-  } catch (error) {
-    console.error("Error parsing time parameter:", error);
-    return null;
+  const parts = String(timeParam).split(",");
+  if (parts.length > 2) throw new Error(`Invalid time parameter: ${timeParam}`);
+  if (parts.length === 1) {
+    const at = toIso(parts[0]);
+    return at ? `${sanitizedColumn} = '${at}'` : null;
   }
+  const start = toIso(parts[0]);
+  const end = toIso(parts[1]);
+  if (start && end) return `${sanitizedColumn} >= '${start}' AND ${sanitizedColumn} <= '${end}'`;
+  if (start) return `${sanitizedColumn} >= '${start}'`;
+  if (end) return `${sanitizedColumn} <= '${end}'`;
+  return null; // "null,null": explicitly unbounded
 }
 
 module.exports = {

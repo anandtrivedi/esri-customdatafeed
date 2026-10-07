@@ -78,6 +78,15 @@ Recommended fixes, roughly in priority order:
    an opt-in default time window applied when a request on a time-enabled layer has no `time=`. Both are publisher
    choices, documented in the README.
 
+**[Fixed on this branch] A time instant was treated as "no time filter".** Map Viewer's slider in instant mode sends
+`time=<t>` (one value). `buildTimeFilter` only parsed `t1,t2`, so an instant became NaN, the filter was dropped, and
+every tile scanned ten years (seen live: one-hour/instant tiles running into the 30 s tile timeout, 0.7 KB error
+bodies). Now: an instant is `col = t`, `null` on either side is an open-ended range, `null,null` is unbounded, and an
+unreadable value is an error instead of silently scanning everything. Measured on the Florida tile from the user's
+screen: 14.6 s without a time filter, 4.4 s with the instant, 2.1 s with a one-hour window. (That tile is land with 4
+reports in ten years, so nothing would draw there anyway; an instant also rarely matches point data, so the slider's
+time-window mode is the useful one.)
+
 Correction and Map Viewer findings (18:3x UTC):
 
 - **Log-based "no time filter" claims were wrong.** `sql.js` appends the time condition after the geometry condition, and

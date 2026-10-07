@@ -238,6 +238,25 @@ describe("sql", () => {
       expect(sql).to.include("created_at <=");
     });
 
+    it("handles an instant (Map Viewer slider in instant mode) as equality, not as no filter", () => {
+      const sql = build({ time: "1688479200000" }, { timeColumn: "base_datetime" });
+      expect(sql).to.include("base_datetime = '2023-07-04T14:00:00.000Z'");
+      expect(sql).to.not.include(">=");
+    });
+
+    it("handles open-ended ranges with null on either side", () => {
+      expect(build({ time: "null,1688479200000" }, { timeColumn: "t" })).to.include("t <= '2023-07-04T14:00:00.000Z'")
+        .and.to.not.include("t >=");
+      expect(build({ time: "1688479200000,null" }, { timeColumn: "t" })).to.include("t >= '2023-07-04T14:00:00.000Z'")
+        .and.to.not.include("t <=");
+      expect(build({ time: "null,null" }, { timeColumn: "t" })).to.not.match(/t [<>=]/);
+    });
+
+    it("rejects an unreadable time value instead of silently dropping the filter", () => {
+      expect(() => build({ time: "yesterday" }, { timeColumn: "t" })).to.throw(/Invalid time parameter/);
+      expect(() => build({ time: "1,2,3" }, { timeColumn: "t" })).to.throw(/Invalid time parameter/);
+    });
+
     it("should not add time filter without timeColumn", () => {
       const sql = build({ time: "1704067200000,1704153600000" });
       expect(sql).to.not.include(">=");
