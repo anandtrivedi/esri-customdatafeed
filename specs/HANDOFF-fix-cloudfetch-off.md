@@ -153,11 +153,24 @@ README: "Preparing large tables"-style guidance for `minScale`, `DATABRICKS_USE_
 `DATABRICKS_TILE_QUERY_TIMEOUT` in the tuning knobs and env reference, `minScale` in the parameter lists and the
 createService REST example. CLAUDE.md: parameter count, gotchas for each change above.
 
+## Not yet verified
+
+- **Points drawing in Map Viewer with a one-hour window on `cloudfetch.5`.** The time forms are verified at the REST
+  level; the user's last Map Viewer view was a land tile (4 reports in ten years) and predates the instant fix.
+- **`minScale` set on a real service** (layer JSON shows it; Map Viewer stops drawing when zoomed out). Only the
+  parser, metadata emission (unit tests) and the publish-form info text are verified.
+- **`mcp-server` tests** (not run in this worktree; code unchanged).
+- **`cdpk/11.x` manifest variant** (not rebuilt or tested).
+- **Cancel-on-abandon** was tested and does not fire behind ArcGIS Server (item 5); not a pass.
+
 ## Findings not fixed here (details in the findings file)
 
-- **Time extent is in memory only.** After every restart the first metadata requests go out without
-  `timeInfo.timeExtent` until the background query (≈39 s on 28B rows) finishes. Persist the last good extent per table
-  or allow a static range.
+- **Time extent is in memory only, so there's a gap after each restart.** The first metadata request waits up to 10 s
+  for min/max; on 28B rows that takes ≈39 s, so the first requests go out without `timeInfo.timeExtent` (log: `time
+  extent … not ready in 10000 ms — recomputing in the background`) and get no time slider until reloaded. Once the
+  background query finishes it's cached for the process lifetime (checked 14 min after the 19:05 restart: all four AIS
+  services had their range; at 18:21, ~2 min after a restart, two still didn't). Persisting the last good extent per
+  table, or allowing a static range, would close the gap.
 - **Map Viewer defaults the time slider to one year** (the first year of the extent), every time, and dragging to a
   short window is impractical; instant mode is the default thumb in some cases. A year per tile is the main remaining
   cost. Advertising `timeInfo.timeInterval` (the parked spec's setting) might change Map Viewer's default; untested.
