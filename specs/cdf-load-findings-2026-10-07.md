@@ -33,6 +33,19 @@ ten-year scan (`WHERE (1=1) AND ST_Intersects(…)`) → slow queries held all p
 
 Recommended fixes, roughly in priority order:
 
+0. **Drop `ORDER BY` on tile queries.** Map Viewer's feature-tile requests carry `resultType=tile`,
+   `orderByFields=bigid ASC` (the objectId), `returnExceededLimitFeatures=false`, a 5,000-row page. The provider passes
+   the order through, so "first 5,000 by bigid in this tile" means scanning and sorting every matching row. Measured on
+   the warehouse, NY-harbor tile, all history: **33.1 s with `ORDER BY bigid ASC LIMIT 5001`, 2.2 s without** (same
+   5,001 rows returned). Tiles don't page and need no particular order, so for `resultType=tile` ignore `orderByFields`
+   (at least when it's only the idField). With dozens of US tiles and a 10-connection pool, this is why zooming in
+   showed nothing for minutes. Check whether other clients rely on the order for tile results before shipping.
+   Also verified while chasing this: tile results are spatially correct. Every returned point is inside its tile and
+   JSON/PBF decode to the same positions (`trident-ais/.uitest/pbfdecode.py`); the dense block Map Viewer draws in the
+   South Pacific is real data (American Samoa area), as is the one near Guam/Marianas.
+   Separately, Map Viewer opened from a raw `?url=` (anonymous, headless) showed no time slider and sent no `time=` for
+   either the points or the hex service even with `timeInfo.timeExtent` present, so it can't be relied on to apply time.
+
 1. **Cancel the SQL when the client goes away.** Map Viewer abandons tiles on zoom/pan, but the provider keeps their
    queries running and holding connections. Hook the request's close/abort and `cancel()` the operation; release the
    connection. This is the main cause of "zoom out and nothing new arrives".
