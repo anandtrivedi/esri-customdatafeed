@@ -103,6 +103,10 @@ Correction and Map Viewer findings (18:3x UTC):
   they appear first because polar tiles are nearly empty and return fast. A data-quality filter in the source view
   (lat between -85 and 85, lon between -180 and 180) is the fix; it's not a provider issue.
 
+**After deploying `cloudfetch.5` (19:05 UTC):** all four `time=` forms verified live (see HANDOFF item 9), and the
+new head/tail logging shows Map Viewer tile requests from a NY view that genuinely carry no time condition (they end in
+`… 4326)) LIMIT 5001`), i.e. a tab without the slider; with the slider they carry its window.
+
 Logging made this hard to troubleshoot (found while testing cancel-on-abandon):
 
 - **[Fixed on this branch] Log ids were shared across requests.** `requestCounter` was module-level and read after
