@@ -46,7 +46,15 @@ Recommended fixes, roughly in priority order:
    Separately, Map Viewer opened from a raw `?url=` (anonymous, headless) showed no time slider and sent no `time=` for
    either the points or the hex service even with `timeInfo.timeExtent` present, so it can't be relied on to apply time.
 
-1. **Cancel the SQL when the client goes away.** Map Viewer abandons tiles on zoom/pan, but the provider keeps their
+1. **[Built on this branch — but ArcGIS Server doesn't pass the abort through] Cancel the SQL when the client goes
+   away.** `1.1.5-cloudfetch.3` cancels on `req.res` `close` (unit-tested). Tested live 17:38–17:40 UTC with no other
+   traffic: a slow query through `:6443`, client gave up after 3 s; the provider never saw a close, ran the SQL to the end
+   (warehouse FINISHED, 48.7 s) and returned 2,000 features to ArcGIS, which discarded them. The browser cancels its PBF
+   requests, but ArcGIS Server keeps its (likely pooled, keep-alive) connection to the CDF runtime, so Node gets no
+   signal. The code stays (harmless; works if a deployment does close the connection), but it doesn't help here. The
+   effective caps are the statement timeout (item 3) and not issuing ten-year tile scans in the first place (item 7,
+   default time window); consider a shorter `DATABRICKS_QUERY_TIMEOUT` for tile-heavy services.
+   Original note: Map Viewer abandons tiles on zoom/pan, but the provider keeps their
    queries running and holding connections. Hook the request's close/abort and `cancel()` the operation; release the
    connection. This is the main cause of "zoom out and nothing new arrives".
 2. **Keep the time extent across restarts.** It's computed at runtime and held in memory only (the publish step sets
