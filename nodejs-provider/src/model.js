@@ -516,12 +516,34 @@ class Model {
 
     this.logger.info(`Query ${requestCounter}: Acquiring connection from pool ${pool.poolLabel()}...`);
 
+    // A client that gives up (Map Viewer drops tiles on every pan and zoom) closes the response. Cancel its SQL and
+    // free the connection instead of finishing work nobody will read, and skip queued requests whose client is gone.
+    // `close` also fires after a normal response, hence the writableEnded check.
+    const res = req.res;
+    let clientGone = false;
+    let onClientGone = null;
+    const markClientGone = () => {
+      if (clientGone || !res || res.writableEnded) return;
+      clientGone = true;
+      this.logger.info(`Query ${requestCounter}: client went away`);
+      if (onClientGone) onClientGone();
+    };
+    if (res && typeof res.once === 'function') res.once('close', markClientGone);
+    const stopWatchingClient = () => { if (res && typeof res.off === 'function') res.off('close', markClientGone); };
+
     // Acquire connection and execute query
     pool.acquire()
       .then(async (conn) => {
         connection = conn;
         let queryOperation;
         let queryFailed = false;
+
+        if (clientGone) {
+          stopWatchingClient();
+          pool.release(connection);
+          this.logger.info(`Query ${requestCounter}: client went away while queued; not running it`);
+          return callback(new Error('Client closed the request'));
+        }
 
         try {
           this.logger.info(`Query ${requestCounter}: Using pooled connection ${connection.id}`);
@@ -578,6 +600,12 @@ class Model {
 
           // Execute main query
           queryOperation = await connection.session.executeStatement(sqlQuery, statementOptions());
+          const op = queryOperation;
+          onClientGone = () => {
+            this.logger.info(`Query ${requestCounter}: cancelling its SQL`);
+            op.cancel().catch((e) => this.logger.debug(`Query ${requestCounter}: cancel failed: ${e.message}`));
+          };
+          if (clientGone) onClientGone();
           const rows = await queryOperation.fetchAll();
           await queryOperation.close();
           queryOperation = null;
@@ -663,10 +691,17 @@ class Model {
           callback(null, geojson);
 
         } catch (error) {
-          queryFailed = true;
-          this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
+          if (clientGone) {
+            // our own cancel: the session is fine, so the connection goes back to the pool rather than being destroyed
+            this.logger.info(`Query ${requestCounter}: cancelled after the client went away`);
+          } else {
+            queryFailed = true;
+            this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
+          }
           callback(error);
         } finally {
+          stopWatchingClient();
+          onClientGone = null;
           // Clean up operations independently (not connection - it goes back to pool).
           // The extent operation is opened and closed entirely within getLayerExtent, so it's not handled here.
           if (queryOperation) {
@@ -688,6 +723,7 @@ class Model {
         }
       })
       .catch((error) => {
+        stopWatchingClient();
         this.logger.error(`Query ${requestCounter}: Error acquiring connection: ${error.message}`);
         callback(error);
 
