@@ -124,7 +124,9 @@ function resolveLakehouseTarget(req) {
 // Initialize audit logger
 const auditLogger = getAuditLogger();
 
-let requestCounter = 0;
+// Sequence for request ids in log lines. Each request copies its own id: reading the shared counter after an await
+// labelled lines with whichever request arrived last (seen live: one 'Query N' mixing several requests' lines).
+let requestSeq = 0;
 
 // Layer extent for metadata responses, per table. ST_Envelope_Agg is a full-table aggregate, so on a multi-billion-row
 // table it runs for minutes and every metadata request (ArcGIS asks after each restart) piled one more onto the
@@ -430,7 +432,8 @@ class Model {
    * @param {function} callback - Callback function(error, geojson)
    */
   getData(req, callback) {
-    requestCounter++;
+    const requestCounter = ++requestSeq;
+    req._cdfRequestId = requestCounter;
     normalizeServiceParams(req); // '-', 'na', blanks etc. (publish-form placeholders) => unset
 
     // Route to Lakebase if this is an editable service
@@ -803,6 +806,7 @@ class Model {
    * Returns identical GeoJSON structure as the Databricks path.
    */
   async getDataFromLakebase(req, callback) {
+    const requestCounter = req._cdfRequestId ?? ++requestSeq;
     // Convert boolean strings to actual booleans
     Object.keys(req.query).forEach((key) => {
       const val = (req.query[key] + "").toLowerCase();

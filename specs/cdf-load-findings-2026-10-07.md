@@ -70,6 +70,17 @@ Recommended fixes, roughly in priority order:
    an opt-in default time window applied when a request on a time-enabled layer has no `time=`. Both are publisher
    choices, documented in the README.
 
+Logging made this hard to troubleshoot (found while testing cancel-on-abandon):
+
+- **[Fixed on this branch] Log ids were shared across requests.** `requestCounter` was module-level and read after
+  awaits, so one `Query N` mixed lines from several concurrent requests (e.g. "using connection A" … "released
+  connection B"). Each request now copies its own id (`requestSeq` → per-request `requestCounter`).
+- **ArcGIS Server logs rotate about every 10 s** under tile load, keeping only a minute or two. The volume is mostly the
+  per-feature `Invalid ID value` warnings (64-bit ids) plus debug-level server logging. Worth: logging that warning once
+  per service, and a lower ArcGIS log level in normal use.
+- **`returnGeometry=false` still selects geometry.** An ids/attributes request with `returnGeometry=false` produced
+  `SELECT bigid, ST_AsGeoJSON(geom) …`; skipping the geometry would make those requests cheaper.
+
 Also seen, lower priority:
 
 - `LZ4 native module failed to load: Architecture or version mismatch` at every start. Harmless: the driver then
