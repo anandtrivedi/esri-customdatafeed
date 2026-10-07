@@ -49,9 +49,24 @@ const config = {
     accessToken: process.env.DATABRICKS_ACCESS_TOKEN,
     srid: parseInt(process.env.DATABRICKS_SRID) || 4326,
     maxRecordCount: parseInt(process.env.DATABRICKS_MAX_RECORD_COUNT) || 2000,
-    queryTimeout: parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000 // 2 minutes default
+    queryTimeout: parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000, // 2 minutes default
+    // CloudFetch downloads large results from presigned cloud-storage URLs, which ArcGIS hosts often can't reach.
+    // In @databricks/sql 1.12.0 a failed download (e.g. 403) is caught for the request, but the driver's other
+    // concurrent downloads reject unhandled and Node exits the whole CDF process. Off by default: results come back
+    // inline over the warehouse connection. Set DATABRICKS_USE_CLOUDFETCH=true only where the host can reach storage.
+    useCloudFetch: /^(1|true|yes)$/i.test(process.env.DATABRICKS_USE_CLOUDFETCH || '')
   }
 };
+
+// Options for every executeStatement call, so none of them can fall back to the driver's CloudFetch default.
+// Per statement on purpose: in 1.12.0 the DBSQLClient constructor ignores a config argument.
+function statementOptions() {
+  return {
+    runAsync: true,
+    queryTimeout: config.databricks.queryTimeout,
+    useCloudFetch: config.databricks.useCloudFetch
+  };
+}
 
 // The ArcGIS CDF publish wizard makes EVERY declared service parameter required, so a
 // Lakehouse service still has to put something in the Lakebase-only fields (and vice-versa).
@@ -294,10 +309,7 @@ class Model {
       // Build the query (validateFieldName) inside the try: a bad timeColumn should degrade to a negative cache + null
       // like a SQL error, not throw out of this "never rejects" method and 500 every metadata request forever.
       const timeQuery = this._timeExtentQuery(sourceConfig);
-      op = await connection.session.executeStatement(timeQuery, {
-        runAsync: true,
-        queryTimeout: config.databricks.queryTimeout
-      });
+      op = await connection.session.executeStatement(timeQuery, statementOptions());
       const fetchP = op.fetchAll();
       fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
@@ -339,10 +351,7 @@ class Model {
       let conn, op, timer;
       try {
         conn = await pool.acquire();
-        op = await conn.session.executeStatement(timeQuery, {
-          runAsync: true,
-          queryTimeout: config.databricks.queryTimeout
-        });
+        op = await conn.session.executeStatement(timeQuery, statementOptions());
         const fetchP = op.fetchAll();
         fetchP.catch(() => {}); // a cancelled op's pending fetch rejects later
         const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
@@ -379,10 +388,7 @@ class Model {
     let op;
     let timer;
     try {
-      op = await connection.session.executeStatement(extentQuery, {
-        runAsync: true,
-        queryTimeout: config.databricks.queryTimeout
-      });
+      op = await connection.session.executeStatement(extentQuery, statementOptions());
       // Promise.race doesn't cancel the loser. Once we cancel() a timed-out operation, the still-pending fetchAll()
       // rejects in the real @databricks/sql driver — attach a sink so that rejection isn't unhandled (which would
       // crash the process on Node >= 15). The test stub resolves it artificially, so this guard is only exercised live.
@@ -527,10 +533,7 @@ class Model {
             sourceConfig.geometryColumn,
             sourceConfig.geometryFormat,
             async (sql) => {
-              const op = await connection.session.executeStatement(sql, {
-                runAsync: true,
-                queryTimeout: config.databricks.queryTimeout
-              });
+              const op = await connection.session.executeStatement(sql, statementOptions());
               const rows = await op.fetchAll();
               await op.close();
               return rows;
@@ -574,10 +577,7 @@ class Model {
           }
 
           // Execute main query
-          queryOperation = await connection.session.executeStatement(sqlQuery, {
-            runAsync: true,
-            queryTimeout: config.databricks.queryTimeout
-          });
+          queryOperation = await connection.session.executeStatement(sqlQuery, statementOptions());
           const rows = await queryOperation.fetchAll();
           await queryOperation.close();
           queryOperation = null;
