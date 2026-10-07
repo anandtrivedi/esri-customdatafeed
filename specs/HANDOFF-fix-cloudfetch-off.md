@@ -153,6 +153,24 @@ README: "Preparing large tables"-style guidance for `minScale`, `DATABRICKS_USE_
 `DATABRICKS_TILE_QUERY_TIMEOUT` in the tuning knobs and env reference, `minScale` in the parameter lists and the
 createService REST example. CLAUDE.md: parameter count, gotchas for each change above.
 
+## Why Map Viewer's time slider shows nothing on the 28B-row layer (measured 2026-10-07 19:1x–19:3x UTC)
+
+- Map Viewer's slider sets the **view's** time extent. The JS SDK fetched feature tiles **without** `time=` and filtered
+  by time in the browser: all 111 Map Viewer tile SQL statements from the user's NY view (slider at 9/28–10/8/2015) had
+  no time condition (the log now shows the statement tail). Reproduced headless with SDK 4.34 and only
+  `view.timeExtent` set: 53 tile requests, none with `time=`; features loaded spanned 2015–2024.
+- Each tile therefore returns the 5,000-row cap of arbitrary rows from ten years; the browser keeps only those inside
+  the slider window, which is almost none. Requests succeed (30–50 KB each), the map stays empty.
+- Setting the **layer's** time extent makes the SDK send `time=` (TRIDENT-AIS does this: `pointsA.timeExtent` in
+  `CopMap.tsx`; box log shows its windows, and its one-hour San Pedro view drew 11,095 reports).
+- The server side is correct: a PBF tile requested with the slider's window decodes to points inside the tile with
+  `base_datetime` (Date field) inside the window (`trident-ais/.uitest/pbfattrs.py`).
+- Why the SDK filters client-side for the view time extent (rather than sending it) is inferred from what it sent, not
+  from SDK docs/source.
+- Implications: a provider "default window when `time=` is absent" would not help here (the window would be wrong);
+  `minScale` and pre-aggregated density layers do help; in Map Viewer, a layer **filter** on `base_datetime` (sent as
+  `where`) should work where the slider doesn't (to verify).
+
 ## Not yet verified
 
 - **Points drawing in Map Viewer with a one-hour window on `cloudfetch.5`.** The time forms are verified at the REST
