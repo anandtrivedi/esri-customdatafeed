@@ -238,7 +238,9 @@ function buildTimeFilter(timeParam, timeColumn) {
     if (v === "" || v.toLowerCase() === "null") return null;
     const ms = Number(v);
     if (!Number.isFinite(ms)) throw badTime();
-    return new Date(ms).toISOString();
+    // A finite but out-of-range epoch (|ms| > ~8.64e15) makes Date.toISOString() throw a RangeError — still a client
+    // error, so surface it as 400 too rather than letting it bubble up as an opaque 500.
+    try { return new Date(ms).toISOString(); } catch (e) { throw badTime(); }
   };
 
   const parts = String(timeParam).split(",");
