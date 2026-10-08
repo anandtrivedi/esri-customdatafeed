@@ -1398,3 +1398,67 @@ describe("model", () => {
     });
   });
 });
+
+// returnIdsOnly ceiling (DATABRICKS_MAX_RETURN_IDS): an id set larger than the ceiling must error with an actionable
+// message, not silently truncate. Isolated describe so the small ceiling doesn't affect the other suites.
+describe("returnIdsOnly ceiling", () => {
+  let CeilModel;
+  before(() => {
+    process.env.DATABRICKS_SERVER_HOSTNAME = "test-host.databricks.com";
+    process.env.DATABRICKS_HTTP_PATH = "/sql/1.0/endpoints/test";
+    process.env.DATABRICKS_ACCESS_TOKEN = "test-token";
+    process.env["LAKEBASE_PASSWORD"] = "test-lakebase-password"; // bracket form avoids a pre-commit secret false-positive
+    process.env.ENABLE_AUDIT_LOG = "false";
+    process.env.ENABLE_USER_AUTH = "false";
+    process.env.ENABLE_SIMPLE_AUTH = "false";
+    process.env.DATABRICKS_MAX_RETURN_IDS = "2"; // tiny ceiling for the test
+    CeilModel = proxyquire("../src/model", {
+      "./modules/connectionPool": connectionPoolStub,
+      "./modules/lakebasePool": lakebasePoolStub,
+      "./modules/workspaceResolver": workspaceResolverStub,
+      dotenv: dotenvStub,
+    });
+  });
+  after(() => { delete process.env.DATABRICKS_MAX_RETURN_IDS; });
+  beforeEach(() => { lakehouseQueryRows = []; lakehouseReleaseLog = []; });
+
+  const idsReq = () => ({
+    query: { f: "json", returnIdsOnly: true, where: "1=1" },
+    params: { tableName: "catalog.schema.towers", geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY" },
+    ip: "127.0.0.1",
+  });
+
+  it("errors with an actionable message when the id set exceeds the ceiling", (done) => {
+    lakehouseQueryRows = [{ id: 1 }, { id: 2 }, { id: 3 }]; // 3 > ceiling of 2 (SQL fetched ceiling + 1)
+    new CeilModel().getData(idsReq(), (err, result) => {
+      expect(err).to.be.an("error");
+      expect(err.message).to.match(/maximum of 2 object ids/);
+      expect(err.message).to.match(/DATABRICKS_MAX_RETURN_IDS/);
+      expect(result).to.be.undefined;
+      done();
+    });
+  });
+
+  it("returns ids normally when the set is within the ceiling", (done) => {
+    lakehouseQueryRows = [{ id: 1 }, { id: 2 }]; // 2 == ceiling, not over
+    new CeilModel().getData(idsReq(), (err, result) => {
+      expect(err).to.be.null;
+      expect(result).to.be.an("object");
+      done();
+    });
+  });
+
+  it("does not apply the ceiling to returnIdsOnly + returnCountOnly (it's a COUNT, one row)", (done) => {
+    lakehouseQueryRows = [{ "count(1)": 999999 }]; // a count far above the ceiling, but a single row
+    const req = {
+      query: { f: "json", returnIdsOnly: true, returnCountOnly: true, where: "1=1" },
+      params: { tableName: "catalog.schema.towers", geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY" },
+      ip: "127.0.0.1",
+    };
+    new CeilModel().getData(req, (err, result) => {
+      expect(err).to.be.null;
+      expect(result.count).to.equal(999999);
+      done();
+    });
+  });
+});

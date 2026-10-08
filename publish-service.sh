@@ -287,6 +287,7 @@ params = {
     "maxRecordCount":    g("MAXREC", ""),
     "srid":              g("SRID", ""),
     "editingEnabled":    g("EDITING", ""),
+    "minScale":          g("MIN_SCALE", ""),
 }
 svc = {
     "serviceName": os.environ["SERVICE_NAME"],
@@ -369,7 +370,7 @@ echo
 
 # initialise every service parameter; the unused backend's fields stay empty
 WORKSPACE=""; WAREHOUSE_PATH=""; TABLE=""; GEOM_COL=""; ID_FIELD=""; GEOM_FORMAT=""
-TIME_COL=""; MAXREC=""; SRID=""; LB_HOST=""; LB_PORT=""; LB_DB=""; LB_SCHEMA=""; LB_TABLE=""
+TIME_COL=""; MAXREC=""; MIN_SCALE=""; SRID=""; LB_HOST=""; LB_PORT=""; LB_DB=""; LB_SCHEMA=""; LB_TABLE=""
 EDITING=""; CAPABILITIES="Query"
 
 # --- data source: pick workspace (+ warehouse or Lakebase instance) ONCE -------
@@ -686,6 +687,16 @@ while true; do
     ask "Enable editing (add / update / delete)? (y/n)" "y" ED
     case "$ED" in y|Y|yes|YES) EDITING="true"; CAPABILITIES="Query,Editing";; *) EDITING="false"; CAPABILITIES="Query";; esac
   fi
+  # Don't draw (or query) when zoomed out past this. For big point tables, rule of thumb by row count:
+  #   < 10M: none | 10M-1B: zoom 8 | > 1B with clients sending a time window: zoom 8-10 | > 1B otherwise: zoom 11-12
+  echo "   Minimum scale: clients stop drawing this layer when zoomed out further. Rule of thumb for point tables:"
+  echo "     under 10M rows: none (-) | 10M-1B: zoom 8 | over 1B: zoom 10, or zoom 11-12 if clients may not send a time window"
+  while :; do
+    ask "Minimum scale (a scale like 577791, or 'zoom 10'; - for none)" "-" MIN_SCALE
+    [ "$MIN_SCALE" = "-" ] && MIN_SCALE=""
+    echo "$MIN_SCALE" | grep -qiE '^$|^(1:)?[0-9][0-9,]*$|^(zoom|level|lod|z) *[:=]? *[0-9]{1,2}$' && break
+    echo "   !! Enter a scale (577791) or a zoom level (zoom 10), or - for none."
+  done
 
   echo
   echo "-- Review --"
@@ -704,6 +715,7 @@ while true; do
     printf "  %-13s %s\n" "SRID"         "$SRID"
     printf "  %-13s %s\n" "Time column"  "${TIME_COL:-(none)}"
     printf "  %-13s %s\n" "Max records"  "$MAXREC"
+    printf "  %-13s %s\n" "Min scale"    "${MIN_SCALE:-(none)}"
   else
     printf "  %-13s %s\n" "Lakebase"     "$LB_HOST:$LB_PORT/$LB_DB"
     printf "  %-13s %s\n" "Schema.table" "$LB_SCHEMA.$LB_TABLE"
@@ -736,7 +748,7 @@ while true; do
   #     and fails the whole create with "Connect to localhost:6843 ... Connection refused" (seen
   #     reproducibly on a federated 12.1 box). Create STOPPED + a separate /start avoids that race.
   CREATE_STATE="STOPPED"
-  export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC \
+  export SERVICE_NAME WORKSPACE WAREHOUSE_PATH TABLE GEOM_COL GEOM_FORMAT ID_FIELD SRID TIME_COL MAXREC MIN_SCALE \
          LB_HOST LB_PORT LB_DB LB_SCHEMA LB_TABLE EDITING CAPABILITIES PROVIDER_NAME MIN_INST MAX_INST \
          PRIVATE MAX_IDLE CREATE_STATE
   SVC=$(build_service_json)

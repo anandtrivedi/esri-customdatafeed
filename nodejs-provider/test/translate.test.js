@@ -138,6 +138,21 @@ describe("translate", () => {
       expect(result.features[0].geometry.type).to.equal("Point");
       expect(result.features[0].properties).to.not.have.property("geom");
     });
+
+    it("warns once per idField (not per feature) for ids over the 32-bit OBJECTID range", () => {
+      // AIS bigid is 64-bit; without throttling this fired one console.warn per row (~8,900/view).
+      const rows = [
+        { biggy: "9000000001", geom: '{"type":"Point","coordinates":[0,0]}' },
+        { biggy: "9000000002", geom: '{"type":"Point","coordinates":[1,1]}' },
+        { biggy: "9000000003", geom: '{"type":"Point","coordinates":[2,2]}' },
+      ];
+      const orig = console.warn; let calls = 0;
+      console.warn = () => { calls++; };
+      try {
+        translateToGeoJSON(rows, { idField: "biggy", geometryColumn: "geom", dbWKID: 4326 });
+      } finally { console.warn = orig; }
+      expect(calls).to.equal(1); // one warning for three overflowing-id rows, not three
+    });
   });
 });
 

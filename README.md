@@ -249,7 +249,7 @@ Restart ArcGIS Server after editing it. Credentials stay in `.databrickscfg`, no
 <details>
 <summary><b>Optional tuning knobs & admin-token binding (requestip vs referer)</b></summary>
 
-Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABRICKS_QUERY_TIMEOUT`, `ENABLE_AUDIT_LOG`, pool sizes — see [Environment Variables](#reference).
+Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABRICKS_QUERY_TIMEOUT`, `DATABRICKS_USE_CLOUDFETCH`, `DATABRICKS_TILE_QUERY_TIMEOUT`, `DATABRICKS_MAX_RETURN_IDS`, `ENABLE_AUDIT_LOG`, pool sizes — see [Environment Variables](#reference).
 
 **Admin-token binding:** `client=requestip` (used throughout this guide) ties the token to your IP — no `Referer` header on admin calls, simplest on the box. `client=referer` ties it to a URL and **every** admin call must send a matching `Referer` header (mismatch → `HTTP 498`). Note: a feature-service `/query` validates more strictly and may reject a `requestip` token — query it with a `referer`-bound token **plus** a matching `Referer` header (the publish wizard does this for its verify step).
 
@@ -418,9 +418,20 @@ Then, in the client: register your ArcGIS target (password set via a terminal co
 
 `publish-service.sh` builds and submits this for you. Creating a service is a REST call per table (`/createService`); the presence of `lakebaseHost` selects the backend. Source-table requirements: `idField` is a unique integer 0–2,147,483,647; geometry uses `lon lat` order; Lakehouse table names are fully qualified (`catalog.schema.table`).
 
-**Lakehouse parameters:** `workspace` (profile; default env), `warehouseHttpPath` (default `DATABRICKS_HTTP_PATH`), `tableName` (required), `geometryColumn` (`geometry`), `idField` (`id`), `geometryFormat` (auto: `WKT`/`WKB`/`GEOJSON`/`GEOMETRY`), `timeColumn`, `maxRecordCount` (`2000`), `srid` (`4326`).
+**Lakehouse parameters:** `workspace` (profile; default env), `warehouseHttpPath` (default `DATABRICKS_HTTP_PATH`), `tableName` (required), `geometryColumn` (`geometry`), `idField` (`id`), `geometryFormat` (auto: `WKT`/`WKB`/`GEOJSON`/`GEOMETRY`), `timeColumn`, `maxRecordCount` (`2000`), `srid` (`4326`), `minScale` (optional; see below).
 
-**Lakebase parameters:** `workspace`, `lakebaseHost` (required, selects Lakebase), `lakebasePort` (`5432`), `lakebaseDatabase` (required), `lakebaseSchema` (`public`), `lakebaseTable` (required), `geometryColumn`, `idField`, `maxRecordCount`, `srid`, `editingEnabled` (`false`).
+**Lakebase parameters:** `workspace`, `lakebaseHost` (required, selects Lakebase), `lakebasePort` (`5432`), `lakebaseDatabase` (required), `lakebaseSchema` (`public`), `lakebaseTable` (required), `geometryColumn`, `idField`, `maxRecordCount`, `srid`, `editingEnabled` (`false`), `minScale`.
+
+**`minScale` (optional, both backends):** the most zoomed-out view at which clients draw the layer, as a scale (`577791`) or a zoom level (`zoom 10`). It's advertised as standard layer metadata, so Map Viewer, Pro and the JS SDK stop requesting features when zoomed out further. For point tables, by row count:
+
+| Rows | Suggested `minScale` |
+|---|---|
+| under 10 million | none (`-`) |
+| 10 million – 1 billion | `zoom 8` |
+| over 1 billion, clients send a time window | `zoom 8`–`zoom 10` |
+| over 1 billion, clients may not send one | `zoom 11`–`zoom 12` |
+
+Polygon/H3 density layers usually need none.
 
 **Fill one set, not both.** A read-only **Lakehouse** service uses the Lakehouse fields; an editable **Lakebase** service uses the Lakebase fields. Setting `lakebaseHost` is what switches the backend to Lakebase. `workspace`, `geometryColumn`, `idField`, `srid`, `maxRecordCount` are shared. The publish-form field labels are grouped and numbered — `Common`, `Lakehouse`, `Lakebase` — so you can see at a glance which set each belongs to.
 
@@ -441,7 +452,7 @@ curl -k "https://localhost:6443/arcgis/admin/services/createService?token=$TOKEN
         "geometryColumn": "geometry", "idField": "id", "geometryFormat": "WKT",
         "timeColumn": "", "lakebaseHost": "", "lakebasePort": "", "lakebaseDatabase": "",
         "lakebaseSchema": "", "lakebaseTable": "", "maxRecordCount": "2000",
-        "srid": "4326", "editingEnabled": ""
+        "srid": "4326", "editingEnabled": "", "minScale": ""
       }
     }}
   }'
@@ -484,6 +495,9 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 | `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Auto-found in the service-account home — `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows); set only if the file is elsewhere |
 | `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` | Lakebase connection (token auto-generated if omitted) |
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
+| `DATABRICKS_USE_CLOUDFETCH` (`false`) | `true` lets the driver download large results from presigned cloud-storage URLs. Leave off unless the ArcGIS host can reach the workspace's storage bucket — a refused download (403) can crash the CDF process. Results come back inline when off. |
+| `DATABRICKS_TILE_QUERY_TIMEOUT` (`30000`) | Cancel a feature-tile query (`resultType=tile`) after this many ms; `0` disables. ArcGIS Server doesn't pass a browser's abort to the CDF, so an abandoned tile otherwise runs until the statement timeout. |
+| `DATABRICKS_MAX_RETURN_IDS` (`500000`) | Ceiling on object ids a `returnIdsOnly` request may return (such requests carry no page limit). If a request would exceed it, it **errors** (narrow the query with `where`/`time`/`geometry`) rather than returning a truncated id set. `0` disables. |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
 | `ENABLE_USER_AUTH` / `ENABLE_AUDIT_LOG` / `DATABRICKS_API_SSL_VERIFY` | Security |
 

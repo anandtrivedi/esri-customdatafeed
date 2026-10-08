@@ -4,6 +4,7 @@ const proxyquire = require('proxyquire').noPreserveCache().noCallThru();
 describe('connectionPool', () => {
   let connectionPool;
   let connectCallLog;
+  let sessionLog;
 
   beforeEach(() => {
     // New array each test. Capture it locally so old test pools (from a
@@ -11,12 +12,15 @@ describe('connectionPool', () => {
     // their connect() calls into this test's expected log.
     const localLog = [];
     connectCallLog = localLog;
+    const localSessions = [];
+    sessionLog = localSessions;
 
     const DBSQLClientStub = class {
       async connect(options) {
         localLog.push(options);
       }
-      async openSession() {
+      async openSession(request) {
+        localSessions.push(request);
         return { close: async () => {} };
       }
       async close() {}
@@ -156,6 +160,124 @@ describe('connectionPool', () => {
         { min: 0 }
       );
       expect(pool.getStats().poolKey).to.equal('WORKSPACE_A|/sql/1.0/warehouses/abc');
+    });
+  });
+
+  describe('session STATEMENT_TIMEOUT', () => {
+    afterEach(() => { delete process.env.DATABRICKS_QUERY_TIMEOUT; });
+
+    it('opens every session with STATEMENT_TIMEOUT=120 by default (warehouses ignore queryTimeout)', async () => {
+      const ws = { workspaceAlias: 'T', hostname: 't.example.com', authType: 'pat', token: 'x' };
+      const pool = connectionPool.getPool(ws, '/sql/1.0/warehouses/t1', { min: 0 });
+      await pool.createConnection();
+      expect(sessionLog[0]).to.deep.equal({ configuration: { STATEMENT_TIMEOUT: '120' } });
+    });
+
+    it('derives STATEMENT_TIMEOUT from DATABRICKS_QUERY_TIMEOUT (ms -> s)', async () => {
+      process.env.DATABRICKS_QUERY_TIMEOUT = '45000';
+      const ws = { workspaceAlias: 'T', hostname: 't.example.com', authType: 'pat', token: 'x' };
+      const pool = connectionPool.getPool(ws, '/sql/1.0/warehouses/t2', { min: 0 });
+      await pool.createConnection();
+      expect(sessionLog[0].configuration.STATEMENT_TIMEOUT).to.equal('45');
+    });
+  });
+
+  describe('max connections under concurrent acquire', () => {
+    it('never opens more than max when many acquires arrive while connections are still opening', async () => {
+      let opened = 0;
+      const SlowClient = class {
+        async connect() { await new Promise((r) => setTimeout(r, 20)); }
+        async openSession() { opened++; return { close: async () => {} }; }
+        async close() {}
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: SlowClient } });
+      const ws = { workspaceAlias: 'C', hostname: 'c.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/c', { min: 0, max: 10, connectionTimeout: 500 });
+      const got = await Promise.allSettled(Array.from({ length: 15 }, () => pool.acquire()));
+      const ok = got.filter((g) => g.status === 'fulfilled');
+      expect(opened).to.equal(10);
+      expect(pool.pool.length).to.equal(10);
+      expect(ok).to.have.lengthOf(10);
+      expect(pool.activeConnections).to.equal(10);
+      for (const g of ok) pool.release(g.value);
+      await cp.shutdownPool();
+    });
+  });
+
+  describe('new connections are checked out before they join the pool', () => {
+    it('a connection created for acquire() is already inUse when it is pushed to the pool', async () => {
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: class {
+        async connect() {} async openSession() { return { close: async () => {} }; } async close() {} } } });
+      const ws = { workspaceAlias: 'R', hostname: 'r.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/r', { min: 0, max: 2 });
+      const seenAtPush = [];
+      const push = pool.pool.push.bind(pool.pool);
+      pool.pool.push = (c) => { seenAtPush.push(c.inUse); return push(c); };
+      const c = await pool.acquire();
+      expect(seenAtPush).to.deep.equal([true]); // visible to other acquires only once it's taken
+      expect(c.inUse).to.equal(true);
+      pool.release(c);
+      await cp.shutdownPool();
+    });
+  });
+
+  describe('a failed openSession does not leak the client', () => {
+    it('closes the connected client when openSession rejects, and rethrows the error', async () => {
+      let closed = 0;
+      // connect() succeeds, openSession() fails — the client is connected but has no session, so createConnection
+      // must close it before rethrowing or the socket leaks (and the pool slot never frees).
+      const FailingSessionClient = class {
+        async connect() {}
+        async openSession() { throw new Error('session open failed'); }
+        async close() { closed++; }
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: FailingSessionClient } });
+      const ws = { workspaceAlias: 'F', hostname: 'f.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/f', { min: 0, max: 2, connectionTimeout: 300 });
+
+      let err = null;
+      try { await pool.acquire(); } catch (e) { err = e; }
+
+      expect(err).to.be.an('error');
+      expect(err.message).to.equal('session open failed'); // the real error propagates, not a TypeError
+      expect(closed).to.equal(1);                           // client was closed, not leaked
+      expect(pool.pool.length).to.equal(0);                 // nothing half-open left in the pool
+      expect(pool.creating).to.equal(0);                    // the in-flight reservation was released
+      await cp.shutdownPool();
+    });
+
+    it('still propagates the original openSession error even if client.close() also throws', async () => {
+      const BothFailClient = class {
+        async connect() {}
+        async openSession() { throw new Error('session open failed'); }
+        async close() { throw new Error('close blew up too'); }
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: BothFailClient } });
+      const ws = { workspaceAlias: 'F2', hostname: 'f2.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/f2', { min: 0, max: 2, connectionTimeout: 300 });
+
+      let err = null;
+      try { await pool.acquire(); } catch (e) { err = e; }
+      expect(err).to.be.an('error');
+      expect(err.message).to.equal('session open failed'); // close-time noise must not mask the real cause
+      expect(pool.creating).to.equal(0);
+      await cp.shutdownPool();
+    });
+
+    it('does NOT close the client on a successful open (guards against moving close() out of the catch)', async () => {
+      let closed = 0;
+      const HealthyClient = class {
+        async connect() {}
+        async openSession() { return { close: async () => {} }; }
+        async close() { closed++; }
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: HealthyClient } });
+      const ws = { workspaceAlias: 'F3', hostname: 'f3.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/f3', { min: 0, max: 2 });
+      const c = await pool.acquire();
+      expect(closed).to.equal(0); // the live, pooled client must not be closed
+      pool.release(c);
+      await cp.shutdownPool();
     });
   });
 });

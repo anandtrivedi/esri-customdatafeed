@@ -47,6 +47,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     returnCountOnly,
     returnIdsOnly,
     returnGeometry = true,
+    resultType,
   } = geoParams;
 
   const schema = sourceConfig.lakebaseSchema;
@@ -129,7 +130,9 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
 
   // --- ORDER BY ---
   let orderByStr = '';
-  if (orderByFields && !returnCountOnly) {
+  // Tiles (resultType=tile, no offset) get no ORDER BY, as in sql.js: order is irrelevant and the sort is expensive.
+  const unorderedTile = String(resultType || '').toLowerCase() === 'tile' && !resultOffset;
+  if (orderByFields && !returnCountOnly && !unorderedTile) {
     const fields = orderByFields.split(',').map(f => {
       const parts = f.trim().split(/\s+/);
       const fieldName = parts[0].replace(/[^a-zA-Z0-9_]/g, '');

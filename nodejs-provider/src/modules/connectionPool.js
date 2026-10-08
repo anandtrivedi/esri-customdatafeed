@@ -17,6 +17,11 @@
 const { DBSQLClient } = require('@databricks/sql');
 const { userAgentTag } = require('./version');
 
+function statementTimeoutSeconds() {
+  const ms = parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000;
+  return String(Math.max(1, Math.round(ms / 1000)));
+}
+
 class DatabricksConnectionPool {
   constructor(workspaceConfig, httpPath, options = {}) {
     this.workspaceConfig = workspaceConfig;
@@ -28,6 +33,7 @@ class DatabricksConnectionPool {
 
     this.pool = [];
     this.activeConnections = 0;
+    this.creating = 0; // connections being opened (connect + openSession awaited) that aren't in this.pool yet
     this.waitQueue = [];
     this.shuttingDown = false;
 
@@ -54,7 +60,9 @@ class DatabricksConnectionPool {
     }
   }
 
-  async createConnection() {
+  // inUse: create it already checked out when it's for a caller. It joins this.pool before createConnection returns,
+  // so created idle, another acquire() could take it before the caller's `await` resumes and marks it.
+  async createConnection({ inUse = false } = {}) {
     const client = new DBSQLClient();
     const baseOptions = {
       host: this.workspaceConfig.hostname,
@@ -79,12 +87,15 @@ class DatabricksConnectionPool {
 
     try {
       await client.connect(connectOptions);
-      const session = await client.openSession();
+      // SQL warehouses ignore the driver's per-statement queryTimeout (compute clusters only); they enforce a
+      // session-level STATEMENT_TIMEOUT. Same env var as model.js (milliseconds, default 2 min). Without this,
+      // abandoned tile queries ran 6-7 minutes and held every pool connection.
+      const session = await client.openSession({ configuration: { STATEMENT_TIMEOUT: statementTimeoutSeconds() } });
 
       const connection = {
         client,
         session,
-        inUse: false,
+        inUse,
         createdAt: Date.now(),
         lastUsed: Date.now(),
         id: Math.random().toString(36).substr(2, 9),
@@ -95,6 +106,9 @@ class DatabricksConnectionPool {
       return connection;
     } catch (error) {
       console.error(`[Pool ${this.poolLabel()}] Failed to create connection:`, error.message);
+      // connect() may have already succeeded before openSession() threw (e.g. a bad STATEMENT_TIMEOUT or a transient
+      // session-open error). Close the client so a connected-but-sessionless socket isn't leaked on every failed open.
+      try { await client.close(); } catch (closeErr) { /* client may be unconnected; nothing to close */ }
       throw error;
     }
   }
@@ -112,8 +126,12 @@ class DatabricksConnectionPool {
       return available;
     }
 
-    if (this.pool.length < this.maxConnections) {
-      const newConnection = await this.createConnection();
+    // Count connections still being opened: createConnection() awaits connect/openSession before pushing to the
+    // pool, so concurrent acquires would otherwise all see room and open more than maxConnections (seen: 12/10).
+    if (this.pool.length + this.creating < this.maxConnections) {
+      this.creating++;
+      let newConnection;
+      try { newConnection = await this.createConnection({ inUse: true }); } finally { this.creating--; }
       newConnection.inUse = true;
       this.activeConnections++;
       return newConnection;
@@ -161,13 +179,15 @@ class DatabricksConnectionPool {
   // After a connection is destroyed, create a replacement for the next waiter
   // (waiters are only queued when the pool is at max, so destroying freed a slot).
   refillForWaiters() {
-    if (this.waitQueue.length === 0 || this.shuttingDown || this.pool.length >= this.maxConnections) {
+    if (this.waitQueue.length === 0 || this.shuttingDown || this.pool.length + this.creating >= this.maxConnections) {
       return;
     }
-    this.createConnection()
+    this.creating++;
+    this.createConnection({ inUse: true })
+      .finally(() => { this.creating--; })
       .then((conn) => {
         const waiter = this.waitQueue.shift();
-        if (!waiter) return; // all waiters timed out — connection stays idle in pool
+        if (!waiter) { conn.inUse = false; return; } // all waiters timed out — connection stays idle in pool
         clearTimeout(waiter.timeoutId);
         conn.inUse = true;
         this.activeConnections++;

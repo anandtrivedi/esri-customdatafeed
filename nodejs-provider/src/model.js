@@ -29,6 +29,7 @@ const {
   resolveGeometryFormat,
   validateIdentifier,
   validateFieldName,
+  parseMinScale,
 } = require('./modules');
 const { getPool, shutdownPool } = require('./modules/connectionPool');
 const { getLakebasePool, shutdownLakebasePools } = require('./modules/lakebasePool');
@@ -49,9 +50,46 @@ const config = {
     accessToken: process.env.DATABRICKS_ACCESS_TOKEN,
     srid: parseInt(process.env.DATABRICKS_SRID) || 4326,
     maxRecordCount: parseInt(process.env.DATABRICKS_MAX_RECORD_COUNT) || 2000,
-    queryTimeout: parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000 // 2 minutes default
+    queryTimeout: parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000, // 2 minutes default
+    // CloudFetch downloads large results from presigned cloud-storage URLs, which ArcGIS hosts often can't reach.
+    // In @databricks/sql 1.12.0 a failed download (e.g. 403) is caught for the request, but the driver's other
+    // concurrent downloads reject unhandled and Node exits the whole CDF process. Off by default: results come back
+    // inline over the warehouse connection. Set DATABRICKS_USE_CLOUDFETCH=true only where the host can reach storage.
+    useCloudFetch: /^(1|true|yes)$/i.test(process.env.DATABRICKS_USE_CLOUDFETCH || ''),
+    // Feature-tile queries (resultType=tile) are cancelled after this many ms; 0 disables. ArcGIS Server doesn't pass a
+    // browser's abort through to the CDF, so an abandoned tile otherwise runs to the session STATEMENT_TIMEOUT (default
+    // 2 min) while holding a pool connection. Tiles are a drawing sample, so failing one fast is the better trade.
+    tileQueryTimeout: parseInt(process.env.DATABRICKS_TILE_QUERY_TIMEOUT ?? '30000', 10),
+    // returnIdsOnly must return ALL matching object ids (clients page through them), so it carries no row limit.
+    // On a huge table an unbounded ids-only query can return millions of ids inline (seen: 1.95M ids / ~559 MB RSS),
+    // which — now that CloudFetch is off — all lands in the CDF process and can exhaust its memory. This is a hard
+    // ceiling: the query fetches at most this many ids, and if the result would exceed it the request ERRORS (rather
+    // than silently returning a truncated, wrong id set) telling the caller to narrow the query or raise the limit.
+    // Set DATABRICKS_MAX_RETURN_IDS to the largest id set this box's memory can hold; 0 disables the ceiling.
+    // Fail safe: a malformed value (NaN, negative) falls back to the default rather than silently disabling the
+    // ceiling (fail-open), which would reintroduce the very OOM risk this guards against.
+    maxReturnIds: (() => {
+      const raw = process.env.DATABRICKS_MAX_RETURN_IDS;
+      if (raw === undefined || raw === '') return 500000;
+      const n = parseInt(raw, 10);
+      if (!Number.isInteger(n) || n < 0) {
+        console.warn(`[CDF] Invalid DATABRICKS_MAX_RETURN_IDS="${raw}"; using default 500000 (a non-negative integer; 0 disables the ceiling).`);
+        return 500000;
+      }
+      return n;
+    })()
   }
 };
+
+// Options for every executeStatement call, so none of them can fall back to the driver's CloudFetch default.
+// Per statement on purpose: in 1.12.0 the DBSQLClient constructor ignores a config argument.
+function statementOptions() {
+  return {
+    runAsync: true,
+    queryTimeout: config.databricks.queryTimeout,
+    useCloudFetch: config.databricks.useCloudFetch
+  };
+}
 
 // The ArcGIS CDF publish wizard makes EVERY declared service parameter required, so a
 // Lakehouse service still has to put something in the Lakebase-only fields (and vice-versa).
@@ -70,7 +108,7 @@ function cleanParam(value) {
 const SERVICE_PARAM_KEYS = [
   'workspace', 'warehouseHttpPath', 'tableName', 'geometryColumn', 'idField',
   'geometryFormat', 'timeColumn', 'lakebaseHost', 'lakebasePort', 'lakebaseDatabase',
-  'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled',
+  'lakebaseSchema', 'lakebaseTable', 'maxRecordCount', 'srid', 'editingEnabled', 'minScale',
 ];
 
 // supportedQueryFormats is deliberately never set: the runtime default 'JSON,geojson,PBF' applies, so clients get PBF
@@ -82,6 +120,18 @@ const SERVICE_PARAM_KEYS = [
 
 // Normalize sentinel placeholders to "absent" on req.params, so a '-' typed into an
 // inapplicable-but-required publish field behaves exactly like leaving it blank would.
+// minScale is a display hint: a malformed value is logged once and ignored rather than failing the service.
+const warnedMinScale = new Set();
+function minScaleFor(req, logger) {
+  try {
+    return parseMinScale(req.params.minScale);
+  } catch (e) {
+    const key = `${req.params.tableName}|${req.params.minScale}`;
+    if (!warnedMinScale.has(key)) { warnedMinScale.add(key); logger.warn(`${req.params.tableName}: ${e.message}; ignoring it`); }
+    return null;
+  }
+}
+
 function normalizeServiceParams(req) {
   if (!req || !req.params) return;
   for (const key of SERVICE_PARAM_KEYS) {
@@ -109,7 +159,9 @@ function resolveLakehouseTarget(req) {
 // Initialize audit logger
 const auditLogger = getAuditLogger();
 
-let requestCounter = 0;
+// Sequence for request ids in log lines. Each request copies its own id: reading the shared counter after an await
+// labelled lines with whichever request arrived last (seen live: one 'Query N' mixing several requests' lines).
+let requestSeq = 0;
 
 // Layer extent for metadata responses, per table. ST_Envelope_Agg is a full-table aggregate, so on a multi-billion-row
 // table it runs for minutes and every metadata request (ArcGIS asks after each restart) piled one more onto the
@@ -294,10 +346,7 @@ class Model {
       // Build the query (validateFieldName) inside the try: a bad timeColumn should degrade to a negative cache + null
       // like a SQL error, not throw out of this "never rejects" method and 500 every metadata request forever.
       const timeQuery = this._timeExtentQuery(sourceConfig);
-      op = await connection.session.executeStatement(timeQuery, {
-        runAsync: true,
-        queryTimeout: config.databricks.queryTimeout
-      });
+      op = await connection.session.executeStatement(timeQuery, statementOptions());
       const fetchP = op.fetchAll();
       fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
@@ -339,10 +388,7 @@ class Model {
       let conn, op, timer;
       try {
         conn = await pool.acquire();
-        op = await conn.session.executeStatement(timeQuery, {
-          runAsync: true,
-          queryTimeout: config.databricks.queryTimeout
-        });
+        op = await conn.session.executeStatement(timeQuery, statementOptions());
         const fetchP = op.fetchAll();
         fetchP.catch(() => {}); // a cancelled op's pending fetch rejects later
         const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
@@ -379,10 +425,7 @@ class Model {
     let op;
     let timer;
     try {
-      op = await connection.session.executeStatement(extentQuery, {
-        runAsync: true,
-        queryTimeout: config.databricks.queryTimeout
-      });
+      op = await connection.session.executeStatement(extentQuery, statementOptions());
       // Promise.race doesn't cancel the loser. Once we cancel() a timed-out operation, the still-pending fetchAll()
       // rejects in the real @databricks/sql driver — attach a sink so that rejection isn't unhandled (which would
       // crash the process on Node >= 15). The test stub resolves it artificially, so this guard is only exercised live.
@@ -424,7 +467,8 @@ class Model {
    * @param {function} callback - Callback function(error, geojson)
    */
   getData(req, callback) {
-    requestCounter++;
+    const requestCounter = ++requestSeq;
+    req._cdfRequestId = requestCounter;
     normalizeServiceParams(req); // '-', 'na', blanks etc. (publish-form placeholders) => unset
 
     // Route to Lakebase if this is an editable service
@@ -475,6 +519,7 @@ class Model {
       timeColumn: req.params.timeColumn || null,
       dbWKID: parseInt(req.params.srid) || config.databricks.srid || 4326,
       maxRecordCountPerPage: parseInt(req.params.maxRecordCount) || config.databricks.maxRecordCount || 2000,
+      minScale: minScaleFor(req, this.logger),
       name: req.params.tableName ? req.params.tableName.split('.').pop() : 'DatabricksLayer',
       description: `Databricks table: ${req.params.tableName}`
     };
@@ -510,12 +555,45 @@ class Model {
 
     this.logger.info(`Query ${requestCounter}: Acquiring connection from pool ${pool.poolLabel()}...`);
 
+    // A client that gives up (Map Viewer drops tiles on every pan and zoom) closes the response. Cancel its SQL and
+    // free the connection instead of finishing work nobody will read, and skip queued requests whose client is gone.
+    // `close` also fires after a normal response, hence the writableEnded check.
+    const res = req.res;
+    let clientGone = false;
+    let onClientGone = null;
+    const markClientGone = () => {
+      if (clientGone || !res || res.writableEnded) return;
+      clientGone = true;
+      this.logger.info(`Query ${requestCounter}: client went away`);
+      if (onClientGone) onClientGone();
+    };
+    if (res && typeof res.once === 'function') res.once('close', markClientGone);
+    const stopWatchingClient = () => { if (res && typeof res.off === 'function') res.off('close', markClientGone); };
+    // Answer exactly once: a callback that throws (e.g. writing to a dead socket) must not trigger a second callback
+    // from the catch below.
+    let responded = false;
+    const respond = (err, data) => {
+      if (responded) return;
+      responded = true;
+      try { callback(err, data); } catch (e) { this.logger.error(`Query ${requestCounter}: response callback threw: ${e.message}`); }
+    };
+    const isTile = String(geoserviceParams.resultType || '').toLowerCase() === 'tile';
+
     // Acquire connection and execute query
     pool.acquire()
       .then(async (conn) => {
         connection = conn;
         let queryOperation;
         let queryFailed = false;
+        let cancelReason = null; // set when we cancel the statement ourselves (client gone, tile timeout)
+        let cancelP = null;      // resolves true if that cancel succeeded
+
+        if (clientGone) {
+          stopWatchingClient();
+          pool.release(connection);
+          this.logger.info(`Query ${requestCounter}: client went away while queued; not running it`);
+          return respond(new Error('Client closed the request'));
+        }
 
         try {
           this.logger.info(`Query ${requestCounter}: Using pooled connection ${connection.id}`);
@@ -527,10 +605,7 @@ class Model {
             sourceConfig.geometryColumn,
             sourceConfig.geometryFormat,
             async (sql) => {
-              const op = await connection.session.executeStatement(sql, {
-                runAsync: true,
-                queryTimeout: config.databricks.queryTimeout
-              });
+              const op = await connection.session.executeStatement(sql, statementOptions());
               const rows = await op.fetchAll();
               await op.close();
               return rows;
@@ -546,10 +621,13 @@ class Model {
             sourceConfig.dbWKID,
             fetchSize,
             resolvedFormat,
-            sourceConfig.timeColumn
+            sourceConfig.timeColumn,
+            config.databricks.maxReturnIds
           );
 
-          this.logger.info(`Query ${requestCounter}: ${sqlQuery.substring(0, 150)}...`);
+          // The time and objectIds filters come after the (long) geometry filter, so a plain prefix hid them; log the
+          // start plus the tail so the time window always shows.
+          this.logger.info(`Query ${requestCounter}: ${sqlQuery.length > 400 ? `${sqlQuery.substring(0, 160)} … ${sqlQuery.slice(-240)}` : sqlQuery}`);
 
           // Calculate extent for metadata requests (cached, time-boxed, de-duped — see getLayerExtent)
           if (isMetadataRequest && !sourceConfig.timeColumn && !warnedNoTimeColumn.has(sourceConfig.tableName)) {
@@ -574,21 +652,53 @@ class Model {
           }
 
           // Execute main query
-          queryOperation = await connection.session.executeStatement(sqlQuery, {
-            runAsync: true,
-            queryTimeout: config.databricks.queryTimeout
-          });
-          const rows = await queryOperation.fetchAll();
+          queryOperation = await connection.session.executeStatement(sqlQuery, statementOptions());
+          const op = queryOperation;
+          const cancelQuery = (reason) => {
+            if (cancelP) return;
+            cancelReason = reason;
+            this.logger.info(`Query ${requestCounter}: cancelling its SQL (${reason})`);
+            cancelP = op.cancel().then(() => true, (e) => {
+              this.logger.warn(`Query ${requestCounter}: cancel failed: ${e.message}`);
+              return false;
+            });
+          };
+          onClientGone = () => cancelQuery('client went away');
+          if (clientGone) onClientGone();
+          const tileMs = config.databricks.tileQueryTimeout;
+          const tileTimer = isTile && tileMs > 0
+            ? setTimeout(() => cancelQuery(`tile query over ${Math.round(tileMs / 1000)} s`), tileMs)
+            : null;
+          let rows;
+          try { rows = await queryOperation.fetchAll(); } finally { clearTimeout(tileTimer); }
+          if (cancelReason) {
+            // fetchAll finished before the cancel took effect; don't build a response for a client that's gone
+            throw new Error(`Query cancelled: ${cancelReason}`);
+          }
           await queryOperation.close();
           queryOperation = null;
 
           this.logger.info(`Query ${requestCounter}: Received ${rows.length} rows`);
 
+          // returnIdsOnly is fetched with LIMIT maxReturnIds + 1 (see buildSqlQuery). If we got the extra row the id
+          // set is larger than the ceiling; return an actionable error rather than a silently-truncated (wrong) set.
+          const idCeiling = config.databricks.maxReturnIds;
+          if (geoserviceParams.returnIdsOnly && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
+            this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
+            const tooMany = new Error(
+              `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` +
+              `Narrow the request with where / time / geometry filters, or raise the DATABRICKS_MAX_RETURN_IDS ` +
+              `environment variable on the server (set it to 0 to disable the ceiling).`
+            );
+            tooMany.code = 400; // client should narrow the query — a 4xx, not a generic server error
+            return respond(tooMany);
+          }
+
           // Initialize GeoJSON response
           let geojson = { type: "FeatureCollection", features: [] };
 
           if (rows.length === 0) {
-            return callback(null, geojson);
+            return respond(null, geojson);
           }
 
           // Check if we exceeded transfer limit.
@@ -626,6 +736,7 @@ class Model {
             description: sourceConfig.description,
             geometryType: this.inferGeometryType(rows, sourceConfig.geometryColumn),
             maxRecordCount: sourceConfig.maxRecordCountPerPage,
+            ...(sourceConfig.minScale && { minScale: sourceConfig.minScale }),
             exceededTransferLimit,
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
@@ -660,13 +771,25 @@ class Model {
           const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
           auditLogger.logQuery(username, sourceConfig.tableName, geoserviceParams, recordCount, ipAddress);
 
-          callback(null, geojson);
+          respond(null, geojson);
 
         } catch (error) {
-          queryFailed = true;
-          this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
-          callback(error);
+          if (cancelReason) {
+            // our own cancel: the session is fine (destroyed below only if the cancel itself failed)
+            this.logger.info(`Query ${requestCounter}: cancelled (${cancelReason})`);
+            if (!clientGone) error = new Error(`Tile query cancelled: ${cancelReason}`);
+          } else if (clientGone) {
+            this.logger.info(`Query ${requestCounter}: ended after the client went away`);
+          } else {
+            queryFailed = true;
+            this.logger.error(`Query ${requestCounter}: Error executing query: ${error.message}`);
+          }
+          respond(error);
         } finally {
+          stopWatchingClient();
+          onClientGone = null;
+          // wait for our cancel to settle before closing/reusing the session; an uncertain cancel isn't reusable
+          if (cancelP && !(await cancelP)) queryFailed = true;
           // Clean up operations independently (not connection - it goes back to pool).
           // The extent operation is opened and closed entirely within getLayerExtent, so it's not handled here.
           if (queryOperation) {
@@ -688,8 +811,9 @@ class Model {
         }
       })
       .catch((error) => {
+        stopWatchingClient();
         this.logger.error(`Query ${requestCounter}: Error acquiring connection: ${error.message}`);
-        callback(error);
+        respond(error);
 
         // Ensure connection is released even on acquisition error
         if (connection) {
@@ -767,6 +891,7 @@ class Model {
    * Returns identical GeoJSON structure as the Databricks path.
    */
   async getDataFromLakebase(req, callback) {
+    const requestCounter = req._cdfRequestId ?? ++requestSeq;
     // Convert boolean strings to actual booleans
     Object.keys(req.query).forEach((key) => {
       const val = (req.query[key] + "").toLowerCase();
@@ -798,6 +923,7 @@ class Model {
       idField: rawIdField,
       dbWKID: parseInt(req.params.srid) || config.databricks.srid || 4326,
       maxRecordCountPerPage: parseInt(req.params.maxRecordCount) || config.databricks.maxRecordCount || 2000,
+      minScale: minScaleFor(req, this.logger),
       name: req.params.lakebaseTable || 'LakebaseLayer',
       description: `Lakebase table: ${req.params.lakebaseSchema || 'public'}.${req.params.lakebaseTable}`,
     };
@@ -839,7 +965,7 @@ class Model {
       this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
       return callback(validationError);
     }
-    this.logger.info(`Query ${requestCounter}: ${sql.substring(0, 150)}...`);
+    this.logger.info(`Query ${requestCounter}: ${sql.length > 400 ? `${sql.substring(0, 160)} … ${sql.slice(-240)}` : sql}`);
 
     pool.query(sql, params)
       .then((result) => {
@@ -874,6 +1000,7 @@ class Model {
             description: sourceConfig.description,
             geometryType,
             maxRecordCount: sourceConfig.maxRecordCountPerPage,
+            ...(sourceConfig.minScale && { minScale: sourceConfig.minScale }),
             exceededTransferLimit,
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,

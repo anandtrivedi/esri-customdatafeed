@@ -3,6 +3,11 @@
  * Converts Databricks query results to GeoJSON format
  */
 
+// idFields already warned about overflowing the 32-bit OBJECTID range — warn once per field per process, not per
+// feature. A 64-bit id (e.g. AIS `bigid`) would otherwise emit one console.warn for every row, flooding the ArcGIS
+// log under tile load (seen: ~8,900 warnings per view) and slowing the response.
+const warnedInvalidId = new Set();
+
 function translateToGeoJSON(data, config) {
   if (!data || data.length === 0) {
     return {
@@ -12,15 +17,17 @@ function translateToGeoJSON(data, config) {
   }
 
   const columns = Object.keys(data[0]);
+  // Throttle the invalid-id warning per table+field (not just field) so two services sharing an idField name both warn.
+  const warnKey = `${config.tableName || config.name || ""}|${config.idField}`;
   return {
     type: "FeatureCollection",
     features: data.map((row) =>
-      formatFeature(row, columns, config.idField, config.geometryColumn, config.dbWKID)
+      formatFeature(row, columns, config.idField, config.geometryColumn, config.dbWKID, warnKey)
     ),
   };
 }
 
-function formatFeature(values, columns, idField, geometryField, dbWKID) {
+function formatFeature(values, columns, idField, geometryField, dbWKID, warnKey = idField) {
   let feature = {
     type: "Feature",
     properties: {},
@@ -42,8 +49,9 @@ function formatFeature(values, columns, idField, geometryField, dbWKID) {
       // Cast to integer — Databricks returns BIGINT as strings/BigInts,
       // but CDF runtime requires safe integers for OBJECTID recognition
       const intValue = Number(value);
-      if (!isValidId(intValue)) {
-        console.warn(`Invalid ID value: ${value}`);
+      if (!isValidId(intValue) && !warnedInvalidId.has(warnKey)) {
+        warnedInvalidId.add(warnKey);
+        console.warn(`Invalid ID value for idField "${idField}" (e.g. ${value}): outside the 32-bit OBJECTID range (0..2147483647) or non-integer. Use a 32-bit-fitting unique integer idField. Suppressing further per-feature warnings for this field.`);
       }
       feature.properties[columns[i]] = intValue;
     } else {

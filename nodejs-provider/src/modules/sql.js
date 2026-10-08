@@ -22,7 +22,8 @@ function buildSqlQuery(
   dbWKID,
   fetchSize,
   geometryFormat = null,
-  timeColumn = null
+  timeColumn = null,
+  maxReturnIds = 0
 ) {
   const {
     where,
@@ -38,6 +39,7 @@ function buildSqlQuery(
     returnDistinctValues,
     returnGeometry = true,
     time,
+    resultType,
   } = geoParams;
 
   // Build SELECT clause
@@ -85,17 +87,25 @@ function buildSqlQuery(
     geometryFormat,
   });
 
-  // Build ORDER BY clause with sanitization
-  const orderByClause = buildOrderByClause(orderByFields);
+  // Build ORDER BY clause with sanitization. Feature-tile requests (resultType=tile, no offset) don't page and draw in
+  // any order, but clients still send orderByFields=<objectId> ASC. On a large table that forces a sort of every row in
+  // the tile before the LIMIT (33 s vs 2 s on a 28B-row table), so tiles get no ORDER BY.
+  const unorderedTile = String(resultType || "").toLowerCase() === "tile" && !resultOffset;
+  const orderByClause = unorderedTile ? "" : buildOrderByClause(orderByFields);
 
   // Build DISTINCT clause
   const distinctClause = returnDistinctValues ? `DISTINCT ` : "";
 
-  // Build LIMIT and OFFSET clauses
-  const limitClause =
-    fetchSize && !returnIdsOnly && !returnDistinctValues
-      ? ` LIMIT ${fetchSize + 1}`
-      : "";
+  // Build LIMIT and OFFSET clauses.
+  // returnIdsOnly carries no page LIMIT (clients expect every matching id), but on a huge table that can pull millions
+  // of ids inline. A positive maxReturnIds bounds the fetch to maxReturnIds + 1 rows — the caller (model.js) detects
+  // the extra row and errors rather than returning a truncated id set. 0/absent keeps the old unbounded behaviour.
+  let limitClause = "";
+  if (returnIdsOnly && !returnCountOnly) {
+    limitClause = maxReturnIds > 0 ? ` LIMIT ${maxReturnIds + 1}` : "";
+  } else if (fetchSize && !returnIdsOnly && !returnDistinctValues) {
+    limitClause = ` LIMIT ${fetchSize + 1}`;
+  }
   const sanitizedOffset = resultOffset ? validateInteger(resultOffset, 0) : 0;
   const offsetClause =
     sanitizedOffset && !returnIdsOnly ? ` OFFSET ${sanitizedOffset}` : "";
@@ -211,28 +221,40 @@ function buildOrderByClause(orderByFields) {
  * @param {string|null} timeColumn - Name of the timestamp column (configured per service)
  */
 function buildTimeFilter(timeParam, timeColumn) {
-  if (!timeParam || !timeColumn) return null;
+  if (timeParam === undefined || timeParam === null || timeParam === "" || !timeColumn) return null;
 
-  try {
-    const [startMs, endMs] = timeParam.split(",").map(Number);
+  // ArcGIS REST `time` takes three forms: an instant ("t"), a range ("t1,t2"), or an open-ended range with null for
+  // either end ("null,t2" / "t1,null"). Map Viewer's time slider sends an instant in instant mode. This used to accept
+  // only "t1,t2": an instant parsed as NaN, the filter was dropped, and the query scanned all of history.
+  // An unreadable value is an error rather than "no filter", for the same reason.
+  // Fail closed on a misconfigured timeColumn (shared validator) rather than silently stripping characters into a
+  // different column name, matching how outFields are sanitized above.
+  const sanitizedColumn = validateFieldName(timeColumn);
+  // A malformed time value is a client error: tag it 400 so the runtime returns a 4xx (not an opaque 500). We still
+  // error rather than drop the filter and scan all of history.
+  const badTime = () => { const e = new Error(`Invalid time parameter: ${timeParam}`); e.code = 400; return e; };
+  const toIso = (raw) => {
+    const v = String(raw).trim();
+    if (v === "" || v.toLowerCase() === "null") return null;
+    const ms = Number(v);
+    if (!Number.isFinite(ms)) throw badTime();
+    // A finite but out-of-range epoch (|ms| > ~8.64e15) makes Date.toISOString() throw a RangeError — still a client
+    // error, so surface it as 400 too rather than letting it bubble up as an opaque 500.
+    try { return new Date(ms).toISOString(); } catch (e) { throw badTime(); }
+  };
 
-    if (isNaN(startMs) || isNaN(endMs)) {
-      console.error("Invalid time parameter:", timeParam);
-      return null;
-    }
-
-    // Sanitize column name (allow alphanumeric and underscore only)
-    const sanitizedColumn = timeColumn.replace(/[^a-zA-Z0-9_]/g, "");
-
-    // Convert milliseconds to ISO timestamp
-    const startTime = new Date(startMs).toISOString();
-    const endTime = new Date(endMs).toISOString();
-
-    return `${sanitizedColumn} >= '${startTime}' AND ${sanitizedColumn} <= '${endTime}'`;
-  } catch (error) {
-    console.error("Error parsing time parameter:", error);
-    return null;
+  const parts = String(timeParam).split(",");
+  if (parts.length > 2) throw badTime();
+  if (parts.length === 1) {
+    const at = toIso(parts[0]);
+    return at ? `${sanitizedColumn} = '${at}'` : null;
   }
+  const start = toIso(parts[0]);
+  const end = toIso(parts[1]);
+  if (start && end) return `${sanitizedColumn} >= '${start}' AND ${sanitizedColumn} <= '${end}'`;
+  if (start) return `${sanitizedColumn} >= '${start}'`;
+  if (end) return `${sanitizedColumn} <= '${end}'`;
+  return null; // "null,null": explicitly unbounded
 }
 
 module.exports = {

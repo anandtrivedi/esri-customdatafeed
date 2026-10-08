@@ -153,6 +153,13 @@ describe("lakebaseQuery", () => {
       expect(sql).to.include("ORDER BY name ASC, height DESC");
     });
 
+    it("drops ORDER BY on feature-tile requests, keeps it when paging", () => {
+      const tile = buildLakebaseSelectSql({ orderByFields: "id ASC", resultType: "tile" }, baseConfig).sql;
+      expect(tile).to.not.include("ORDER BY");
+      const paged = buildLakebaseSelectSql({ orderByFields: "id ASC", resultType: "tile", resultOffset: 5000 }, baseConfig).sql;
+      expect(paged).to.include("ORDER BY id ASC");
+    });
+
     it("should apply OFFSET", () => {
       const { sql } = buildLakebaseSelectSql(
         { resultOffset: 100 },

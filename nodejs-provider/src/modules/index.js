@@ -4,6 +4,7 @@
  */
 
 const { translateToGeoJSON } = require("./translate");
+const { parseMinScale } = require("./scale");
 const { buildSqlQuery } = require("./sql");
 const { generateFiltersApplied } = require("./filters");
 const { getGeometryQuery, getExtentFromGeoJson } = require("./geometry");
@@ -50,4 +51,5 @@ module.exports = {
   deploymentLabel,
   userAgentTag,
   applicationName,
+  parseMinScale,
 };
