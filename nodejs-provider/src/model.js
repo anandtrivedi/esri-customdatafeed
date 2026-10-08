@@ -293,14 +293,14 @@ class Model {
    * compute it (de-duping concurrent cold-cache callers so a burst of metadata requests shares a single query).
    * Always resolves to an extent object or null — never rejects — so callers can serve metadata either way.
    */
-  async getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter) {
+  async getLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter) {
     const cached = extentCache.get(cacheKey);
     if (cached && Date.now() - cached.at < cached.ttl) {
       return cached.extent;
     }
     let inflight = extentInFlight.get(cacheKey);
     if (!inflight) {
-      inflight = this._computeLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter)
+      inflight = this._computeLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter)
         .finally(() => extentInFlight.delete(cacheKey));
       extentInFlight.set(cacheKey, inflight);
     }
@@ -313,18 +313,38 @@ class Model {
    * then pulls every year, which is slow and saturates the CDF runtime. Same cache / de-dupe / time box as the spatial
    * extent; resolves to [start, end] or null, never rejects.
    */
-  async getLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
+  async getLayerTimeExtent(pool, cacheKey, sourceConfig, requestCounter) {
     const cached = extentCache.get(cacheKey);
     if (cached && Date.now() - cached.at < cached.ttl) {
       return cached.extent;
     }
     let inflight = extentInFlight.get(cacheKey);
     if (!inflight) {
-      inflight = this._computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter)
+      inflight = this._computeLayerTimeExtent(pool, cacheKey, sourceConfig, requestCounter)
         .finally(() => extentInFlight.delete(cacheKey));
       extentInFlight.set(cacheKey, inflight);
     }
     return inflight;
+  }
+
+  // Detached, best-effort cleanup of an extent operation and its borrowed connection. Deliberately fire-and-forget:
+  // each of cancel()/close() is a warehouse round-trip, and awaiting them inline put two round-trips on the metadata
+  // response's critical path on every extent timeout (10 s budget + 2 round-trips per extent, twice, sequentially).
+  // The connection is destroyed — never recycled — when its state is unknown: close() failed, or the statement never
+  // even opened (a failed open leaves the session suspect, mirroring getData's destroy-on-query-failure).
+  _releaseExtentConnection(pool, conn, op, cancel, forceDestroy) {
+    (async () => {
+      if (cancel && op) {
+        try { await op.cancel(); } catch (e) { /* may already be finished */ }
+      }
+      let clean = !forceDestroy;
+      if (op) {
+        try { await op.close(); } catch (e) { clean = false; }
+      }
+      if (conn) {
+        try { pool.release(conn, { destroy: !clean }); } catch (e) { /* best-effort */ }
+      }
+    })();
   }
 
   // SQL for [min,max] of the time column as epoch-ms BIGINTs. CAST to TIMESTAMP so DATE and TIMESTAMP both work;
@@ -338,124 +358,184 @@ class Model {
     `;
   }
 
-  async _computeLayerTimeExtent(pool, connection, cacheKey, sourceConfig, requestCounter) {
-    const now = Date.now();
-    let op;
+  async _computeLayerTimeExtent(pool, cacheKey, sourceConfig, requestCounter) {
     let timer;
+    // Assigned by `work` as each stage materializes; the timeout path must clean up whatever exists by then.
+    const handles = {};
     try {
       // Build the query (validateFieldName) inside the try: a bad timeColumn should degrade to a negative cache + null
       // like a SQL error, not throw out of this "never rejects" method and 500 every metadata request forever.
       const timeQuery = this._timeExtentQuery(sourceConfig);
-      op = await connection.session.executeStatement(timeQuery, statementOptions());
-      const fetchP = op.fetchAll();
-      fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
+      // A dedicated borrowed connection, never the request's: the time extent runs in PARALLEL with the spatial extent
+      // (one session can't host both statements), and no live operation may ride the request's connection when
+      // getData releases it back to the pool. The ENTIRE path — borrow, statement open, fetch — races the wait budget
+      // (see _computeLayerExtent): a queued borrow or a slow session open can never push the metadata response past
+      // EXTENT_WAIT_MS. `work` resolves when the statement is OPEN, returning a WRAPPER around the fetch promise —
+      // never the promise itself (an async function ADOPTS a returned promise, which would make `work` settle only
+      // when the fetch settles and leave a stuck fetch uncancellable past the budget).
+      const work = (async () => {
+        handles.conn = await pool.acquire();
+        handles.op = await handles.conn.session.executeStatement(timeQuery, statementOptions());
+        const fetchP = handles.op.fetchAll();
+        fetchP.catch(() => {}); // see _computeLayerExtent: a cancelled op's pending fetch rejects later
+        return { fetchP };
+      })();
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
-      const rows = await Promise.race([fetchP, timedOut]);
+      const opened = await Promise.race([work, timedOut]);
+      // Stage 2 only if the borrow/open made it inside the budget; then the fetch races whatever budget is left.
+      const rows = opened === EXTENT_TIMED_OUT
+        ? EXTENT_TIMED_OUT
+        : await Promise.race([opened.fetchP, timedOut]);
       if (rows === EXTENT_TIMED_OUT) {
-        // Too slow for the metadata budget. Cancel it on THIS request's connection so that connection returns to the
-        // pool clean — never released with a live operation, never shared with the next request. Then recompute in the
-        // background on a SEPARATE borrowed connection (see _backgroundTimeExtent). The negative cache entry keeps
-        // concurrent/follow-up metadata requests from each spawning their own background recompute — stamped NOW (not
-        // function entry) and given the full background cap, so it stays valid for the entire background window (the
-        // background can run until ~now+EXTENT_WAIT_MS+TIME_EXTENT_BG_MS; anchoring at entry would expire it early and
-        // let a second request start a duplicate query / clobber a fresh result).
-        this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — recomputing in the background on its own connection (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
-        try { await op.cancel(); } catch (e) { /* may already be finished */ }
+        // Too slow for the metadata budget — stop WAITING, not running: the min/max keeps going in the background on
+        // its own dedicated connection (cancelling and re-running the identical query would waste its head start).
+        // This covers both "still borrowing" and "fetch too slow": the background continuation waits for `work` to
+        // settle (a queued borrow resolves or rejects within the pool's acquire timeout, so it can't hang), applies
+        // the background cap, and releases whatever materialized — never a duplicate query. The negative cache
+        // entry keeps concurrent/follow-up metadata requests from each spawning their own query — stamped NOW and
+        // given the full background cap, so it stays valid for the entire background window.
+        this.logger.warn(`Query ${requestCounter}: time extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — letting it finish in the background on its own connection (cap ${Math.round(TIME_EXTENT_BG_MS / 1000)} s)`);
         extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: TIME_EXTENT_BG_MS + EXTENT_WAIT_MS });
-        this._backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig);
+        this._finishTimeExtentInBackground(pool, work, handles, cacheKey, sourceConfig);
         return null;
       }
       const range = timeRowsToRange(rows);
-      extentCache.set(cacheKey, { extent: range, at: now, ttl: EXTENT_CACHE_MS });
+      extentCache.set(cacheKey, { extent: range, at: Date.now(), ttl: EXTENT_CACHE_MS });
+      this._releaseExtentConnection(pool, handles.conn, handles.op, false);
       return range;
     } catch (error) {
       this.logger.warn(`Query ${requestCounter}: Failed to calculate time extent for ${sourceConfig.tableName}: ${error.message}`);
-      extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_ERROR_RETRY_MS });
+      extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+      // If the statement never opened, the session's state is unknown — destroy instead of recycle.
+      this._releaseExtentConnection(pool, handles.conn, handles.op, false, !handles.op);
       return null;
     } finally {
       clearTimeout(timer);
-      if (op) {
-        try { await op.close(); } catch (e) { /* best-effort */ }
-      }
     }
   }
 
-  // Fire-and-forget background recompute of a slow time extent, on its OWN pooled connection — never the request's, so
-  // no live operation ever rides a connection that getData has released, and no two statements share one session.
-  // Borrows a connection, runs the min/max capped at TIME_EXTENT_BG_MS, writes the cache, and always releases.
-  _backgroundTimeExtent(pool, cacheKey, timeQuery, sourceConfig) {
+  // Background continuation of a slow time extent on its OWN borrowed connection: waits for the borrow/open to
+  // settle, then keeps waiting on the already-running min/max (no duplicate query) up to TIME_EXTENT_BG_MS, writes
+  // whatever lands to the cache, and always releases the connection. Detached from the metadata response's path.
+  _finishTimeExtentInBackground(pool, work, handles, cacheKey, sourceConfig) {
+    let timer;
     (async () => {
-      let conn, op, timer;
+      // If the statement never even opened, the session's state is unknown — destroy rather than recycle.
+      const release = (cancel) => this._releaseExtentConnection(pool, handles.conn, handles.op, cancel, !handles.op);
       try {
-        conn = await pool.acquire();
-        op = await conn.session.executeStatement(timeQuery, statementOptions());
-        const fetchP = op.fetchAll();
-        fetchP.catch(() => {}); // a cancelled op's pending fetch rejects later
         const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), TIME_EXTENT_BG_MS); });
-        const rows = await Promise.race([fetchP, cap]);
-        if (rows === EXTENT_TIMED_OUT) {
-          try { await op.cancel(); } catch (e) { /* already finished */ }
+        const opened = await Promise.race([work, cap]);
+        if (opened === EXTENT_TIMED_OUT) {
+          // Gave up while STILL borrowing/opening — there is usually no op to cancel yet. `work` settles at
+          // statement-open (a queued borrow resolves or rejects within the pool's acquire timeout, so it can't hang),
+          // and the detached cleanup then cancels whatever materialized — a late borrow can never leak its connection
+          // or run an orphaned query to completion.
           extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
           this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
-        } else {
-          extentCache.set(cacheKey, { extent: timeRowsToRange(rows), at: Date.now(), ttl: EXTENT_CACHE_MS });
+          work.catch(() => {}).then(() => release(true));
+          return;
         }
+        const rows = await Promise.race([opened.fetchP, cap]); // fetch vs whatever is left of the cap
+        if (rows === EXTENT_TIMED_OUT) {
+          try { await handles.op.cancel(); } catch (e) { /* already finished */ }
+          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
+          this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
+          release(false);
+          return;
+        }
+        extentCache.set(cacheKey, { extent: timeRowsToRange(rows), at: Date.now(), ttl: EXTENT_CACHE_MS });
+        release(false);
       } catch (e) {
         extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
         this.logger.warn(`background time extent of ${sourceConfig.tableName} failed: ${e.message}`);
+        release(false);
       } finally {
         if (timer) clearTimeout(timer);
-        if (op) { try { await op.close(); } catch (e) { /* best-effort */ } }
-        if (conn) { try { pool.release(conn); } catch (e) { /* best-effort */ } }
       }
     })();
   }
 
   /**
-   * Run the full-table ST_Envelope_Agg, time-boxed by EXTENT_WAIT_MS. Caches the result (long TTL), a timeout
-   * (medium TTL — "too big"), or an error (short TTL — often transient) so none re-runs on every metadata request.
+   * Run the full-table ST_Envelope_Agg on its own borrowed connection, time-boxed by EXTENT_WAIT_MS. Caches the
+   * result (long TTL), a timeout (medium TTL — "too big"), or an error (short TTL — often transient) so none
+   * re-runs on every metadata request. The connection is borrowed rather than the request's so this runs in
+   * PARALLEL with the time extent (see getData), and so a timed-out operation never rides the request's
+   * connection when getData releases it. The ENTIRE path — borrow, statement open, fetch — races the wait budget:
+   * the borrow used to sit outside the box, so under pool saturation a queued acquire stalled the metadata
+   * response for the pool's full 30 s acquisition timeout (all while the request held its own connection, letting
+   * a cold-cache burst pin every pool slot). Inside the box, a cold metadata response is bounded by
+   * EXTENT_WAIT_MS no matter what the pool is doing.
    */
-  async _computeLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter) {
-    const now = Date.now();
+  async _computeLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter) {
     // ST_Envelope_Agg computes the bounding box in a single aggregate pass
     const extentQuery = `
       SELECT ST_AsGeoJSON(ST_Envelope_Agg(${geomExpression})) AS extent
       FROM ${sourceConfig.tableName}
     `;
-    let op;
     let timer;
+    // Assigned by `work` as each stage materializes; the timeout path cleans up whatever exists by then.
+    const handles = {};
     try {
-      op = await connection.session.executeStatement(extentQuery, statementOptions());
-      // Promise.race doesn't cancel the loser. Once we cancel() a timed-out operation, the still-pending fetchAll()
-      // rejects in the real @databricks/sql driver — attach a sink so that rejection isn't unhandled (which would
-      // crash the process on Node >= 15). The test stub resolves it artificially, so this guard is only exercised live.
-      const fetchP = op.fetchAll();
-      fetchP.catch(() => {});
+      // `work` resolves when the statement is OPEN — it returns a WRAPPER around the fetch promise, not the promise
+      // itself: an async function returning a promise ADOPTS it, so `return fetchP` would make `work` settle only
+      // when the fetch settles, and a timeout during statement-open would then wait out the entire (uncapped) scan
+      // before cancelling. The wrapper keeps a stuck fetch cancellable at statement-open.
+      const work = (async () => {
+        handles.conn = await pool.acquire();
+        if (handles.abandoned) return null; // budget expired while queued — don't open the statement at all
+        handles.op = await handles.conn.session.executeStatement(extentQuery, statementOptions());
+        // Promise.race doesn't cancel the loser. Once we cancel() a timed-out operation, the still-pending fetchAll()
+        // rejects in the real @databricks/sql driver — attach a sink so that rejection isn't unhandled (which would
+        // crash the process on Node >= 15). The test stub resolves it artificially, so this guard is only exercised live.
+        const fetchP = handles.op.fetchAll();
+        fetchP.catch(() => {});
+        return { fetchP };
+      })();
       const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(EXTENT_TIMED_OUT), EXTENT_WAIT_MS); });
-      const extentRows = await Promise.race([fetchP, timedOut]);
+      const opened = await Promise.race([work, timedOut]);
+      const extentRows = opened === EXTENT_TIMED_OUT
+        ? EXTENT_TIMED_OUT
+        : await Promise.race([opened.fetchP, timedOut]); // fetch vs whatever is left of the budget
       if (extentRows === EXTENT_TIMED_OUT) {
-        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelled; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
-        try { await op.cancel(); } catch (e) { /* already finished */ }
-        extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_RETRY_MS });
+        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelling in the background; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
+        // A slow FETCH means the table genuinely may be too big — retry in 1 h. But if the budget expired while still
+        // BORROWING/opening, the table itself was never the problem (pool contention is transient) — retry in a minute.
+        const timedOutWhileOpening = !handles.op;
+        extentCache.set(cacheKey, {
+          extent: null,
+          at: Date.now(),
+          ttl: timedOutWhileOpening ? EXTENT_ERROR_RETRY_MS : EXTENT_RETRY_MS,
+        });
+        // Cancel off the critical path: this used to await cancel() + close() (two warehouse round-trips) before the
+        // metadata response could go out. If the budget expired while STILL borrowing/opening, `work` settles later (at
+        // statement-open — a queued borrow resolves or rejects within the pool's acquire timeout, so it can't hang;
+        // it skips opening the statement entirely when the borrow itself was late) and the detached cleanup then
+        // cancels/releases whatever materialized — a late borrow can never leak its connection.
+        handles.abandoned = true;
+        if (handles.op) {
+          this._releaseExtentConnection(pool, handles.conn, handles.op, true);
+        } else {
+          work.catch(() => {}).then(() => this._releaseExtentConnection(pool, handles.conn, handles.op, true));
+        }
         return null;
       }
       let extent = null;
       if (extentRows.length > 0 && extentRows[0].extent) {
         extent = getExtentFromGeoJson(JSON.parse(extentRows[0].extent), sourceConfig.dbWKID);
       }
-      extentCache.set(cacheKey, { extent, at: now, ttl: EXTENT_CACHE_MS });
+      extentCache.set(cacheKey, { extent, at: Date.now(), ttl: EXTENT_CACHE_MS });
+      this._releaseExtentConnection(pool, handles.conn, handles.op, false);
       return extent;
     } catch (error) {
       this.logger.warn(`Query ${requestCounter}: Failed to calculate extent for ${sourceConfig.tableName}: ${error.message}`);
       // Negatively cache non-timeout failures too (short TTL — they're often transient) so a persistent error doesn't
       // re-run the full-table scan on every metadata request.
-      extentCache.set(cacheKey, { extent: null, at: now, ttl: EXTENT_ERROR_RETRY_MS });
+      extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+      // If the statement never opened, the session's state is unknown — destroy instead of recycle.
+      this._releaseExtentConnection(pool, handles.conn, handles.op, false, !handles.op);
       return null;
     } finally {
-      clearTimeout(timer); // always clear — the success path and the reject path both land here
-      if (op) {
-        try { await op.close(); } catch (e) { /* best-effort; op may already be closed/cancelled */ }
-      }
+      clearTimeout(timer); // always clear — every path lands here
     }
   }
 
@@ -645,10 +725,19 @@ class Model {
             // Key by connection identity (workspace|warehouse) so a same-named table in another workspace sharing this
             // process can't collide and serve the wrong extent (or inherit the wrong negative cache).
             const cacheKey = `${pool.poolLabel()}|${sourceConfig.tableName}|${geomExpression}|${sourceConfig.dbWKID}`;
-            dbExtent = await this.getLayerExtent(connection, cacheKey, geomExpression, sourceConfig, requestCounter);
-            if (sourceConfig.timeColumn) {
-              dbTimeExtent = await this.getLayerTimeExtent(pool, connection, timeKey, sourceConfig, requestCounter);
-            }
+            // Both extents run in PARALLEL, each on its own borrowed connection. They used to run sequentially on
+            // the request's single connection (one session can't host both statements): two 10 s budgets stacked to
+            // 20 s+ on a cold cache, and each timeout added awaited cancel()/close() round-trips before the metadata
+            // response could go out (15–21 s observed live). De-duped per cache key, so a burst of cold metadata
+            // requests still shares one query per extent — at most one extra connection per extent per table.
+            const [computedExtent, computedTimeExtent] = await Promise.all([
+              this.getLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter),
+              sourceConfig.timeColumn
+                ? this.getLayerTimeExtent(pool, timeKey, sourceConfig, requestCounter)
+                : null,
+            ]);
+            dbExtent = computedExtent;
+            dbTimeExtent = sourceConfig.timeColumn ? computedTimeExtent : dbTimeExtent;
           }
 
           // Execute main query

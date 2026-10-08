@@ -5,14 +5,19 @@ const proxyquire = require("proxyquire").noCallThru();
 // interval at a time instead of every year at once. Cached, time-boxed, and finished in the background when slow.
 
 let timeCalls = 0;
+let timeCancelCalls = 0; // how many times the time-extent op was cancelled (background-cap path)
 let timeSlowMs = 0;
 let timeFails = false;
 let timeNull = false; // simulate an empty table / all-NULL time column: min/max come back NULL
-let acquireCount = 0; // connections borrowed from the pool (request + any background recompute)
+let acquireCount = 0; // connections borrowed from the pool (request + extent + background)
 let releaseCount = 0; // connections returned to the pool
+let requireParallel = false; // bar either extent from completing until BOTH are in flight (proves concurrency)
+let extentFetches = 0;
+let openParallelGate = null;
 const T0 = 1420070400000; // 2015-01-01
 const T1 = 1735689599000; // 2024-12-31 23:59:59
 const point = '{"type":"Point","coordinates":[-77,38]}';
+const extentPolygon = '{"type":"Polygon","coordinates":[[[-80,30],[-70,30],[-70,40],[-80,40],[-80,30]]]}';
 
 const connectionPoolStub = {
   getPool: () => ({
@@ -27,16 +32,25 @@ const connectionPoolStub = {
             if (isTime) timeCalls++;
             return {
               fetchAll: async () => {
-                if (/^\s*DESCRIBE/i.test(sql) || /ST_Envelope_Agg/.test(sql)) return [];
+                if (/^\s*DESCRIBE/i.test(sql)) return [];
+                const isSpatialExtent = /ST_Envelope_Agg/.test(sql);
+                if (isSpatialExtent || isTime) {
+                  if (requireParallel) {
+                    extentFetches++;
+                    if (extentFetches === 2) openParallelGate(); // both in flight — let them both proceed
+                    await parallelGatePromise; // resolves only once the other extent is also in flight
+                  }
+                }
                 if (isTime) {
                   if (timeFails) throw new Error("boom");
                   if (timeSlowMs) await new Promise((r) => setTimeout(r, timeSlowMs));
                   if (timeNull) return [{ t0: null, t1: null }]; // empty table / all-NULL column → min/max NULL
                   return [{ t0: String(T0), t1: String(T1) }]; // the driver returns BIGINT as strings
                 }
+                if (isSpatialExtent) return [{ extent: extentPolygon }];
                 return [{ id: 1, geometry: point }];
               },
-              cancel: async () => {},
+              cancel: async () => { timeCancelCalls++; },
               close: async () => {},
             };
           },
@@ -48,6 +62,13 @@ const connectionPoolStub = {
   shutdownPool: async () => {},
   getAllPoolStats: () => [],
 };
+
+// The parallel gate: a promise each in-flight extent fetch awaits; it resolves when BOTH extent fetches are in flight.
+let parallelGatePromise = null;
+function resetParallelGate() {
+  extentFetches = 0;
+  parallelGatePromise = new Promise((resolve) => { openParallelGate = resolve; });
+}
 
 describe("Lakehouse metadata time extent", function () {
   let Model;
@@ -80,7 +101,9 @@ describe("Lakehouse metadata time extent", function () {
   });
 
   beforeEach(() => {
-    timeCalls = 0; timeSlowMs = 0; timeFails = false; timeNull = false; acquireCount = 0; releaseCount = 0;
+    timeCalls = 0; timeCancelCalls = 0; timeSlowMs = 0; timeFails = false; timeNull = false; acquireCount = 0; releaseCount = 0;
+    requireParallel = false;
+    resetParallelGate();
     Model._extentCache.clear();
   });
 
@@ -107,20 +130,44 @@ describe("Lakehouse metadata time extent", function () {
     expect(timeCalls).to.equal(1);
   });
 
-  it("when slow, answers without it, recomputes in the background on its OWN connection, and the next request has it", async () => {
+  it("when slow, answers without it, lets the SAME query finish in the background on its own connection, and the next request has it", async () => {
     timeSlowMs = 300; // longer than the 50 ms wait, shorter than the 2 s background cap
     const model = new Model();
     const first = await getData(model, req("catalog.schema.big"));
     expect(first.metadata.timeInfo.timeExtent).to.equal(null);
-    await sleep(400); // the background recompute (own connection) finishes and fills the cache
-    // Foreground timed out on the request's connection; a fresh background query ran on a separate borrowed
-    // connection (so no live op ever rides the request's released connection, and no two statements share a session).
-    expect(timeCalls).to.equal(2);
-    expect(acquireCount).to.equal(2); // one for the request, one dedicated to the background recompute
-    expect(releaseCount).to.equal(2); // both were returned to the pool
+    await sleep(400); // the background continuation finishes and fills the cache
+    // The foreground stopped WAITING at the budget, not running: the one min/max query kept going on its own
+    // borrowed connection (no duplicate re-query), and no live op ever rides the request's released connection.
+    expect(timeCalls).to.equal(1);
+    expect(acquireCount).to.equal(3); // request + spatial extent + the time extent's dedicated connection
+    expect(releaseCount).to.equal(3); // all three were returned to the pool
     const second = await getData(model, req("catalog.schema.big"));
     expect(second.metadata.timeInfo.timeExtent).to.deep.equal([T0, T1]);
-    expect(timeCalls).to.equal(2); // second request served from cache, no new query
+    expect(timeCalls).to.equal(1); // second request served from cache, no new query
+  });
+
+  it("runs the spatial and time extents in parallel — one wait budget, not two stacked", async () => {
+    // The stub bars either extent fetch from completing until BOTH are in flight, so this is deterministic: no
+    // timing margins. If the extents still ran sequentially on one connection (the pre-1.1.7 behavior), the
+    // SPATIAL extent would sit at the barrier past the 50 ms budget and time out — its assertion below is the
+    // one that discriminates. (The time extent would eventually open the gate itself and still return a range.)
+    requireParallel = true;
+    const res = await getData(new Model(), req("catalog.schema.par"));
+    expect(res.metadata.extent).to.include({ xmin: -80, xmax: -70 });
+    expect(res.metadata.timeInfo.timeExtent).to.deep.equal([T0, T1]);
+  });
+
+  it("cancels a min/max that blows the background cap — bounded, not run to completion", async () => {
+    // The cap must CANCEL the stuck statement and free its borrowed connection at the cap, not wait for the fetch
+    // to finish naturally (which, on a genuinely stuck statement, is never).
+    timeSlowMs = 3000; // longer than the 2 s background cap
+    const model = new Model();
+    const first = await getData(model, req("catalog.schema.stuck"));
+    expect(first.metadata.timeInfo.timeExtent).to.equal(null);
+    await sleep(2400); // the cap fires at ~2 s after hand-off
+    expect(timeCancelCalls).to.equal(1); // cancelled AT the cap
+    expect(releaseCount).to.equal(3);     // ...and its borrowed connection was released
+    expect(timeCalls).to.equal(1);        // no duplicate query was ever started
   });
 
   it("has no timeInfo at all when no time column is configured", async () => {

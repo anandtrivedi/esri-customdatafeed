@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (362 tests, ~5s)
+# Run all tests (492 tests, ~5s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -129,21 +129,28 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**362 tests across 12 files:**
+**492 tests across 19 files:**
 | File | Count | Tests |
 |------|-------|-------|
-| `model.test.js` | 68 | Auth, getData routing, editData (CRUD + transactions), field extraction |
+| `model.test.js` | 98 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
 | `sanitize.test.js` | 59 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
-| `lakebaseQuery.test.js` | 49 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
+| `lakebaseQuery.test.js` | 53 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
+| `sql.test.js` | 41 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
 | `geometryFormat.test.js` | 39 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
-| `editSql.test.js` | 29 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization |
-| `sql.test.js` | 29 | Databricks SQL building, pagination, filtering, injection protection |
-| `geometry.test.js` | 24 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
-| `workspaceResolver.test.js` | 22 | `.databrickscfg` profile resolution → workspace + auth config |
+| `editSql.test.js` | 33 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization |
+| `geometry.test.js` | 27 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
+| `workspaceResolver.test.js` | 28 | `.databrickscfg` profile resolution → workspace + auth config |
+| `translate.test.js` | 17 | Row→GeoJSON, invalid geometry handling, ID casting, antimeridian |
+| `cloudFetch.test.js` | 13 | CloudFetch-off statement options, crash repro regression |
+| `extent.test.js` | 11 | Spatial extent cache/TTLs, de-dupe, own-connection, budget-bounded borrow, detached cleanup |
 | `filters.test.js` | 15 | filtersApplied flags, distinct bypass, combined filters |
+| `clientGone.test.js` | 8 | Client-abort cancel, tile timeout, single-response guarantee |
+| `esriGeometry.test.js` | 9 | Esri geometry → GeoJSON conversion |
+| `timeExtent.test.js` | 9 | Time extent cache, parallel extents, background continuation |
 | `version.test.js` | 10 | Provider version reporting |
-| `connectionPool.test.js` | 9 | Databricks SQL pool sizing, idle cleanup, wait queue |
-| `translate.test.js` | 9 | Row→GeoJSON, invalid geometry handling, ID casting |
+| `connectionPool.test.js` | 16 | Databricks SQL pool sizing, idle cleanup, wait queue, creation cap |
+| `scale.test.js` | 4 | minScale parameter parsing/advertising |
+| `lakebasePool.test.js` | 2 | Pool keying basics |
 
 Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exception: `model.test.js` tests the full `model.js` including getData/editData integration.
 
@@ -243,9 +250,9 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 ## Gotchas discovered during audit
 
 - **Client WHERE is parenthesized** before the time/geometry/objectId filters are ANDed on (both backends). Unwrapped, `a OR b` let those filters apply to `b` only — on a 28B-row table that was a near-full scan per request, which filled the connection pool and made every service on the box hang.
-- **Metadata extent is cached, time-boxed, and de-duped** (`model.js` `getLayerExtent`): `ST_Envelope_Agg` over the whole table runs once per table (24 h cache, `CDF_EXTENT_CACHE_MS`); past `CDF_EXTENT_WAIT_MS` (10 s) it's cancelled, metadata goes out without an extent, and the table isn't retried for `CDF_EXTENT_RETRY_MS` (1 h); a non-timeout error is negatively cached only briefly (`CDF_EXTENT_ERROR_RETRY_MS`, 1 min). Concurrent cold-cache requests share one in-flight query, so a burst after an ArcGIS restart doesn't fire N full scans. Cache key includes the pool identity (workspace|warehouse) so same-named tables in different workspaces don't collide. The cancelled operation's `fetchAll()` rejection is sunk (`.catch`) to avoid an unhandled rejection.
+- **Metadata extents run in PARALLEL on borrowed connections (v1.1.7)** (`model.js` `getLayerExtent`/`getLayerTimeExtent`): the spatial (`ST_Envelope_Agg`) and time extents used to run sequentially on the request's own connection — two stacked 10 s budgets plus awaited cancel/close round-trips made cold-cache metadata take 15–21 s live. Now each extent borrows its own pooled connection and both run via `Promise.all`, and the ENTIRE path (borrow → statement open → fetch) races `CDF_EXTENT_WAIT_MS` — a queued borrow can't stall the response past the budget (pool-saturation hold-and-wait was the round-1 review's main catch). Cleanup (cancel/close/release) is fire-and-forget (`_releaseExtentConnection`); a failed `close()` releases with `{destroy: true}` so a session in unknown state is never recycled. A spatial-extent timeout negatively caches for `CDF_EXTENT_RETRY_MS` (1 h) and, if the borrow was still queued, the late-granted connection skips opening the statement (`abandoned` flag) and just returns to the pool. Success caches 24 h (`CDF_EXTENT_CACHE_MS`); non-timeout errors 1 min (`CDF_EXTENT_ERROR_RETRY_MS`). Concurrent cold-cache requests share one in-flight query per cache key (so a burst costs at most one extra connection per extent per table). Cache keys include the pool identity (workspace|warehouse). Cancelled ops' `fetchAll()` rejections are sunk (`.catch`) to avoid unhandled rejections.
 - **PBF always on** (v1.1.5): `supportedQueryFormats` is never set, so the runtime advertises `JSON,geojson,PBF`. Verified on 12.1.0 (correct quantization transform, same features as JSON). The old `enablePbf` parameter was removed from `cdconfig.json` — verified live that services which had it stored still load (ArcGIS ignores the now-undeclared value), so nothing in `model.js` reads it.
-- **Time extent** (v1.1.5): `timeInfo.timeExtent` = min/max of `timeColumn`, cached/de-duped/time-boxed; slow tables finish in the background (`CDF_TIME_EXTENT_BG_MS`). Without a `timeColumn`, Map Viewer requests all dates per tile — the wizard pushes publishers to set one; the provider logs a one-time warning.
+- **Time extent** (v1.1.5, reworked v1.1.7): `timeInfo.timeExtent` = min/max of `timeColumn`, cached/de-duped/time-boxed. When it exceeds `CDF_EXTENT_WAIT_MS` the SAME query keeps running in the background on its dedicated borrowed connection (up to `CDF_TIME_EXTENT_BG_MS` = 120 s) — it is NOT cancelled and re-run; only a query that also blows the background cap is cancelled and negatively cached for 1 h. Without a `timeColumn`, Map Viewer requests all dates per tile — the wizard pushes publishers to set one; the provider logs a one-time warning.
 - **CloudFetch off** (`statementOptions()` in `model.js`): every `executeStatement` passes `useCloudFetch: false` unless `DATABRICKS_USE_CLOUDFETCH=true`. With it on, a host that can't reach the workspace's storage gets a 403 per download, and @databricks/sql 1.12.0's `CloudFetchResultHandler.fetchNext()` awaits only the first of up to 10 concurrent downloads; the rest reject unhandled and Node exits the whole CDF process (seen 2026-10-07; `testing/repro-cloudfetch-unhandled.js`). Per statement on purpose: the 1.12.0 `DBSQLClient` constructor ignores a config argument. Driver pinned to exactly 1.12.0. Measured from a laptop: CDF-sized pages (≤50K rows) never used CloudFetch; inline was as fast at 300K–1M rows (`testing/live-cloudfetch-check.js`).
 - **Tile timeout + single response** (`model.js` Lakehouse path): `resultType=tile` statements are cancelled after `DATABRICKS_TILE_QUERY_TIMEOUT` (ms, default 30000) by a provider timer, through the same cancel used when the client goes away (`req.res` `close`). ArcGIS Server was verified live NOT to pass browser aborts to the CDF, so the timer is what frees connections. Our cancel is awaited before the session is closed/reused, and a failed cancel destroys the session. `respond()` guarantees one callback even if the callback throws.
 - **`minScale`** (`modules/scale.js`): optional service parameter, a scale or `zoom N`; advertised in layer metadata (the runtime's `FeatureLayerMetadata` copies `metadata.minScale`). Malformed values are logged once and ignored.
@@ -254,7 +261,7 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 - **Antimeridian** (v1.1.5): `translate.js` `normalizeAntimeridian` unwraps 4326 lines/polygons whose longitude span > 180° (not poleward of ±85°), per polygon (holes follow the outer ring).
 - **`resultRecordCount` is capped** to `maxRecordCountPerPage` (default 2000) in both Lakehouse and Lakebase paths. Users cannot request unbounded result sets.
 - **Lakebase SSL**: `LAKEBASE_SSL_VERIFY` defaults to `false` (accepts any cert). The Databricks API helper also skips cert verification (`rejectUnauthorized: false`). Fine for Databricks-issued certs, but be aware in custom PKI environments.
-- **Operation cleanup in model.js**: extent and query operations are closed in independent try-catch blocks so one failure doesn't prevent the other from being cleaned up.
+- **Operation cleanup in model.js**: the main query operation is closed in getData's finally (destroying the connection if the query failed); extent operations are cleaned up detached by `_releaseExtentConnection` (never on the response path — see the v1.1.7 parallel-extents entry). Each failure path cleans up independently so one failure doesn't prevent the other from being cleaned up.
 - **`lakebasePool.js` token refresh**: Two concurrent requests can both see expired token and both refresh. This is benign in Node.js (single-threaded) — worst case is one wasted API call. NOT a race condition.
 - **connectionPool.js concurrency**: `acquire()` marking an idle connection `inUse` is atomic within a tick, but *creating* one is not — `createConnection()` awaits connect/openSession before pushing to `this.pool`, so concurrent acquires all saw room and opened more than `max` (seen live: `active: 12/10`). `this.creating` counts in-flight opens against `max` (test: 15 concurrent acquires → exactly 10 opened).
 - **Statement timeout on SQL warehouses**: the driver's per-statement `queryTimeout` only applies to compute clusters; warehouses ignored it (tile queries ran 6–7 min). Every session is opened with `STATEMENT_TIMEOUT` (seconds) derived from `DATABRICKS_QUERY_TIMEOUT` (ms, default 120000). Verified live: `Statement has timed out after 5 seconds.`
