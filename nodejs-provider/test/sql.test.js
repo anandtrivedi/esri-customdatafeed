@@ -257,6 +257,9 @@ describe("sql", () => {
     it("rejects an unreadable time value instead of silently dropping the filter", () => {
       expect(() => build({ time: "yesterday" }, { timeColumn: "t" })).to.throw(/Invalid time parameter/);
       expect(() => build({ time: "1,2,3" }, { timeColumn: "t" })).to.throw(/Invalid time parameter/);
+      // tagged 400 (client error) so the runtime returns a 4xx, not a generic 500
+      try { build({ time: "yesterday" }, { timeColumn: "t" }); expect.fail("should have thrown"); }
+      catch (e) { expect(e.code).to.equal(400); }
     });
 
     it("should not add time filter without timeColumn", () => {

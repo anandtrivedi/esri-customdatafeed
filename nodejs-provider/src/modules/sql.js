@@ -230,16 +230,19 @@ function buildTimeFilter(timeParam, timeColumn) {
   // Fail closed on a misconfigured timeColumn (shared validator) rather than silently stripping characters into a
   // different column name, matching how outFields are sanitized above.
   const sanitizedColumn = validateFieldName(timeColumn);
+  // A malformed time value is a client error: tag it 400 so the runtime returns a 4xx (not an opaque 500). We still
+  // error rather than drop the filter and scan all of history.
+  const badTime = () => { const e = new Error(`Invalid time parameter: ${timeParam}`); e.code = 400; return e; };
   const toIso = (raw) => {
     const v = String(raw).trim();
     if (v === "" || v.toLowerCase() === "null") return null;
     const ms = Number(v);
-    if (!Number.isFinite(ms)) throw new Error(`Invalid time parameter: ${timeParam}`);
+    if (!Number.isFinite(ms)) throw badTime();
     return new Date(ms).toISOString();
   };
 
   const parts = String(timeParam).split(",");
-  if (parts.length > 2) throw new Error(`Invalid time parameter: ${timeParam}`);
+  if (parts.length > 2) throw badTime();
   if (parts.length === 1) {
     const at = toIso(parts[0]);
     return at ? `${sanitizedColumn} = '${at}'` : null;
