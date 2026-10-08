@@ -427,11 +427,11 @@ Then, in the client: register your ArcGIS target (password set via a terminal co
 | Rows | Suggested `minScale` |
 |---|---|
 | under 10 million | none (`-`) |
-| 10 million – 1 billion | `zoom 8` (≈1:2,311,000, a metro region) |
-| over 1 billion, clients send a time window | `zoom 8`–`zoom 10` (≈1:2,311,000–1:578,000) |
-| over 1 billion, clients may not send one (e.g. a layer opened straight from its URL) | `zoom 11`–`zoom 12` (≈1:289,000–1:144,000, a harbor) |
+| 10 million – 1 billion | `zoom 8` |
+| over 1 billion, clients send a time window | `zoom 8`–`zoom 10` |
+| over 1 billion, clients may not send one | `zoom 11`–`zoom 12` |
 
-Measured on 28B AIS points: a ten-year feature tile at zoom 11 took 2–8 s once ordering was dropped; at continental zooms each tile scans far more. Polygon/H3 density layers usually need none.
+Polygon/H3 density layers usually need none.
 
 **Fill one set, not both.** A read-only **Lakehouse** service uses the Lakehouse fields; an editable **Lakebase** service uses the Lakebase fields. Setting `lakebaseHost` is what switches the backend to Lakebase. `workspace`, `geometryColumn`, `idField`, `srid`, `maxRecordCount` are shared. The publish-form field labels are grouped and numbered — `Common`, `Lakehouse`, `Lakebase` — so you can see at a glance which set each belongs to.
 
@@ -495,9 +495,9 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 | `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Auto-found in the service-account home — `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows); set only if the file is elsewhere |
 | `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` | Lakebase connection (token auto-generated if omitted) |
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
-| `DATABRICKS_USE_CLOUDFETCH` (`false`) | `true` lets the driver download large results from presigned cloud-storage URLs. Leave off unless the ArcGIS host can reach the workspace's storage bucket: a refused download (403) crashed the whole CDF process with @databricks/sql 1.12.0. Results come back inline when off; CDF pages are far below the size where that matters. |
-| `DATABRICKS_TILE_QUERY_TIMEOUT` (`30000`) | Cancel a feature-tile query (`resultType=tile`) after this many ms; `0` disables. ArcGIS Server doesn't pass a browser's abort to the CDF, so an abandoned tile otherwise runs until the statement timeout. Sessions also get a warehouse-enforced `STATEMENT_TIMEOUT` from `DATABRICKS_QUERY_TIMEOUT` (`120000`). |
-| `DATABRICKS_MAX_RETURN_IDS` (`500000`) | Ceiling on how many object ids a `returnIdsOnly` request may return. Such requests carry no page limit (clients expect every matching id), so on a very large table they can return millions of ids inline — with CloudFetch off, that memory lands in the CDF process. If a request would exceed this, it **errors** (asking the caller to narrow the query with `where`/`time`/`geometry`) rather than returning a truncated, wrong id set. Raise it if a box has memory to spare and genuinely needs larger selections; set `0` to disable the ceiling. |
+| `DATABRICKS_USE_CLOUDFETCH` (`false`) | `true` lets the driver download large results from presigned cloud-storage URLs. Leave off unless the ArcGIS host can reach the workspace's storage bucket — a refused download (403) can crash the CDF process. Results come back inline when off. |
+| `DATABRICKS_TILE_QUERY_TIMEOUT` (`30000`) | Cancel a feature-tile query (`resultType=tile`) after this many ms; `0` disables. ArcGIS Server doesn't pass a browser's abort to the CDF, so an abandoned tile otherwise runs until the statement timeout. |
+| `DATABRICKS_MAX_RETURN_IDS` (`500000`) | Ceiling on object ids a `returnIdsOnly` request may return (such requests carry no page limit). If a request would exceed it, it **errors** (narrow the query with `where`/`time`/`geometry`) rather than returning a truncated id set. `0` disables. |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
 | `ENABLE_USER_AUTH` / `ENABLE_AUDIT_LOG` / `DATABRICKS_API_SSL_VERIFY` | Security |
 
