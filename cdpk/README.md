@@ -18,7 +18,7 @@ Get-FileHash .\databricks-geospatial-provider.cdpk -Algorithm SHA256   # Windows
 ```
 
 Both are the same cross-platform build (pure-JS core, runs on Windows *and* Linux, with the
-GovCloud `.mil`/`.us` OAuth allowlist patched in). Provider **v1.1.2**.
+GovCloud `.mil`/`.us` OAuth allowlist patched in). Provider **v1.1.7**.
 
 ---
 

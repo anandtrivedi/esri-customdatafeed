@@ -126,11 +126,19 @@ CDPK_NAME="$CDPK_FILENAME"
 CDPK_PATH="$DIST_DIR/$CDPK_NAME"
 rm -f "$CDPK_PATH"
 echo "-> packaging $CDPK_NAME ..."
-# Same exact excludes as register-provider.sh / README (a broad '*.env*' would strip real
+# src/ is zipped from the working tree, so a local, gitignored file there (e.g. a
+# src/databricks-config.json holding a PAT) would ship inside the public release artifact.
+STRAY_SRC=$(git -C "$NODEJS_DIR" ls-files --others -- src/)
+if [ -n "$STRAY_SRC" ]; then
+  echo "!! untracked/ignored files under nodejs-provider/src/ would be packaged — move them out first:"
+  printf '     %s\n' $STRAY_SRC
+  exit 1
+fi
+# Same excludes as register-provider.sh / README (a broad '*.env*' would strip real
 # node_modules files whose names contain '.env' and break the package).
 if ! ( cd "$NODEJS_DIR" && zip -qr "$CDPK_PATH" \
       cdconfig.json package.json package-lock.json src/ node_modules/ \
-      -x '.env' '.env.*' 'test/*' '*.md' ); then
+      -x '.env' '.env.*' 'test/*' '*.md' 'src/databricks-config.json' ); then
   echo "!! zip failed."; exit 1
 fi
 [ -f "$CDPK_PATH" ] || { echo "!! expected $CDPK_PATH but it wasn't created."; exit 1; }

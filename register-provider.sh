@@ -437,7 +437,7 @@ else
   echo "-> packaging $PROVIDER_NAME.cdpk..."
   if ! ( cd "$NODEJS_DIR" && zip -qr "$PROVIDER_NAME.cdpk" \
         cdconfig.json package.json package-lock.json src/ node_modules/ \
-        -x '.env' '.env.*' 'test/*' '*.md' ); then
+        -x '.env' '.env.*' 'test/*' '*.md' 'src/databricks-config.json' ); then
     echo "!! zip failed — nothing packaged."; exit 1
   fi
   [ -f "$CDPK_PATH" ] || { echo "!! Expected $CDPK_PATH but it wasn't created."; exit 1; }
