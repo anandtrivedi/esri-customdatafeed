@@ -6,7 +6,8 @@
  *   "${workspaceAlias}|${host}:${port}/${database}"
  *
  * Auth: Mints short-lived Lakebase OAuth tokens via the Databricks
- * /api/2.0/database/credentials endpoint. The credentials API itself is
+ * /api/2.0/database/credentials endpoint (Provisioned instances) or
+ * /api/2.0/postgres/credentials (Autoscaling endpoints). The credentials API itself is
  * authenticated using the resolved workspace profile:
  *   - PAT profiles:        Authorization: Bearer <pat>
  *   - OAuth M2M profiles:  exchange client_id+client_secret at /oidc/v1/token
@@ -248,6 +249,89 @@ async function generateDatabaseCredential(instanceName, workspaceConfig) {
   return result;
 }
 
+// Cache of `${workspaceAlias}|${host}` -> Autoscaling endpoint resource name
+const endpointNameCache = {};
+
+/** GET every page of a /api/2.0/postgres list call and return the items under `field`. */
+async function listAllPages(path, field, workspaceConfig) {
+  const items = [];
+  let pageToken = null;
+  do {
+    const sep = path.includes('?') ? '&' : '?';
+    const url = pageToken ? `${path}${sep}page_token=${encodeURIComponent(pageToken)}` : path;
+    const response = await databricksApiRequest('GET', url, null, workspaceConfig);
+    items.push(...(response[field] || []));
+    pageToken = response.next_page_token || null;
+  } while (pageToken);
+  return items;
+}
+
+function endpointServesHost(ep, host) {
+  const hosts = (ep && ep.status && ep.status.hosts) || {};
+  return hosts.host === host || hosts.read_write_pooled_host === host;
+}
+
+/**
+ * Find the Autoscaling endpoint resource name (projects/{p}/branches/{b}/endpoints/{e}) whose direct or pooled
+ * host matches. LAKEBASE_ENDPOINT_NAME skips the scan in workspaces with many projects — but it is process-wide,
+ * so it's only used when that endpoint really serves this host; other services' hosts still get scanned.
+ */
+async function resolveEndpointName(host, workspaceConfig) {
+  const cacheKey = instanceCacheKey(workspaceConfig.workspaceAlias, host);
+  if (endpointNameCache[cacheKey]) {
+    return endpointNameCache[cacheKey];
+  }
+  const override = process.env.LAKEBASE_ENDPOINT_NAME;
+  if (override) {
+    try {
+      const ep = await databricksApiRequest('GET', `/api/2.0/postgres/${override}`, null, workspaceConfig);
+      if (endpointServesHost(ep, host)) {
+        endpointNameCache[cacheKey] = override;
+        return override;
+      }
+      console.log(`[LakebasePool] LAKEBASE_ENDPOINT_NAME "${override}" doesn't serve "${host}"; scanning projects`);
+    } catch (err) {
+      console.log(`[LakebasePool] LAKEBASE_ENDPOINT_NAME lookup failed (${err.message}); scanning projects`);
+    }
+  }
+
+  const projects = await listAllPages('/api/2.0/postgres/projects', 'projects', workspaceConfig);
+  for (const project of projects) {
+    const branches = await listAllPages(`/api/2.0/postgres/${project.name}/branches`, 'branches', workspaceConfig);
+    for (const branch of branches) {
+      const endpoints = await listAllPages(`/api/2.0/postgres/${branch.name}/endpoints`, 'endpoints', workspaceConfig);
+      for (const ep of endpoints) {
+        if (endpointServesHost(ep, host)) {
+          endpointNameCache[cacheKey] = ep.name;
+          return ep.name;
+        }
+      }
+    }
+  }
+
+  throw new Error(
+    `No Lakebase Autoscaling endpoint found with hostname "${host}" in workspace "${workspaceConfig.workspaceAlias}". ` +
+    'Set LAKEBASE_ENDPOINT_NAME (projects/<p>/branches/<b>/endpoints/<e>) or LAKEBASE_PASSWORD.'
+  );
+}
+
+/**
+ * Generate a Lakebase Autoscaling credential via /api/2.0/postgres/credentials.
+ * Normalized to the Provisioned response shape ({ token, expiration_time }).
+ */
+async function generateEndpointCredential(endpointName, workspaceConfig) {
+  const result = await databricksApiRequest(
+    'POST',
+    '/api/2.0/postgres/credentials',
+    { endpoint: endpointName },
+    workspaceConfig
+  );
+  if (!result.token) {
+    throw new Error(`No token in credential response: ${JSON.stringify(result).substring(0, 200)}`);
+  }
+  return { token: result.token, expiration_time: result.expire_time };
+}
+
 /**
  * Get a fresh Lakebase password. Tries auto-generation first, falls back to env var.
  */
@@ -260,23 +344,32 @@ async function getLakebasePassword(host, workspaceConfig) {
     throw new Error('Cannot generate Lakebase token: workspaceConfig is required');
   }
 
-  // Resolve the instance from the service's lakebaseHost so multiple services can
-  // target different instances; LAKEBASE_INSTANCE_NAME is only a fallback when the
-  // host isn't visible to the workspace (e.g. cross-account DNS).
+  // Provisioned instances and Autoscaling endpoints both use ep-*.database.* hostnames now, so the host alone
+  // can't tell them apart: look for a Provisioned instance first, then an Autoscaling endpoint.
+  // LAKEBASE_INSTANCE_NAME is only a fallback when the host isn't visible to the workspace (e.g. cross-account DNS).
+  let cred;
   let instanceName;
   try {
     instanceName = await resolveInstanceName(host, workspaceConfig);
-  } catch (err) {
-    if (process.env.LAKEBASE_INSTANCE_NAME) {
-      console.log(`[LakebasePool] Host lookup failed (${err.message}); falling back to LAKEBASE_INSTANCE_NAME`);
+  } catch (instanceErr) {
+    try {
+      const endpointName = await resolveEndpointName(host, workspaceConfig);
+      console.log(`[LakebasePool] Generating fresh credential for Autoscaling endpoint "${endpointName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
+      cred = await generateEndpointCredential(endpointName, workspaceConfig);
+    } catch (endpointErr) {
+      if (!process.env.LAKEBASE_INSTANCE_NAME) {
+        throw new Error(`${instanceErr.message} Autoscaling lookup also failed: ${endpointErr.message}`);
+      }
+      console.log(`[LakebasePool] Host lookup failed (${instanceErr.message}); falling back to LAKEBASE_INSTANCE_NAME`);
       instanceName = process.env.LAKEBASE_INSTANCE_NAME;
-    } else {
-      throw err;
     }
   }
 
-  console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
-  const cred = await generateDatabaseCredential(instanceName, workspaceConfig);
+  if (!cred) {
+    console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
+    cred = await generateDatabaseCredential(instanceName, workspaceConfig);
+  }
+
   const expiry = cred.expiration_time
     ? new Date(cred.expiration_time).getTime()
     : Date.now() + 55 * 60 * 1000;
@@ -326,6 +419,42 @@ async function getLakebasePool(config) {
   }
 }
 
+// Cache of workspaceAlias -> PAT owner's username (from SCIM /Me)
+const tokenOwnerCache = {};
+
+/** Username that owns the workspace PAT — the identity a minted Lakebase credential belongs to. */
+async function resolveTokenOwner(workspaceConfig) {
+  const alias = workspaceConfig.workspaceAlias;
+  if (tokenOwnerCache[alias]) return tokenOwnerCache[alias];
+  try {
+    const me = await databricksApiRequest('GET', '/api/2.0/preview/scim/v2/Me', null, workspaceConfig);
+    const owner = me.userName || me.applicationId || null;
+    if (owner) tokenOwnerCache[alias] = owner;
+    return owner;
+  } catch (err) {
+    console.log(`[LakebasePool] Couldn't look up the PAT owner for "${alias}" (${err.message}); falling back to 'databricks'`);
+    return null;
+  }
+}
+
+/**
+ * Postgres role to log in as. A minted Lakebase credential belongs to the workspace identity, so the role must
+ * be that identity: the SP's client id for OAuth M2M, the PAT owner's username for PAT profiles (otherwise
+ * "password authentication failed for user 'databricks'"). An explicit LAKEBASE_USER still wins over the lookup
+ * (and is the native-login role when LAKEBASE_PASSWORD is a static password).
+ */
+async function resolvePgUser(config) {
+  const ws = config.workspaceConfig;
+  if (config.user) return config.user;
+  if (ws && ws.authType === 'oauth-m2m' && ws.clientId) return ws.clientId;
+  if (process.env.LAKEBASE_USER) return process.env.LAKEBASE_USER;
+  if (ws && ws.authType === 'pat' && !process.env.LAKEBASE_PASSWORD) {
+    const owner = await resolveTokenOwner(ws);
+    if (owner) return owner;
+  }
+  return 'databricks';
+}
+
 /**
  * Actually (re)create the pg.Pool for a key: close any expired pool, mint a credential,
  * build the pool, and register it in `pools`. Only ever run one-at-a-time per key via the
@@ -343,6 +472,7 @@ async function createLakebasePool(key, config) {
   }
 
   const { password, expiry } = await getLakebasePassword(config.host, config.workspaceConfig);
+  const user = await resolvePgUser(config);
 
   const sslVerify = process.env.LAKEBASE_SSL_VERIFY === 'true';
   const poolMin = parseInt(process.env.LAKEBASE_POOL_MIN) || 2;
@@ -352,14 +482,7 @@ async function createLakebasePool(key, config) {
     host: config.host,
     port: config.port || 5432,
     database: config.database,
-    // Postgres role to log in as. For OAuth M2M (service principal) workspaces the
-    // Lakebase credential is minted for the SP, so the pg role must be the SP's
-    // client id — otherwise Postgres rejects it ("OAuth: User is not authorized").
-    // PAT/default workspaces fall back to LAKEBASE_USER (a human/PAT identity).
-    user: config.user
-      || (config.workspaceConfig && config.workspaceConfig.authType === 'oauth-m2m' && config.workspaceConfig.clientId)
-      || process.env.LAKEBASE_USER
-      || 'databricks',
+    user,
     password,
     ssl: { rejectUnauthorized: sslVerify },
     application_name: applicationName('esri_databricks-lakebase-customdatafeed'),
