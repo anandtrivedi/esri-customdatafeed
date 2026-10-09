@@ -50,7 +50,7 @@ let poolObjs; // FakePool instances, to drive their 'error' handler and see end(
 let endHangs = false; // simulate pg end() waiting on a checked-out client
 class FakePool {
   constructor(opts) { pools.push(opts); poolObjs.push(this); this.ended = false; }
-  on(ev, fn) { if (ev === 'error') this.onError = fn; }
+  on(ev, fn) { if (ev === 'error') this.onError = fn; if (ev === 'connect') this.onConnect = fn; }
   end() { this.ended = true; return endHangs ? new Promise(() => {}) : Promise.resolve(); }
   async query() { return { rows: [] }; }
 }
@@ -313,10 +313,13 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
     expect(calls).to.have.lengthOf(0);
   });
 
-  it("every pool gets a server-side statement_timeout (pg defaults to none)", async () => {
+  it("every new pool client gets a server-side statement_timeout via SET (Postgres defaults to none)", async () => {
     routes = autoscalingRoutes();
     await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
-    expect(pools[0].statement_timeout).to.equal(120000);
+    const sent = [];
+    poolObjs[0].onConnect({ query: async (sql) => { sent.push(sql); } });
+    expect(sent).to.deep.equal(["SET statement_timeout = 120000"]);
+    expect(pools[0]).to.not.have.property("statement_timeout"); // not a startup parameter (poolers can reject those)
   });
 
   it("a hung Databricks API call times out and fails, instead of hanging every request for that database", async () => {

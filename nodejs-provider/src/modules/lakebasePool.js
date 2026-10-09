@@ -542,9 +542,16 @@ async function createLakebasePool(key, config) {
     max: poolMax,
     idleTimeoutMillis: 60000,
     connectionTimeoutMillis: 30000,
-    // Server-side cap per statement (pg defaults to none): an abandoned tile or a huge count can't pin a pool client
-    // indefinitely and starve every Lakebase service on this pool. Same budget as the Lakehouse sessions.
-    statement_timeout: parseInt(process.env.LAKEBASE_STATEMENT_TIMEOUT_MS) || parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000,
+  });
+
+  // Server-side cap per statement (Postgres defaults to none): an abandoned tile or a huge count can't pin a pool
+  // client indefinitely and starve every Lakebase service on this pool. Same budget as the Lakehouse sessions. Set
+  // with SET on connect rather than pg's statement_timeout startup parameter, which a connection pooler (the
+  // endpoint's -pooler host) can reject. pg runs this before any query issued on the new client.
+  const statementTimeoutMs = parseInt(process.env.LAKEBASE_STATEMENT_TIMEOUT_MS) || parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000;
+  pool.on('connect', (client) => {
+    client.query(`SET statement_timeout = ${statementTimeoutMs}`).catch((err) =>
+      console.error(`[LakebasePool] Could not set statement_timeout on ${key}:`, err.message));
   });
 
   pool.on('error', (err) => {
