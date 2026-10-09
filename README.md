@@ -392,6 +392,8 @@ Tables created directly in Lakebase with native PostGIS geometry work fine.
 
 **idField values above 2,147,483,647.** Esri OBJECTIDs are 32-bit. Larger ids (e.g. 64-bit AIS ids) drew, selected and identified correctly in our own testing, but that range is not supported by Esri — use it at your own risk; the server log shows a one-time warning per field. Above 9,007,199,254,740,991 (2^53 − 1) ids can't be carried exactly: neighbouring ids merge, so selection, identify and edits hit the wrong features. The provider refuses edits on such ids, lookups by them return nothing, and the log shows one error per field. `publish-service.sh` (Lakehouse) and `diagnose-service.sh` warn about both ranges.
 
+**Lakebase layers need at least one row to publish.** Field and geometry types come from the data, so an empty editable table publishes with no fields; add one seed row first.
+
 **Polygons and lines crossing the 180° meridian** are unwrapped on output (negative longitudes shifted by +360 for that shape), so they no longer draw as bands across the map. Filters still run against the stored geometry.
 
 ---
