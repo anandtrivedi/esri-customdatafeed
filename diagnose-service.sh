@@ -388,7 +388,8 @@ if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
   else
     echo "  (server logs not readable here — run as root or the arcgis user to include them)"
   fi
-  # 2) Optional live check: the largest id, through the service itself.
+  # 2) Optional live check: the largest id, through the service itself. It's about THIS service, so it overrides a
+  #    log-based verdict (which may come from another service with the same idField name).
   case "$SMOKE" in
     ok:*)
       ask "Check the largest '$IDFIELD' through the service? It sorts the table: instant on Lakebase/small tables, can take minutes on billion-row tables (y/N)" "n" IDCHK
@@ -411,9 +412,9 @@ except Exception: print('')
         elif python3 -c "import sys;sys.exit(0 if int(sys.argv[1])>9007199254740991 else 1)" "$MAXID"; then
           ID_RANGE="over53"; echo "  [PROBLEM] largest id is about $MAXID — above 2^53 - 1."
         elif python3 -c "import sys;sys.exit(0 if int(sys.argv[1])>2147483647 else 1)" "$MAXID"; then
-          [ "$ID_RANGE" = "over53" ] || ID_RANGE="over32"; echo "  [note] largest id is $MAXID — above the 32-bit OBJECTID range (2,147,483,647)."
+          ID_RANGE="over32"; echo "  [note] largest id is $MAXID — above the 32-bit OBJECTID range (2,147,483,647)."
         else
-          [ -n "$ID_RANGE" ] || ID_RANGE="ok"; echo "  [ok] largest id is $MAXID — within the 32-bit OBJECTID range."
+          ID_RANGE="ok"; echo "  [ok] largest id is $MAXID — within the 32-bit OBJECTID range."
         fi ;;
       *) echo "  (live check skipped)" ;;
       esac ;;
