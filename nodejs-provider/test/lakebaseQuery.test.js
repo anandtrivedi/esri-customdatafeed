@@ -123,6 +123,12 @@ describe("lakebaseQuery", () => {
       expect(params).to.deep.equal([1, 2, 3]);
     });
 
+    it("drops objectIds above 2^53 - 1 (already rounded → would match the wrong row)", () => {
+      const { sql, params } = buildLakebaseSelectSql({ objectIds: "2,9007199254740993" }, baseConfig);
+      expect(sql).to.include("id IN ($1)");
+      expect(params).to.deep.equal([2]);
+    });
+
     it("should apply spatial filter with parameterized geometry", () => {
       const envelope = JSON.stringify({ xmin: -78, ymin: 38, xmax: -77, ymax: 39 });
       const { sql, params } = buildLakebaseSelectSql(

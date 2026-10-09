@@ -164,6 +164,13 @@ describe("sql", () => {
       ).to.throw(/Invalid field name/);
     });
 
+    it("drops objectIds above 2^53 - 1 (already rounded → would match the wrong row)", () => {
+      expect(build({ objectIds: "1,9007199254740993" })).to.include("IN (1)");
+      const sql = build({ objectIds: "9007199254740993,12345678901234567" });
+      expect(sql).to.include("1 = 0");
+      expect(sql).to.not.include("9007199254740992");
+    });
+
     it("should reject non-integer objectIds (injection attempt returns empty)", () => {
       const sql = build({ objectIds: "'; DROP TABLE x--" });
       // Non-integer values are filtered out; with no valid IDs, 1=0 ensures empty result

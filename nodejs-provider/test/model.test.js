@@ -1065,6 +1065,45 @@ describe("model", () => {
       });
     }
 
+    it("update with an id above 2^53 - 1 fails that row (1019) and never runs the UPDATE", async () => {
+      lakebaseQueryResult = { rows: [], rowCount: 1 };
+      const result = await new Model().editData(deleteReq(), { updates: [{ attributes: { id: 9007199254740993, name: "x" } }] });
+      expect(result.updateResults).to.have.lengthOf(1);
+      expect(result.updateResults[0].success).to.equal(false);
+      expect(result.updateResults[0].error.code).to.equal(1019);
+      expect(result.updateResults[0].error.description).to.include("2^53");
+      expect(lakebaseQueryLog.some((q) => q.sql.includes("UPDATE"))).to.equal(false);
+    });
+
+    it("deletes: an id above 2^53 - 1 fails (1018) and is kept out of the DELETE; safe ids still delete", async () => {
+      lakebaseQueryResult = { rows: [{ id: 5 }] };
+      const result = await new Model().editData(deleteReq(), { deletes: "5,9007199254740993" });
+      expect(result.deleteResults).to.have.lengthOf(2);
+      const bad = result.deleteResults.find((r) => !r.success);
+      expect(bad.error.code).to.equal(1018);
+      expect(bad.error.description).to.include("2^53");
+      expect(result.deleteResults.find((r) => r.success).objectId).to.equal(5);
+      expect(lakebaseQueryLog[0].params).to.deep.equal([5]);
+    });
+
+    it("deletes with ONLY unsafe ids → no DELETE issued at all", async () => {
+      const result = await new Model().editData(deleteReq(), { deletes: [9007199254740993] });
+      expect(result.deleteResults[0].success).to.equal(false);
+      expect(lakebaseQueryLog.some((q) => q.sql.includes("DELETE"))).to.equal(false);
+    });
+
+    it("an unsafe id under rollbackOnFailure rolls the whole edit back (1003)", async () => {
+      lakebaseQueryResult = [{ rows: [] }, { rows: [{ id: 7 }] }, { rows: [] }]; // BEGIN, INSERT RETURNING, ROLLBACK
+      const result = await new Model().editData(deleteReq(), {
+        adds: [{ attributes: { name: "a" }, geometry: { x: 0, y: 0 } }],
+        deletes: [9007199254740993],
+        rollbackOnFailure: true,
+      });
+      expect(result.addResults[0].error.code).to.equal(1003);
+      expect(result.deleteResults[0].error.code).to.equal(1003);
+      expect(lakebaseQueryLog.map((q) => q.sql)).to.include("ROLLBACK");
+    });
+
     it("should treat an empty deletes value as no deletes (no DELETE issued)", async () => {
       for (const deletes of ["", null, undefined, []]) {
         lakebaseQueryLog = [];

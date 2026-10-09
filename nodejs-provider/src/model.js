@@ -94,6 +94,12 @@ function normalizeDeleteIds(raw) {
   return String(raw).replace(/^\s*\[|\]\s*$/g, '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+// ArcGIS OBJECTIDs travel as JavaScript numbers, which can't hold integers above 2^53 - 1 exactly: 9007199254740993
+// arrives as 9007199254740992. Editing with such an id would hit whichever row owns the rounded value, so edits refuse it.
+function unsafeIdMessage(idField, id) {
+  return `${idField}=${id} is above 2^53 - 1 (9007199254740991), so ArcGIS can't carry it exactly and the edit could hit the wrong row. Publish the layer with a unique integer idField below that limit.`;
+}
+
 function statementOptions() {
   return {
     runAsync: true,
@@ -1220,6 +1226,10 @@ class Model {
             const attributes = feature.attributes || feature.properties || {};
             const geometry = feature.geometry || null;
             const oid = Number(attributes[rawIdField]);
+            if (Number.isFinite(oid) && Number.isInteger(oid) && !Number.isSafeInteger(oid)) {
+              updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: unsafeIdMessage(rawIdField, oid) } });
+              continue;
+            }
             const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
             const result = await query(sql, params);
             if (result.rowCount === 0) {
@@ -1235,9 +1245,19 @@ class Model {
         }
 
         // Process deletes — uses RETURNING to identify which rows were actually deleted
-        if (deletes.length > 0) {
+        // Unsafe ids (above 2^53 - 1) fail per row and never reach the DELETE.
+        const safeDeletes = [];
+        for (const raw of deletes) {
+          const id = Number(raw);
+          if (Number.isFinite(id) && Number.isInteger(id) && !Number.isSafeInteger(id)) {
+            deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: unsafeIdMessage(rawIdField, raw) } });
+          } else {
+            safeDeletes.push(raw);
+          }
+        }
+        if (safeDeletes.length > 0) {
           try {
-            const objectIds = deletes.map(Number);
+            const objectIds = safeDeletes.map(Number);
             const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
             const result = await query(sql, params);
             const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
@@ -1250,7 +1270,7 @@ class Model {
             }
           } catch (error) {
             this.logger.error(`Edit delete failed: ${error.message}`);
-            for (const id of deletes) {
+            for (const id of safeDeletes) {
               deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
             }
           }

@@ -99,7 +99,8 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   if (objectIds) {
     const ids = String(objectIds).split(',')
       .map(id => Number(id.trim()))
-      .filter(n => Number.isFinite(n) && Number.isInteger(n));
+      // Safe integers only (see sql.js): a rounded id above 2^53 - 1 would match the wrong row.
+      .filter(n => Number.isSafeInteger(n));
 
     if (ids.length > 0) {
       const idPlaceholders = ids.map(id => {

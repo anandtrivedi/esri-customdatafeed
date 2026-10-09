@@ -150,7 +150,9 @@ function buildSqlWhere({
       .map((val) => val.trim())
       .filter((val) => val !== "")
       .map(Number)
-      .filter((n) => Number.isFinite(n) && Number.isInteger(n));
+      // Safe integers only: an id above 2^53 - 1 has already been rounded, and querying the rounded value would
+      // return a different feature (or none). Dropping it gives an honest empty match instead of a wrong one.
+      .filter((n) => Number.isSafeInteger(n));
 
     if (ids.length > 0) {
       sqlWhereComponents.push(`${idField} IN (${ids.join(",")})`);
