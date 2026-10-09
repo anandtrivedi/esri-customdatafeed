@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (531 tests, ~7s)
+# Run all tests (560 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -132,7 +132,7 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**531 tests across 20 files:**
+**560 tests across 20 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 107 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
@@ -263,6 +263,10 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 - **Pool connections are created checked out** (`createConnection({ inUse: true })`) so a connection that joins `this.pool` before its caller's `await` resumes can't be taken by another `acquire()`. A failed `openSession` closes the client in the `catch` so a connected-but-sessionless socket isn't leaked.
 - **`returnIdsOnly` ceiling** (`DATABRICKS_MAX_RETURN_IDS`, default 500000; `0` disables): `returnIdsOnly` has no page LIMIT (clients want every id), so `buildSqlQuery` bounds it to `maxReturnIds + 1` and `model.js` errors (actionable message) if the set exceeds the ceiling instead of returning a truncated id set. Protects box memory now that CloudFetch is off (an unbounded ids-only query returned 1.95M ids / ~559 MB on the box).
 - **Antimeridian** (v1.1.5): `translate.js` `normalizeAntimeridian` unwraps 4326 lines/polygons whose longitude span > 180° (not poleward of ±85°), per polygon (holes follow the outer ring).
+- **Lakebase identifiers are lowercased** (`model.js` Lakebase paths + `getMetadata`): SQL uses unquoted identifiers, which Postgres folds to lowercase, so result rows are keyed lowercase. An idField configured as `OBJECTID` used to break reads, adds (`objectId: NaN`) and deletes ("not found").
+- **`editingEnabled=false` is enforced** in `editData` (400) and read-only services advertise no templates/editable fields. cdconfig's provider-level `editingEnabled: true` otherwise turns editing on for every service. Unset stays editable (older services).
+- **WHERE parentheses must balance** (`sanitize.js`, outside quoted spans): `1=1) OR (1=1` would close the `(where)` wrapper and drop the ANDed filters. Backslash escapes count only on the Lakehouse path (`backslashEscapes: true`); Postgres treats `\` as a literal.
+- **Lakebase hardening**: one response per request (`respond` guard, as Lakehouse), `SET statement_timeout` on each new client (not the startup parameter, which poolers can reject), REST socket timeouts, token refresh doesn't await the old pool's `end()`, Esri Web Mercator codes (102100/102113/900913) mapped to 3857 before `ST_Transform`, and the filter geometry's own SR (or the Mercator heuristic) used when there is no `inSR`.
 - **`resultRecordCount` is capped** to `maxRecordCountPerPage` (default 2000) in both Lakehouse and Lakebase paths. Users cannot request unbounded result sets.
 - **Lakebase SSL**: `LAKEBASE_SSL_VERIFY` defaults to `false` (accepts any cert). The Databricks API helper also skips cert verification (`rejectUnauthorized: false`). Fine for Databricks-issued certs, but be aware in custom PKI environments.
 - **Operation cleanup in model.js**: the main query operation is closed in getData's finally (destroying the connection if the query failed); extent operations are cleaned up detached by `_releaseExtentConnection` (never on the response path — see the v1.1.7 parallel-extents entry). Each failure path cleans up independently so one failure doesn't prevent the other from being cleaned up.

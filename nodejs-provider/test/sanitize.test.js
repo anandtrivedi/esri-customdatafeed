@@ -130,7 +130,10 @@ describe("sanitize", () => {
       expect(checkWhereClauseSafety("name = 'smile :)'")).to.equal("name = 'smile :)'");
       expect(checkWhereClauseSafety("name = 'it''s (x'")).to.equal("name = 'it''s (x'");
       expect(checkWhereClauseSafety('"odd(col" = 1')).to.equal('"odd(col" = 1'); // quoted identifier
-      expect(checkWhereClauseSafety("name = 'it\\'s (x'")).to.equal("name = 'it\\'s (x'"); // Databricks backslash escape
+      // Backslash escapes are Databricks-only (opt-in); Postgres treats \ as an ordinary character.
+      expect(checkWhereClauseSafety("name = 'it\\'s (x'", { backslashEscapes: true })).to.equal("name = 'it\\'s (x'");
+      expect(checkWhereClauseSafety("name IN ('C:\\', 'D:\\')")).to.equal("name IN ('C:\\', 'D:\\')"); // valid Postgres
+      expect(() => checkWhereClauseSafety("'a\\' = 'a\\' ) OR (1=1")).to.throw(/Unbalanced/); // Postgres reading: escapes the wrapper
       expect(checkWhereClauseSafety("`odd(col` = 1")).to.equal("`odd(col` = 1"); // backtick identifier
     });
 

@@ -142,7 +142,7 @@ function buildSqlWhere({
 
   // Add WHERE clause (with DDL/DML keyword check)
   if (where) {
-    checkWhereClauseSafety(where);
+    checkWhereClauseSafety(where, { backslashEscapes: true }); // Databricks SQL string escapes
     // Parenthesized: the time/geometry/objectId filters are ANDed on below, and AND binds tighter than OR, so a bare
     // "a OR b" would leave those filters applying to "b" only — on a large table, a near-full scan.
     sqlWhereComponents.push(`(${where})`);

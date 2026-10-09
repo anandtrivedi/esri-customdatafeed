@@ -75,7 +75,7 @@ function escapeSqlString(value) {
  * @returns {string} The clause if safe
  * @throws {Error} If a dangerous keyword is detected
  */
-function checkWhereClauseSafety(clause) {
+function checkWhereClauseSafety(clause, { backslashEscapes = false } = {}) {
   if (!clause || typeof clause !== 'string') {
     return clause;
   }
@@ -107,8 +107,10 @@ function checkWhereClauseSafety(clause) {
   for (let i = 0; i < clause.length; i++) {
     const ch = clause[i];
     if (quote) {
-      if (ch === '\\' && quote !== '`') {
-        i++; // Databricks backslash escape (\' inside '...')
+      if (backslashEscapes && ch === '\\' && quote !== '`') {
+        // Databricks SQL: \' escapes a quote. NOT Postgres (standard_conforming_strings): there \ is an ordinary
+        // character, so honouring it on the Lakebase path would let 'a\' ...) OR (1=1 slip past this check.
+        i++;
       } else if (ch === quote) {
         if (clause[i + 1] === quote) i++; // doubled quote escapes itself
         else quote = null;

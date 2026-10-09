@@ -101,7 +101,7 @@ function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idF
     throw new Error('INSERT requires at least one column');
   }
 
-  const sql = `INSERT INTO ${schema}.${table} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING ${idField}`;
+  const sql = `INSERT INTO ${schema}.${table} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING ${idField}::text AS ${idField}`; // exact id text, whatever the int8 parser
   return { sql, params };
 }
 

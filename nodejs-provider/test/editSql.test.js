@@ -109,7 +109,7 @@ describe("editSql", () => {
         "geometry", "id", 4326
       );
       expect(result.sql).to.equal(
-        "INSERT INTO public.cell_towers (name, height, geometry) VALUES ($1, $2, ST_SetSRID(ST_GeomFromGeoJSON($3), 4326)) RETURNING id"
+        "INSERT INTO public.cell_towers (name, height, geometry) VALUES ($1, $2, ST_SetSRID(ST_GeomFromGeoJSON($3), 4326)) RETURNING id::text AS id"
       );
       expect(result.params).to.have.lengthOf(3);
       expect(result.params[0]).to.equal("Tower A");
@@ -169,7 +169,7 @@ describe("editSql", () => {
         null,
         "geometry", "objectid", 4326
       );
-      expect(result.sql).to.include("RETURNING objectid");
+      expect(result.sql).to.include("RETURNING objectid::text AS objectid");
     });
 
     it("should reject invalid schema name (SQL injection)", () => {
