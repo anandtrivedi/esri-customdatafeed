@@ -281,13 +281,18 @@ function geometrySourceSR(geometry, srid) {
   // latestWkid is the EPSG code (3857); wkid can be Esri's 102100, which PostGIS doesn't know.
   if (sr && (sr.latestWkid || sr.wkid)) return sr.latestWkid || sr.wkid;
   if (Number(srid) === 4326 && looksProjectedGeometry(g)) {
-    console.warn('[lakebaseQuery] filter has no SR and out-of-4326-range coords; assuming Web Mercator (3857)');
+    // Once per process: Map Viewer can send this on every tile.
+    if (!warnedAssumedMercator) {
+      warnedAssumedMercator = true;
+      console.warn('[lakebaseQuery] filter has no SR and out-of-4326-range coords; assuming Web Mercator (3857)');
+    }
     return 3857;
   }
   return null;
 }
 
 const ESRI_WEB_MERCATOR = new Set([102100, 102113, 900913]);
+let warnedAssumedMercator = false;
 
 function parseInSR(inSR) {
   if (!inSR) return null;

@@ -715,6 +715,15 @@ describe("model", () => {
       expect(r.deleteResults.filter((x) => x.success).map((x) => x.objectId)).to.deep.equal([1, 2]);
     });
 
+    it("deleteResults follow REQUEST order when valid and rejected ids are mixed (clients pair result i with delete i)", async () => {
+      lakebaseQueryResult = { rows: [{ id: 10 }, { id: 20 }] };
+      const r = await new Model().editData(lb(), { deletes: [10, 9007199254740993, "abc", 20] });
+      expect(r.deleteResults.map((x) => x.success)).to.deep.equal([true, false, false, true]);
+      expect(r.deleteResults[0].objectId).to.equal(10);
+      expect(r.deleteResults[3].objectId).to.equal(20);
+      expect(r.deleteResults[2]).to.not.have.property("objectId"); // not NaN (JSON null)
+    });
+
     it("empty entries in an array of deletes are dropped, never sent as id 0", async () => {
       lakebaseQueryResult = { rows: [{ id: 5 }] };
       const r = await new Model().editData(lb(), { deletes: ["5", "", null, "  "] });

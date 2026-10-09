@@ -1317,7 +1317,7 @@ class Model {
             const geometry = feature.geometry || null;
             const oid = Number(attributes[rawIdField]);
             if (!Number.isInteger(oid)) {
-              updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Update needs an integer ${rawIdField}; got ${JSON.stringify(attributes[rawIdField])}` } });
+              updateResults.push({ success: false, error: { code: 1019, description: `Update needs an integer ${rawIdField}; got ${JSON.stringify(attributes[rawIdField])}` } });
               continue;
             }
             if (!Number.isSafeInteger(oid)) {
@@ -1339,36 +1339,33 @@ class Model {
         }
 
         // Process deletes — uses RETURNING to identify which rows were actually deleted
-        // Unsafe ids (above 2^53 - 1) fail per row and never reach the DELETE.
-        const safeDeletes = [];
-        for (const raw of deletes) {
+        // Results are written at each id's REQUEST index: clients pair deleteResults[i] with deletes[i]. Malformed and
+        // unsafe (above 2^53 - 1) ids fail on their own and never reach the DELETE.
+        const pending = []; // { i, id } for the ids that go into the DELETE
+        deletes.forEach((raw, i) => {
           const id = Number(raw);
           if (!Number.isInteger(id)) {
-            // One malformed id (e.g. "1,abc,2") must not fail the DELETE for the valid ones.
-            deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Invalid ${rawIdField} ${JSON.stringify(raw)}: not an integer` } });
+            deleteResults[i] = { success: false, error: { code: 1018, description: `Invalid ${rawIdField} ${JSON.stringify(raw)}: not an integer` } };
           } else if (!Number.isSafeInteger(id)) {
-            deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: unsafeIdMessage(rawIdField, raw) } });
+            deleteResults[i] = { objectId: id, success: false, error: { code: 1018, description: unsafeIdMessage(rawIdField, raw) } };
           } else {
-            safeDeletes.push(raw);
+            pending.push({ i, id });
           }
-        }
-        if (safeDeletes.length > 0) {
+        });
+        if (pending.length > 0) {
           try {
-            const objectIds = safeDeletes.map(Number);
-            const { sql, params } = buildDeleteSql(schema, table, rawIdField, objectIds);
+            const { sql, params } = buildDeleteSql(schema, table, rawIdField, pending.map((p) => p.id));
             const result = await query(sql, params);
             const deletedIds = new Set(result.rows.map(r => Number(r[rawIdField])));
-            for (const id of objectIds) {
-              if (deletedIds.has(id)) {
-                deleteResults.push({ objectId: id, success: true });
-              } else {
-                deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } });
-              }
+            for (const { i, id } of pending) {
+              deleteResults[i] = deletedIds.has(id)
+                ? { objectId: id, success: true }
+                : { objectId: id, success: false, error: { code: 1018, description: `Feature with ${rawIdField}=${id} not found` } };
             }
           } catch (error) {
             this.logger.error(`Edit delete failed: ${error.message}`);
-            for (const id of safeDeletes) {
-              deleteResults.push({ objectId: Number(id), success: false, error: { code: 1018, description: error.message } });
+            for (const { i, id } of pending) {
+              deleteResults[i] = { objectId: id, success: false, error: { code: 1018, description: error.message } };
             }
           }
         }
