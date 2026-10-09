@@ -289,7 +289,16 @@ PY
 chmod 600 "$TMP"
 if mv -f "$TMP" "$CFG"; then
   trap - EXIT
-  echo "  [ok] wrote $CFG (owner arcgis, mode 600)."
+  # Verify, don't assume: a root-squashed NFS share (the SHARED layout) silently ignores the chown above, leaving a
+  # mode-600 file the arcgis user can't read — the provider then fails while this script says it's fine.
+  _owner=$(stat -c '%U' "$CFG" 2>/dev/null || stat -f '%Su' "$CFG" 2>/dev/null)
+  if [ "$MYUID" = "0" ] && [ "$_owner" != "arcgis" ]; then
+    echo "  [WARN] wrote $CFG, but it is owned by '${_owner:-?}', not arcgis (a root-squashed NFS share?). With mode 600"
+    echo "         the provider can't read it. Re-run this script as the arcgis user (sudo -u arcgis bash $0), or chown"
+    echo "         the file to arcgis on the NFS server itself."
+  else
+    echo "  [ok] wrote $CFG (owner ${_owner:-arcgis}, mode 600)."
+  fi
 else
   echo "!! could not place the file at $CFG. Place it manually:"
   echo "   sudo install -o arcgis -g arcgis -m 600 <file> $CFG"
