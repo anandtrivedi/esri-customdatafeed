@@ -94,7 +94,7 @@ export class TargetRegistry {
   async _scopeTargets() {
     if (!this.secretScope) return {};
     if (this._scopeCache && Date.now() - this._scopeCacheTime < SCOPE_CACHE_TTL_MS) return this._scopeCache;
-    const auth = this._getAuth({ profile: this.secretProfile });
+    const auth = await this._getAuth({ profile: this.secretProfile }); // async: an un-awaited Promise has no host/token
     const keys = await this._listSecretKeys(auth, this.secretScope);
     const targets = {};
     for (const key of keys) {

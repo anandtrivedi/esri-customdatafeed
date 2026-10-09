@@ -9,8 +9,12 @@ function makeRegistry({ local = {}, scope = {}, secrets = {} } = {}) {
     secretScope: Object.keys(scope).length ? "gis-targets" : undefined,
     deps: {
       loadLocalTargets: () => local,
-      getAuth: () => ({ host: "https://x", token: "t" }),
-      listSecretKeys: async () => Object.keys(scope),
+      // async like the real getAuth — a sync stub hid an un-awaited call in the secret-scope path
+      getAuth: async () => ({ host: "https://x", token: "t" }),
+      listSecretKeys: async (auth) => {
+        if (!auth || !auth.host) throw new Error("listSecretKeys got no auth (un-awaited getAuth?)");
+        return Object.keys(scope);
+      },
       getSecret: async (auth, scopeName, key) => scope[key] ?? secrets[`${scopeName}/${key}`],
     },
   });

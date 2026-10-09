@@ -43,10 +43,13 @@ export function buildProviderPackage(sourceDir, { runInstall = true, execFn = ex
   const hasModules = existsSync(path.join(sourceDir, "node_modules"));
   if (runInstall) {
     try {
-      execFn("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], {
+      // On Windows npm is npm.cmd, which Node only launches through a shell (fixed arguments, so no injection).
+      const win = process.platform === "win32";
+      execFn(win ? "npm.cmd" : "npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], {
         cwd: sourceDir,
         timeout: 600000,
         stdio: "pipe",
+        shell: win,
       });
     } catch (e) {
       if (!hasModules) {
@@ -107,6 +110,9 @@ export function repackageCdpk(cdpkBuffer, { providerName, envVars } = {}) {
   if (envVars && Object.keys(envVars).length > 0) {
     const banned = Object.keys(envVars).filter((k) => !/^[A-Z][A-Z0-9_]*$/.test(k));
     if (banned.length) throw new Error(`Invalid env var names: ${banned.join(", ")}`);
+    // A line break in a value would inject extra KEY=value lines into the packaged .env.
+    const multiline = Object.entries(envVars).filter(([, v]) => /[\r\n\0]/.test(String(v))).map(([k]) => k);
+    if (multiline.length) throw new Error(`Env var values can't contain line breaks: ${multiline.join(", ")}`);
     const envText = Object.entries(envVars)
       .map(([k, v]) => `${k}=${v}`)
       .join("\n") + "\n";
