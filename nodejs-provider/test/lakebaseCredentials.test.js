@@ -27,6 +27,7 @@ function fakeHttps() {
         try { parsed = body ? JSON.parse(body) : null; } catch (e) { parsed = body; } // OIDC token call is form-encoded
         calls.push({ method: options.method, path: options.path, body: parsed });
         let route = routes[key];
+        if (route === undefined && key === "GET /api/2.0/preview/scim/v2/Me") route = ok({ userName: "owner@example.com" });
         if (typeof route === "function") route = route(parsed);
         if (!route) route = { status: 404, body: { error_code: "NOT_FOUND", message: `no route ${key}` } };
         const res = new EventEmitter();
@@ -223,10 +224,71 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
     expect(pathsCalled()).to.not.include("GET /api/2.0/preview/scim/v2/Me");
   });
 
-  it("PAT owner lookup failing → falls back to 'databricks' instead of failing the pool", async () => {
+  it("PAT owner lookup failing → clear error pointing at LAKEBASE_USER (no guessed 'databricks' role)", async () => {
     routes = autoscalingRoutes({ "GET /api/2.0/preview/scim/v2/Me": { status: 403, body: { error_code: "PERMISSION_DENIED" } } });
+    let err;
+    try { await LakebasePool.getLakebasePool(cfg(HOST_AUTO)); } catch (e) { err = e; }
+    expect(err, "should throw").to.exist;
+    expect(err.message).to.include("LAKEBASE_USER");
+    expect(pools).to.have.lengthOf(0);
+  });
+
+  it("SP-owned PAT → logs in as the application id even if /Me also has a userName", async () => {
+    routes = autoscalingRoutes({ "GET /api/2.0/preview/scim/v2/Me": ok({ userName: "sp-display", applicationId: "app-uuid" }) });
     await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
-    expect(pools[0].user).to.equal("databricks");
+    expect(pools[0].user).to.equal("app-uuid");
+  });
+
+  it("a mint failure invalidates the cached endpoint, so the next request re-resolves (endpoint recreated)", async () => {
+    let mintFails = false;
+    routes = autoscalingRoutes({
+      "POST /api/2.0/postgres/credentials": (b) => (mintFails
+        ? { status: 404, body: { error_code: "RESOURCE_DOES_NOT_EXIST" } }
+        : ok({ token: `auto-token-for:${b.endpoint}`, expire_time: inFuture(2) })), // inside the buffer → refresh next call
+    });
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    mintFails = true;
+    let err;
+    try { await LakebasePool.getLakebasePool(cfg(HOST_AUTO)); } catch (e) { err = e; }
+    expect(err, "the refresh mint should fail").to.exist;
+    mintFails = false;
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    expect(pathsCalled().filter((p) => p === "GET /api/2.0/postgres/projects")).to.have.lengthOf(2); // rescanned after the failure
+  });
+
+  it("a MINT failure is reported as-is, not masked by the LAKEBASE_INSTANCE_NAME fallback", async () => {
+    process.env.LAKEBASE_INSTANCE_NAME = "fallback-instance";
+    routes = autoscalingRoutes({ "POST /api/2.0/postgres/credentials": { status: 403, body: { error_code: "PERMISSION_DENIED", message: "no CAN_USE" } } });
+    let err;
+    try { await LakebasePool.getLakebasePool(cfg(HOST_AUTO)); } catch (e) { err = e; }
+    expect(err, "should throw").to.exist;
+    expect(err.message).to.include("/api/2.0/postgres/credentials");
+    expect(pathsCalled()).to.not.include("POST /api/2.0/database/credentials");
+  });
+
+  it("an unreadable project is skipped; the endpoint in a later project is still found", async () => {
+    routes = autoscalingRoutes({
+      "GET /api/2.0/postgres/projects": ok({ projects: [{ name: "projects/locked" }, { name: "projects/trident-ais-lb" }] }),
+      "GET /api/2.0/postgres/projects/locked/branches": { status: 403, body: { error_code: "PERMISSION_DENIED" } },
+    });
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    expect(pools[0].password).to.equal(`auto-token-for:${EP_AUTO}`);
+  });
+
+  it("LAKEBASE_INSTANCE_NAME given as an endpoint path (projects/...) is minted via /postgres/credentials", async () => {
+    process.env.LAKEBASE_INSTANCE_NAME = "projects/x/branches/main/endpoints/primary";
+    routes = autoscalingRoutes();
+    await LakebasePool.getLakebasePool(cfg("ep-cross-account.database.us-east-1.cloud.databricks.com"));
+    expect(pools[0].password).to.equal("auto-token-for:projects/x/branches/main/endpoints/primary");
+    expect(pathsCalled()).to.not.include("POST /api/2.0/database/credentials");
+  });
+
+  it("an Autoscaling host skips the Provisioned lookup on later refreshes", async () => {
+    routes = autoscalingRoutes({ "POST /api/2.0/postgres/credentials": (b) => ok({ token: "t", expire_time: inFuture(2) }) });
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO)); // refresh (2 min left < 5 min buffer)
+    expect(pools).to.have.lengthOf(2);
+    expect(pathsCalled().filter((p) => p === "GET /api/2.0/database/instances")).to.have.lengthOf(1);
   });
 
   it("static LAKEBASE_PASSWORD → no /Me lookup (native-login role comes from LAKEBASE_USER)", async () => {

@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (492 tests, ~5s)
+# Run all tests (512 tests, ~7s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -50,7 +50,7 @@ Modules split by backend. Import from `modules/index.js` (the barrel export), no
 | Module | Purpose |
 |--------|---------|
 | `lakebaseQuery.js` | Builds PostGIS SELECT queries with parameterized `$1, $2` placeholders; all 6 spatial predicates native |
-| `lakebasePool.js` | pg connection pool; auto-generates OAuth tokens from PAT via `/api/2.0/database/credentials`; 5-min refresh buffer before expiry |
+| `lakebasePool.js` | pg connection pool; mints OAuth tokens via `/api/2.0/database/credentials` (Provisioned) or `/api/2.0/postgres/credentials` (Autoscaling); 5-min refresh buffer before expiry |
 | `editSql.js` | INSERT/UPDATE/DELETE SQL builders for applyEdits; parameterized; geometry converted Esri→GeoJSON→PostGIS |
 
 **Shared:**
@@ -112,7 +112,8 @@ Each format wraps differently:
 
 `lakebasePool.js` manages auto-refreshing tokens:
 1. If `LAKEBASE_PASSWORD` env var is set, uses it as static credential (no refresh)
-2. Otherwise: resolves Lakebase instance name via `/api/2.0/database/instances`, then generates token via `/api/2.0/database/credentials`
+2. Otherwise: looks the host up as a Provisioned instance (`/api/2.0/database/instances` → `/api/2.0/database/credentials`); if absent, scans Autoscaling `/api/2.0/postgres/projects` → `/api/2.0/postgres/{project}/branches` → `/api/2.0/postgres/{branch}/endpoints` (paginated, cached per workspace+host) and mints via `POST /api/2.0/postgres/credentials {"endpoint": name}` (`expire_time`). Both tiers use `ep-*` hostnames, so the host alone can't pick the tier. `LAKEBASE_ENDPOINT_NAME` skips the scan only if that endpoint serves the host; `LAKEBASE_INSTANCE_NAME` is the last fallback.
+   - pg user: per-service user → SP client id (OAuth M2M) → `LAKEBASE_USER` → PAT owner from SCIM `/Me` (PAT profiles) → `'databricks'`.
 3. Tokens refresh proactively 5 minutes before expiry
 4. On auth errors from idle pool clients, pool is destroyed and recreated on next request
 5. Pool keyed by `"host:port/database"` — one pool per unique connection string
@@ -129,7 +130,7 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**492 tests across 19 files:**
+**512 tests across 20 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 98 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
@@ -150,6 +151,7 @@ Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `la
 | `version.test.js` | 10 | Provider version reporting |
 | `connectionPool.test.js` | 16 | Databricks SQL pool sizing, idle cleanup, wait queue, creation cap |
 | `scale.test.js` | 4 | minScale parameter parsing/advertising |
+| `lakebaseCredentials.test.js` | 18 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user |
 | `lakebasePool.test.js` | 2 | Pool keying basics |
 
 Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exception: `model.test.js` tests the full `model.js` including getData/editData integration.

@@ -295,11 +295,26 @@ async function resolveEndpointName(host, workspaceConfig) {
     }
   }
 
+  // One unreadable project or branch (no permission, transient error) is skipped, not fatal: the endpoint may be
+  // in a later one. The skips are reported if nothing matches.
   const projects = await listAllPages('/api/2.0/postgres/projects', 'projects', workspaceConfig);
+  const skipped = [];
   for (const project of projects) {
-    const branches = await listAllPages(`/api/2.0/postgres/${project.name}/branches`, 'branches', workspaceConfig);
+    let branches;
+    try {
+      branches = await listAllPages(`/api/2.0/postgres/${project.name}/branches`, 'branches', workspaceConfig);
+    } catch (err) {
+      skipped.push(`${project.name} (${err.message.substring(0, 80)})`);
+      continue;
+    }
     for (const branch of branches) {
-      const endpoints = await listAllPages(`/api/2.0/postgres/${branch.name}/endpoints`, 'endpoints', workspaceConfig);
+      let endpoints;
+      try {
+        endpoints = await listAllPages(`/api/2.0/postgres/${branch.name}/endpoints`, 'endpoints', workspaceConfig);
+      } catch (err) {
+        skipped.push(`${branch.name} (${err.message.substring(0, 80)})`);
+        continue;
+      }
       for (const ep of endpoints) {
         if (endpointServesHost(ep, host)) {
           endpointNameCache[cacheKey] = ep.name;
@@ -308,9 +323,13 @@ async function resolveEndpointName(host, workspaceConfig) {
       }
     }
   }
+  if (skipped.length) {
+    console.log(`[LakebasePool] Endpoint scan skipped ${skipped.length} unreadable project(s)/branch(es): ${skipped.slice(0, 3).join('; ')}`);
+  }
 
   throw new Error(
-    `No Lakebase Autoscaling endpoint found with hostname "${host}" in workspace "${workspaceConfig.workspaceAlias}". ` +
+    `No Lakebase Autoscaling endpoint found with hostname "${host}" in workspace "${workspaceConfig.workspaceAlias}"` +
+    (skipped.length ? ` (${skipped.length} project(s)/branch(es) couldn't be read)` : '') + '. ' +
     'Set LAKEBASE_ENDPOINT_NAME (projects/<p>/branches/<b>/endpoints/<e>) or LAKEBASE_PASSWORD.'
   );
 }
@@ -345,29 +364,47 @@ async function getLakebasePassword(host, workspaceConfig) {
   }
 
   // Provisioned instances and Autoscaling endpoints both use ep-*.database.* hostnames now, so the host alone
-  // can't tell them apart: look for a Provisioned instance first, then an Autoscaling endpoint.
-  // LAKEBASE_INSTANCE_NAME is only a fallback when the host isn't visible to the workspace (e.g. cross-account DNS).
-  let cred;
-  let instanceName;
-  try {
-    instanceName = await resolveInstanceName(host, workspaceConfig);
-  } catch (instanceErr) {
+  // can't tell them apart: look for a Provisioned instance first, then an Autoscaling endpoint. A host already
+  // known to be an Autoscaling endpoint skips the Provisioned lookup on every later refresh.
+  // LAKEBASE_INSTANCE_NAME is only a fallback when the host isn't visible to the workspace (e.g. cross-account DNS);
+  // a value of the form projects/.../endpoints/... is treated as an Autoscaling endpoint name.
+  // Lookup failures fall through to the next option; a MINT failure is reported as-is (never masked by a fallback).
+  const cacheKey = instanceCacheKey(workspaceConfig.workspaceAlias, host);
+  let endpointName = endpointNameCache[cacheKey] || null;
+  let instanceName = null;
+  if (!endpointName) {
     try {
-      const endpointName = await resolveEndpointName(host, workspaceConfig);
-      console.log(`[LakebasePool] Generating fresh credential for Autoscaling endpoint "${endpointName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
-      cred = await generateEndpointCredential(endpointName, workspaceConfig);
-    } catch (endpointErr) {
-      if (!process.env.LAKEBASE_INSTANCE_NAME) {
-        throw new Error(`${instanceErr.message} Autoscaling lookup also failed: ${endpointErr.message}`);
+      instanceName = await resolveInstanceName(host, workspaceConfig);
+    } catch (instanceErr) {
+      try {
+        endpointName = await resolveEndpointName(host, workspaceConfig);
+      } catch (endpointErr) {
+        const fallback = process.env.LAKEBASE_INSTANCE_NAME;
+        if (!fallback) {
+          throw new Error(`${instanceErr.message} Autoscaling lookup also failed: ${endpointErr.message}`);
+        }
+        console.log(`[LakebasePool] Host lookup failed (${instanceErr.message}; ${endpointErr.message}); falling back to LAKEBASE_INSTANCE_NAME`);
+        if (fallback.startsWith('projects/')) endpointName = fallback;
+        else instanceName = fallback;
       }
-      console.log(`[LakebasePool] Host lookup failed (${instanceErr.message}); falling back to LAKEBASE_INSTANCE_NAME`);
-      instanceName = process.env.LAKEBASE_INSTANCE_NAME;
     }
   }
 
-  if (!cred) {
-    console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
-    cred = await generateDatabaseCredential(instanceName, workspaceConfig);
+  let cred;
+  try {
+    if (endpointName) {
+      console.log(`[LakebasePool] Generating fresh credential for Autoscaling endpoint "${endpointName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
+      cred = await generateEndpointCredential(endpointName, workspaceConfig);
+    } else {
+      console.log(`[LakebasePool] Generating fresh credential for instance "${instanceName}" via workspace "${workspaceConfig.workspaceAlias}"...`);
+      cred = await generateDatabaseCredential(instanceName, workspaceConfig);
+    }
+  } catch (mintErr) {
+    // Forget the host's resolution so the next request re-resolves it (the instance or endpoint may have been
+    // recreated under a new name), instead of re-minting against a stale name until a restart.
+    delete endpointNameCache[cacheKey];
+    delete instanceNameCache[cacheKey];
+    throw mintErr;
   }
 
   const expiry = cred.expiration_time
@@ -428,20 +465,25 @@ async function resolveTokenOwner(workspaceConfig) {
   if (tokenOwnerCache[alias]) return tokenOwnerCache[alias];
   try {
     const me = await databricksApiRequest('GET', '/api/2.0/preview/scim/v2/Me', null, workspaceConfig);
-    const owner = me.userName || me.applicationId || null;
+    // A service principal's Postgres role is its application id (same as the OAuth M2M path), even if /Me also
+    // carries a userName for it.
+    const owner = me.applicationId || me.userName || null;
     if (owner) tokenOwnerCache[alias] = owner;
     return owner;
   } catch (err) {
-    console.log(`[LakebasePool] Couldn't look up the PAT owner for "${alias}" (${err.message}); falling back to 'databricks'`);
-    return null;
+    throw new Error(
+      `Couldn't determine the Postgres user for PAT workspace "${alias}" (SCIM /Me failed: ${err.message}). ` +
+      'Set LAKEBASE_USER to the Databricks username that owns the token.'
+    );
   }
 }
 
 /**
  * Postgres role to log in as. A minted Lakebase credential belongs to the workspace identity, so the role must
- * be that identity: the SP's client id for OAuth M2M, the PAT owner's username for PAT profiles (otherwise
+ * be that identity: the SP's client id for OAuth M2M, the PAT owner for PAT profiles (otherwise
  * "password authentication failed for user 'databricks'"). An explicit LAKEBASE_USER still wins over the lookup
- * (and is the native-login role when LAKEBASE_PASSWORD is a static password).
+ * (and is the native-login role when LAKEBASE_PASSWORD is a static password). If the PAT owner can't be determined
+ * the pool fails with an actionable error rather than guessing a role that can't work.
  */
 async function resolvePgUser(config) {
   const ws = config.workspaceConfig;
@@ -451,6 +493,7 @@ async function resolvePgUser(config) {
   if (ws && ws.authType === 'pat' && !process.env.LAKEBASE_PASSWORD) {
     const owner = await resolveTokenOwner(ws);
     if (owner) return owner;
+    throw new Error(`SCIM /Me for PAT workspace "${ws.workspaceAlias}" returned no username. Set LAKEBASE_USER.`);
   }
   return 'databricks';
 }
