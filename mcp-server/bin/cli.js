@@ -39,11 +39,14 @@ function promptHidden(question) {
     rl.stdoutMuted = true;
     process.stderr.write(question);
     rl._writeToOutput = () => {}; // mute echo
+    let answered = false;
     rl.question("", (answer) => {
+      answered = true;
       rl.close();
       process.stderr.write("\n");
       resolve(answer);
     });
+    rl.on("close", () => { if (!answered) resolve(""); }); // stdin closed (EOF) — don't hang forever
   });
 }
 

@@ -169,6 +169,10 @@ describe("inspectTable overrides", () => {
 });
 
 describe("buildPublishViewSql", () => {
+  it("doesn't duplicate an existing objectid column (often a BIGINT one, the reason for the view)", () => {
+    expect(buildPublishViewSql("cat.sch.src", "cat.sch.v", { sourceHasObjectId: true })).to.include("AS objectid, * EXCEPT (objectid) FROM cat.sch.src");
+    expect(buildPublishViewSql("cat.sch.src", "cat.sch.v")).to.include("AS objectid, * FROM cat.sch.src");
+  });
   it("builds a ROW_NUMBER view with validated identifiers", () => {
     const sql = buildPublishViewSql("cat.sch.src", "cat.sch.src_publish", { orderBy: "created_at" });
     expect(sql).to.include("CREATE OR REPLACE VIEW cat.sch.src_publish");

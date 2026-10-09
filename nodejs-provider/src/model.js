@@ -1379,10 +1379,13 @@ class Model {
           if (hasFailure) {
             await client.query('ROLLBACK');
             this.logger.warn('Edit rolled back due to failure(s)');
+            // Rows that succeeded become 1003 (rolled back); the row that failed keeps its real error, or the client
+            // can only show "rolled back" with no reason.
             const rollbackError = { code: 1003, description: 'Operation rolled back' };
-            addResults.forEach((r, i) => { addResults[i] = { ...r, success: false, error: rollbackError }; });
-            updateResults.forEach((r, i) => { updateResults[i] = { ...r, success: false, error: rollbackError }; });
-            deleteResults.forEach((r, i) => { deleteResults[i] = { ...r, success: false, error: rollbackError }; });
+            const roll = (r) => (r.success ? { ...r, success: false, error: rollbackError } : r);
+            addResults.forEach((r, i) => { addResults[i] = roll(r); });
+            updateResults.forEach((r, i) => { updateResults[i] = roll(r); });
+            deleteResults.forEach((r, i) => { deleteResults[i] = roll(r); });
           } else {
             await client.query('COMMIT');
           }

@@ -1,5 +1,6 @@
 import { expect } from "chai";
-import { getAuth, listSecretKeys } from "../src/databricks.js";
+import { getAuth, listSecretKeys, execSql } from "../src/databricks.js";
+import { ArcGisClient } from "../src/arcgis.js";
 
 // Snapshot + restore the env vars getAuth reads, and global.fetch.
 const ENV_KEYS = ["DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET"];
@@ -94,5 +95,34 @@ describe("listSecretKeys", () => {
     try { await listSecretKeys({ host: "https://ws", token: "t" }, "gis-targets"); } catch (e) { err = e; }
     expect(err).to.exist;
     expect(err.message).to.include("PERMISSION_DENIED");
+  });
+});
+
+describe("execSql", () => {
+  let savedFetch;
+  beforeEach(() => { savedFetch = global.fetch; });
+  afterEach(() => { global.fetch = savedFetch; });
+
+  it("cancels the statement when it gives up waiting (instead of leaving it running on the warehouse)", async () => {
+    const calls = [];
+    global.fetch = async (url, opts) => {
+      calls.push(`${opts.method} ${url}`);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ statement_id: "s1", status: { state: "RUNNING" } }) };
+    };
+    let err;
+    try { await execSql({ host: "https://ws", token: "t" }, "wh", "SELECT 1", { timeoutSeconds: 0 }); } catch (e) { err = e; }
+    expect(err.message).to.match(/timed out/);
+    expect(calls).to.include("POST https://ws/api/2.0/sql/statements/s1/cancel");
+  });
+});
+
+describe("ArcGisClient.listServices", () => {
+  it("includes services in folders, as folder/name", async () => {
+    const c = new ArcGisClient({ adminUrl: "https://gis.example.com:6443/arcgis/admin", user: "u", password: "p" });
+    c.request = async (p) => (p === "services"
+      ? { folders: ["/", "System", "Utilities", "Ops"], services: [{ serviceName: "Root", type: "FeatureServer" }] }
+      : p === "services/Ops" ? { services: [{ serviceName: "Ships", type: "FeatureServer" }] } : { services: [] });
+    const names = (await c.listServices()).map((s) => s.serviceName);
+    expect(names).to.deep.equal(["Root", "Ops/Ships"]);
   });
 });

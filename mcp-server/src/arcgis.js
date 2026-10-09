@@ -99,9 +99,16 @@ export class ArcGisClient {
     return parseArcgisJson(res, restPath);
   }
 
+  /** Every service, including those in folders (as "folder/name", which the admin and REST URLs accept). */
   async listServices() {
     const json = await this.request("services");
-    return json.services || [];
+    const services = [...(json.services || [])];
+    for (const folder of json.folders || []) {
+      if (!folder || folder === "/" || /^(System|Utilities|Hosted)$/i.test(folder)) continue;
+      const f = await this.request(`services/${encodeURIComponent(folder)}`);
+      for (const s of f.services || []) services.push({ ...s, serviceName: `${folder}/${s.serviceName}` });
+    }
+    return services;
   }
 
   async getService(serviceName) {

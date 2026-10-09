@@ -1239,7 +1239,7 @@ describe("model", () => {
       expect(lakebaseQueryLog.some((q) => q.sql.includes("DELETE"))).to.equal(false);
     });
 
-    it("an unsafe id under rollbackOnFailure rolls the whole edit back (1003)", async () => {
+    it("an unsafe id under rollbackOnFailure rolls the whole edit back (1003), keeping the unsafe-id error on its row", async () => {
       lakebaseQueryResult = [{ rows: [] }, { rows: [{ id: 7 }] }, { rows: [] }]; // BEGIN, INSERT RETURNING, ROLLBACK
       const result = await new Model().editData(deleteReq(), {
         adds: [{ attributes: { name: "a" }, geometry: { x: 0, y: 0 } }],
@@ -1247,7 +1247,7 @@ describe("model", () => {
         rollbackOnFailure: true,
       });
       expect(result.addResults[0].error.code).to.equal(1003);
-      expect(result.deleteResults[0].error.code).to.equal(1003);
+      expect(result.deleteResults[0].error.code).to.equal(1018);
       expect(lakebaseQueryLog.map((q) => q.sql)).to.include("ROLLBACK");
     });
 
@@ -1466,11 +1466,12 @@ describe("model", () => {
       };
 
       const result = await model.editData(req, data);
-      // Both should be marked as failed due to rollback
+      // The add that worked is rolled back (1003); the update that failed keeps its real error (1019, not found)
       expect(result.addResults[0].success).to.be.false;
       expect(result.addResults[0].error.code).to.equal(1003);
       expect(result.updateResults[0].success).to.be.false;
-      expect(result.updateResults[0].error.code).to.equal(1003);
+      expect(result.updateResults[0].error.code).to.equal(1019);
+      expect(result.updateResults[0].error.description).to.include("not found");
       // Should have BEGIN and ROLLBACK in the query log
       const sqls = lakebaseQueryLog.map(q => q.sql);
       expect(sqls[0]).to.equal("BEGIN");
