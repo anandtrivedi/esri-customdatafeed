@@ -119,6 +119,18 @@ describe("sanitize", () => {
   });
 
   describe("checkWhereClauseSafety", () => {
+    it("rejects unbalanced parentheses that would close the (where) wrapper early", () => {
+      expect(() => checkWhereClauseSafety("1=1) OR (1=1")).to.throw(/Unbalanced parentheses/);
+      expect(() => checkWhereClauseSafety("(a = 1")).to.throw(/Unbalanced parentheses/);
+      expect(() => checkWhereClauseSafety("a = 1)")).to.throw(/Unbalanced parentheses/);
+    });
+
+    it("allows balanced parentheses, and ignores parentheses inside string literals", () => {
+      expect(checkWhereClauseSafety("(a = 1) OR (b IN (2, 3))")).to.equal("(a = 1) OR (b IN (2, 3))");
+      expect(checkWhereClauseSafety("name = 'smile :)'")).to.equal("name = 'smile :)'");
+      expect(checkWhereClauseSafety("name = 'it''s (x'")).to.equal("name = 'it''s (x'");
+    });
+
     it("should allow normal WHERE clauses", () => {
       expect(checkWhereClauseSafety("status = 'active'")).to.equal(
         "status = 'active'"

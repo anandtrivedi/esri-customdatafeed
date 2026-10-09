@@ -21,12 +21,15 @@ function fakeHttps() {
       const req = new EventEmitter();
       let body = "";
       req.write = (chunk) => { body += chunk; };
+      req.setTimeout = (ms, cb) => { req.timeoutCb = cb; return req; };
+      req.destroy = (err) => { req.emit('error', err || new Error('destroyed')); };
       req.end = () => {
         const key = `${options.method} ${options.path}`;
         let parsed = null;
         try { parsed = body ? JSON.parse(body) : null; } catch (e) { parsed = body; } // OIDC token call is form-encoded
         calls.push({ method: options.method, path: options.path, body: parsed });
         let route = routes[key];
+        if (route === 'HANG') { req.timeoutCb && setImmediate(req.timeoutCb); return; }
         if (route === undefined && key === "GET /api/2.0/preview/scim/v2/Me") route = ok({ userName: "owner@example.com" });
         if (typeof route === "function") route = route(parsed);
         if (!route) route = { status: 404, body: { error_code: "NOT_FOUND", message: `no route ${key}` } };
@@ -43,10 +46,12 @@ function fakeHttps() {
   };
 }
 
+let poolObjs; // FakePool instances, to drive their 'error' handler and see end()
+let endHangs = false; // simulate pg end() waiting on a checked-out client
 class FakePool {
-  constructor(opts) { pools.push(opts); }
-  on() {}
-  async end() {}
+  constructor(opts) { pools.push(opts); poolObjs.push(this); this.ended = false; }
+  on(ev, fn) { if (ev === 'error') this.onError = fn; }
+  end() { this.ended = true; return endHangs ? new Promise(() => {}) : Promise.resolve(); }
   async query() { return { rows: [] }; }
 }
 
@@ -83,7 +88,7 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
   const ENV = ["LAKEBASE_PASSWORD", "LAKEBASE_INSTANCE_NAME", "LAKEBASE_ENDPOINT_NAME", "LAKEBASE_USER"];
 
   beforeEach(() => {
-    routes = {}; calls = []; pools = [];
+    routes = {}; calls = []; pools = []; poolObjs = []; endHangs = false;
     for (const k of ENV) { SAVED[k] = process.env[k]; delete process.env[k]; }
     LakebasePool = proxyquire("../src/modules/lakebasePool", { pg: { Pool: FakePool }, https: fakeHttps() });
   });
@@ -306,6 +311,54 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
     await LakebasePool.getLakebasePool({ host: HOST_PROV, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
     expect(pools[0].user).to.equal("native_role");
     expect(calls).to.have.lengthOf(0);
+  });
+
+  it("every pool gets a server-side statement_timeout (pg defaults to none)", async () => {
+    routes = autoscalingRoutes();
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    expect(pools[0].statement_timeout).to.equal(120000);
+  });
+
+  it("a hung Databricks API call times out and fails, instead of hanging every request for that database", async () => {
+    routes = autoscalingRoutes({ "GET /api/2.0/postgres/projects": "HANG" });
+    let err;
+    try { await LakebasePool.getLakebasePool(cfg(HOST_AUTO)); } catch (e) { err = e; }
+    expect(err, "should reject").to.exist;
+    expect(err.message).to.match(/timed out/);
+    routes = autoscalingRoutes(); // the single-flight was released, so the next request retries and works
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    expect(pools).to.have.lengthOf(1);
+  });
+
+  it("a rotated PAT (same profile, new token) re-resolves the pg user", async () => {
+    let owner = "old-owner@example.com";
+    routes = autoscalingRoutes({ "GET /api/2.0/preview/scim/v2/Me": () => ok({ userName: owner }) });
+    await LakebasePool.getLakebasePool({ ...cfg(HOST_AUTO, "db_a"), workspaceConfig: { ...ws, token: "t1" } });
+    owner = "new-owner@example.com";
+    await LakebasePool.getLakebasePool({ ...cfg(HOST_AUTO, "db_b"), workspaceConfig: { ...ws, token: "t2" } });
+    expect(pools.map((p) => p.user)).to.deep.equal(["old-owner@example.com", "new-owner@example.com"]);
+  });
+
+  it("an idle-client auth error ('password authentication failed') drops and ends that pool; the next request rebuilds it", async () => {
+    routes = autoscalingRoutes();
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    poolObjs[0].onError(new Error('password authentication failed for user "x"'));
+    expect(poolObjs[0].ended).to.equal(true);
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    expect(pools).to.have.lengthOf(2);
+  });
+
+  it("a token refresh doesn't wait for the old pool to drain (end() blocked by a long query)", async () => {
+    routes = autoscalingRoutes({ "POST /api/2.0/postgres/credentials": () => ok({ token: "t", expire_time: inFuture(2) }) });
+    await LakebasePool.getLakebasePool(cfg(HOST_AUTO));
+    endHangs = true; // old pool's end() never resolves (a client is still checked out)
+    const refreshed = await Promise.race([
+      LakebasePool.getLakebasePool(cfg(HOST_AUTO)).then(() => "refreshed"),
+      new Promise((r) => setTimeout(() => r("stuck"), 200)),
+    ]);
+    expect(refreshed).to.equal("refreshed");
+    expect(poolObjs[0].ended).to.equal(true);
+    endHangs = false;
   });
 
   it("OAuth M2M workspace → pg user is the service principal's client id (unchanged)", async () => {

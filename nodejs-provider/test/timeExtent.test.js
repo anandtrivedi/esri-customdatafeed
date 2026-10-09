@@ -14,6 +14,7 @@ let releaseCount = 0; // connections returned to the pool
 let requireParallel = false; // bar either extent from completing until BOTH are in flight (proves concurrency)
 let extentFetches = 0;
 let openParallelGate = null;
+let borrowSlowMs = 0; // slow every BORROW (acquire #2+): pool contention, the statement never opens
 const T0 = 1420070400000; // 2015-01-01
 const T1 = 1735689599000; // 2024-12-31 23:59:59
 const point = '{"type":"Point","coordinates":[-77,38]}';
@@ -24,6 +25,7 @@ const connectionPoolStub = {
     poolLabel: () => "test-pool",
     acquire: async () => {
       acquireCount++;
+      if (borrowSlowMs && acquireCount > 1) await new Promise((r) => setTimeout(r, borrowSlowMs));
       return {
         id: `test-conn-${acquireCount}`,
         session: {
@@ -102,7 +104,7 @@ describe("Lakehouse metadata time extent", function () {
 
   beforeEach(() => {
     timeCalls = 0; timeCancelCalls = 0; timeSlowMs = 0; timeFails = false; timeNull = false; acquireCount = 0; releaseCount = 0;
-    requireParallel = false;
+    requireParallel = false; borrowSlowMs = 0;
     resetParallelGate();
     Model._extentCache.clear();
   });
@@ -168,6 +170,20 @@ describe("Lakehouse metadata time extent", function () {
     expect(timeCancelCalls).to.equal(1); // cancelled AT the cap
     expect(releaseCount).to.equal(3);     // ...and its borrowed connection was released
     expect(timeCalls).to.equal(1);        // no duplicate query was ever started
+  });
+
+  it("a background cap hit while still WAITING for a connection caches the miss for 1 min, not an hour", async () => {
+    // Never getting a connection is pool contention, not a slow query; an hour of timeExtent: null makes Map Viewer
+    // request every date per tile, which keeps the pool saturated.
+    borrowSlowMs = 2600; // longer than the 2 s background cap: the min/max never opens
+    const model = new Model();
+    await getData(model, req("catalog.schema.busy"));
+    await sleep(2300);
+    const entry = [...Model._extentCache.entries()].find(([k]) => k.includes("|time|"));
+    expect(entry, "time extent negatively cached").to.exist;
+    expect(entry[1].extent).to.equal(null);
+    expect(entry[1].ttl).to.equal(60 * 1000);
+    await sleep(400); // let the late borrow land and be released
   });
 
   it("has no timeInfo at all when no time column is configured", async () => {

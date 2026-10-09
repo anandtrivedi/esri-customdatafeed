@@ -101,7 +101,9 @@ function buildSqlQuery(
   // of ids inline. A positive maxReturnIds bounds the fetch to maxReturnIds + 1 rows — the caller (model.js) detects
   // the extra row and errors rather than returning a truncated id set. 0/absent keeps the old unbounded behaviour.
   let limitClause = "";
-  if (returnIdsOnly && !returnCountOnly) {
+  if ((returnIdsOnly || returnDistinctValues) && !returnCountOnly) {
+    // returnDistinctValues also has no page LIMIT (the runtime dedupes), so it gets the same ceiling: without one a
+    // distinct request on a huge table pulled every row into the shared process.
     limitClause = maxReturnIds > 0 ? ` LIMIT ${maxReturnIds + 1}` : "";
   } else if (fetchSize && !returnIdsOnly && !returnDistinctValues) {
     limitClause = ` LIMIT ${fetchSize + 1}`;

@@ -30,6 +30,8 @@ const pools = {};
 // second overwrites the first in `pools` — orphaning the first pool (its idle connections never
 // close, it's not in `pools` for shutdown, and its token never refreshes).
 const poolsCreating = {};
+// Socket timeout for Databricks REST calls (credential mint, endpoint lookup, SCIM /Me).
+const API_TIMEOUT_MS = parseInt(process.env.LAKEBASE_API_TIMEOUT_MS) || 30000;
 
 // Cache of `${workspaceAlias}|${host}` -> instanceName (doesn't change per workspace)
 const instanceNameCache = {};
@@ -109,6 +111,8 @@ function mintWorkspaceApiToken(workspaceConfig) {
       });
     });
 
+    // A blackholed workspace API must fail, not hang: the pool's single-flight creation awaits this call.
+    req.setTimeout(API_TIMEOUT_MS, () => req.destroy(new Error(`timed out after ${API_TIMEOUT_MS} ms`)));
     req.on('error', (err) => {
       reject(new Error(`OAuth M2M token request failed: ${err.message}`));
     });
@@ -192,6 +196,8 @@ async function databricksApiRequest(method, path, body, workspaceConfig) {
       });
     });
 
+    // A blackholed workspace API must fail, not hang: the pool's single-flight creation awaits this call.
+    req.setTimeout(API_TIMEOUT_MS, () => req.destroy(new Error(`timed out after ${API_TIMEOUT_MS} ms`)));
     req.on('error', (err) => {
       reject(new Error(`Databricks API request failed: ${err.message}`));
     });
@@ -461,7 +467,8 @@ const tokenOwnerCache = {};
 
 /** Username that owns the workspace PAT — the identity a minted Lakebase credential belongs to. */
 async function resolveTokenOwner(workspaceConfig) {
-  const alias = workspaceConfig.workspaceAlias;
+  // Keyed by alias + token fingerprint: a PAT rotated to a different identity must re-resolve its owner.
+  const alias = `${workspaceConfig.workspaceAlias}|${require('crypto').createHash('sha256').update(String(workspaceConfig.token || '')).digest('hex').slice(0, 16)}`;
   if (tokenOwnerCache[alias]) return tokenOwnerCache[alias];
   try {
     const me = await databricksApiRequest('GET', '/api/2.0/preview/scim/v2/Me', null, workspaceConfig);
@@ -509,11 +516,10 @@ async function resolvePgUser(config) {
 async function createLakebasePool(key, config) {
   if (pools[key]) {
     console.log(`[LakebasePool] Token expired for ${key}, refreshing...`);
-    try {
-      await pools[key].pool.end();
-    } catch (err) {
-      console.error(`[LakebasePool] Error closing expired pool ${key}:`, err.message);
-    }
+    // Detached: pg's end() waits for every checked-out client, so awaiting it let one long query past token expiry
+    // stall the refresh — and, through the single-flight, every request for this database. Old clients drain on release.
+    const oldPool = pools[key].pool;
+    oldPool.end().catch((err) => console.error(`[LakebasePool] Error closing expired pool ${key}:`, err.message));
     delete pools[key];
   }
 
@@ -536,13 +542,19 @@ async function createLakebasePool(key, config) {
     max: poolMax,
     idleTimeoutMillis: 60000,
     connectionTimeoutMillis: 30000,
+    // Server-side cap per statement (pg defaults to none): an abandoned tile or a huge count can't pin a pool client
+    // indefinitely and starve every Lakebase service on this pool. Same budget as the Lakehouse sessions.
+    statement_timeout: parseInt(process.env.LAKEBASE_STATEMENT_TIMEOUT_MS) || parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000,
   });
 
   pool.on('error', (err) => {
     console.error(`[LakebasePool] Unexpected error on idle client (${key}):`, err.message);
-    if (err.message && err.message.includes('authorization')) {
+    // Postgres says "password authentication failed"; Lakebase says "...authorization...". Drop THIS pool (not a newer
+    // one created since) and end it so its clients aren't orphaned; the next request mints a fresh credential.
+    if (err.message && /authentication|authorization/i.test(err.message) && pools[key] && pools[key].pool === pool) {
       console.log(`[LakebasePool] Auth error detected, invalidating pool ${key}`);
       delete pools[key];
+      pool.end().catch(() => {});
     }
   });
 

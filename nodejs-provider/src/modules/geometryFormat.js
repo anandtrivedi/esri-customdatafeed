@@ -206,10 +206,9 @@ async function resolveGeometryFormat(tableName, geometryColumn, explicitFormat, 
     formatCache.set(cacheKey, 'GEOMETRY');
     return 'GEOMETRY';
   } catch (error) {
-    // Probe failed (permissions, network, etc.) — default to GEOMETRY to avoid breaking queries.
-    // Cached so we don't retry a failing DESCRIBE on every request.
-    console.warn(`DESCRIBE TABLE probe failed for ${tableName}: ${error.message}, defaulting to GEOMETRY`);
-    formatCache.set(cacheKey, 'GEOMETRY');
+    // Probe failed (permissions, network, a warehouse still resuming) — default to GEOMETRY for THIS request but don't
+    // cache it: caching pinned a wrong guess for the life of the process if the first probe hit a transient error.
+    console.warn(`DESCRIBE TABLE probe failed for ${tableName}: ${error.message}, defaulting to GEOMETRY (not cached)`);
     return 'GEOMETRY';
   }
 }

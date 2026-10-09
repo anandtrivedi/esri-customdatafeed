@@ -100,6 +100,29 @@ function checkWhereClauseSafety(clause) {
     throw new Error('SQL comments are not allowed in WHERE clause');
   }
 
+  // Parentheses must balance (outside string literals). Both builders wrap the client WHERE as (where) before ANDing
+  // the geometry/time/objectId filters; "1=1) OR (1=1" would close that wrapper early and drop those filters.
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < clause.length; i++) {
+    const ch = clause[i];
+    if (inString) {
+      if (ch === "'") {
+        if (clause[i + 1] === "'") i++; // escaped quote ''
+        else inString = false;
+      }
+    } else if (ch === "'") {
+      inString = true;
+    } else if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      if (--depth < 0) break;
+    }
+  }
+  if (depth !== 0) {
+    throw new Error('Unbalanced parentheses in WHERE clause');
+  }
+
   return clause;
 }
 

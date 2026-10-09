@@ -14,6 +14,7 @@ let cleanupSlowMs = 0;             // make cancel()/close() take this long (they
 let acquireSlowMs = 0;             // make a BORROW (acquire #2+, never the request's own) take this long
 let execSlowMs = 0;                // make the extent statement OPEN take this long (crossing the budget)
 let closeFails = false;            // make the extent op's close() throw — the connection must be destroyed, not recycled
+let cancelFails = false;           // make the extent op's cancel() throw — the aggregate may still be running
 let connSeq = 0;
 const releases = [];               // { id, destroy } — what the pool got back, and in what state
 const sqlByConn = new Map();       // conn id -> [sql...] — proves which statements ran on which connection
@@ -51,6 +52,7 @@ const connectionPoolStub = {
               },
               cancel: async () => {
                 cancelCalls++;
+                if (cancelFails && isExtent) throw new Error("cancel failed");
                 // Only the EXTENT op's cancel/close are made slow: the main query's close() is legitimately awaited
                 // by getData, so slowing every close would time the wrong thing.
                 if (cleanupSlowMs && isExtent) await new Promise((r) => setTimeout(r, cleanupSlowMs));
@@ -107,7 +109,7 @@ describe("Lakehouse metadata extent", function () {
 
   beforeEach(() => {
     extentCalls = 0; cancelCalls = 0; closeCalls = 0; extentHangs = false; extentRejectsOnCancel = false;
-    extentSlowMs = 0; cleanupSlowMs = 0; acquireSlowMs = 0; execSlowMs = 0; closeFails = false; connSeq = 0;
+    extentSlowMs = 0; cleanupSlowMs = 0; acquireSlowMs = 0; execSlowMs = 0; closeFails = false; cancelFails = false; connSeq = 0;
     releases.length = 0; sqlByConn.clear();
     Model._extentCache.clear();
   });
@@ -256,6 +258,18 @@ describe("Lakehouse metadata extent", function () {
     const extentRelease = releases.find((r) => r.id === "test-conn-2");
     expect(extentRelease, "the extent connection was returned").to.exist;
     expect(extentRelease.destroy).to.be.true; // close failed — session state unknown, so don't hand it to the next borrower
+  });
+
+  it("destroys (not recycles) the borrowed connection when cancelling a timed-out extent fails", async () => {
+    // A failed cancel means the ST_Envelope_Agg may still be running on that session; recycling it would park the next
+    // tile behind a full-table aggregate.
+    extentHangs = true; cancelFails = true;
+    const model = new Model();
+    await getData(model, req("catalog.schema.t1"));
+    await new Promise((r) => setTimeout(r, 50));
+    const extentRelease = releases.find((r) => r.id === "test-conn-2");
+    expect(extentRelease, "the extent connection was returned").to.exist;
+    expect(extentRelease.destroy).to.be.true;
   });
 
   it("retries after a transient (non-timeout) extent error instead of caching it forever", async () => {

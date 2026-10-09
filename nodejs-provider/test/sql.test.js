@@ -171,6 +171,12 @@ describe("sql", () => {
       expect(sql).to.not.include("9007199254740992");
     });
 
+    it("returnDistinctValues is bounded by the returnIds ceiling (it has no page LIMIT)", () => {
+      const sql = build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxReturnIds: 1000 });
+      expect(sql).to.include("LIMIT 1001");
+      expect(build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxReturnIds: 0 })).to.not.include("LIMIT");
+    });
+
     it("should reject non-integer objectIds (injection attempt returns empty)", () => {
       const sql = build({ objectIds: "'; DROP TABLE x--" });
       // Non-integer values are filtered out; with no valid IDs, 1=0 ensures empty result

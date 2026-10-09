@@ -8,6 +8,8 @@ const proxyquire = require("proxyquire").noCallThru();
 let lakehouseQueryRows = [];
 let lakehouseExecuteError = null;
 let lakehouseReleaseLog = [];
+let lakehouseCloseError = null;  // make the main query op's close() throw
+let lakebaseClientReleases = []; // what each dedicated (transaction) pg client was released with
 const connectionPoolStub = {
   getPool: () => ({
     poolLabel: () => "test-pool",
@@ -19,7 +21,7 @@ const connectionPoolStub = {
           return {
             // DESCRIBE TABLE probe (geometry format detection) gets no rows
             fetchAll: async () => (/^\s*DESCRIBE/i.test(sql) ? [] : lakehouseQueryRows),
-            close: async () => {},
+            close: async () => { if (lakehouseCloseError && /\bLIMIT\b/.test(sql) && !/ST_Envelope_Agg|unix_millis/.test(sql)) throw lakehouseCloseError; },
           };
         },
       },
@@ -67,7 +69,7 @@ const lakebasePoolStub = {
     // pool.connect() returns a client with query/release for transactions
     connect: async () => ({
       query: queryFn,
-      release: () => {},
+      release: (err) => { lakebaseClientReleases.push(err); },
     }),
   }),
   shutdownLakebasePools: async () => {},
@@ -103,6 +105,8 @@ describe("model", () => {
     lakehouseQueryRows = [];
     lakehouseExecuteError = null;
     lakehouseReleaseLog = [];
+    lakehouseCloseError = null;
+    lakebaseClientReleases = [];
   });
 
   after(() => {
@@ -633,6 +637,127 @@ describe("model", () => {
         });
       });
     }
+  });
+
+  describe("full-codebase review fixes", () => {
+    const lb = (extra = {}, query = { f: "json" }) => ({
+      query,
+      params: { lakebaseHost: "lakebase.example.com", lakebaseDatabase: "testdb", lakebaseTable: "cell_towers", geometryColumn: "geometry", idField: "id", ...extra },
+      ip: "127.0.0.1",
+    });
+
+    it("Lakehouse: a failed close() of the main query destroys the connection instead of recycling it", (done) => {
+      lakehouseQueryRows = [{ id: 1, geometry: '{"type":"Point","coordinates":[-77,38]}' }];
+      lakehouseCloseError = new Error("close failed");
+      new Model().getData({ query: { f: "json", resultRecordCount: "5" }, params: { tableName: "catalog.schema.towers", geometryFormat: "GEOMETRY" }, ip: "127.0.0.1" }, (err) => {
+        // release() runs in getData's finally, after the (awaited, failing) close — poll briefly for it
+        setTimeout(() => {
+          try {
+            expect(err).to.be.null;
+            expect(lakehouseReleaseLog.at(-1)).to.include({ destroy: true });
+            done();
+          } catch (e) { done(e); }
+        }, 20);
+      });
+    });
+
+    it("Lakebase getData calls back exactly once even if the callback throws (no re-entry via .catch)", async () => {
+      lakebaseQueryResult = { rows: [{ id: 1, geometry: '{"type":"Point","coordinates":[-77,38]}' }] };
+      let calls = 0;
+      const unhandled = [];
+      const onUnhandled = (e) => unhandled.push(e);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        new Model().getData(lb(), () => { calls++; throw new Error("socket gone"); });
+        await new Promise((r) => setTimeout(r, 30));
+      } finally { process.removeListener("unhandledRejection", onUnhandled); }
+      expect(calls).to.equal(1);
+      expect(unhandled).to.have.lengthOf(0);
+    });
+
+    it("Lakebase returnIdsOnly over the ceiling → actionable 400, like the Lakehouse path", (done) => {
+      lakebaseQueryResult = { rows: Array.from({ length: 500001 }, (_, i) => ({ id: i + 1 })) };
+      new Model().getData(lb({}, { f: "json", returnIdsOnly: "true" }), (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("DATABRICKS_MAX_RETURN_IDS");
+        expect(err.code).to.equal(400);
+        expect(lakebaseQueryLog[0].sql).to.include("LIMIT 500001");
+        done();
+      });
+    });
+
+    it("Lakebase idField configured as OBJECTID matches the lowercase key Postgres returns (reads, adds, deletes, getMetadata)", async () => {
+      lakebaseQueryResult = { rows: [{ objectid: 7, geometry: '{"type":"Point","coordinates":[-77,38]}' }] };
+      const fc = await new Promise((ok, no) => new Model().getData(lb({ idField: "OBJECTID" }), (e, r) => (e ? no(e) : ok(r))));
+      expect(fc.metadata.idField).to.equal("objectid");
+      expect(fc.features[0].properties.objectid).to.equal(7);
+
+      lakebaseQueryResult = [{ rows: [{ objectid: 42 }] }];
+      const add = await new Model().editData(lb({ idField: "OBJECTID" }), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }] });
+      expect(add.addResults[0]).to.deep.equal({ objectId: 42, success: true });
+
+      lakebaseQueryResult = { rows: [{ objectid: 5 }] };
+      const del = await new Model().editData(lb({ idField: "OBJECTID" }), { deletes: "5" });
+      expect(del.deleteResults[0]).to.deep.equal({ objectId: 5, success: true });
+
+      const meta = await new Model().getMetadata(lb({ idField: "OBJECTID" }));
+      expect(meta.idField).to.equal("objectid");
+      const lhMeta = await new Model().getMetadata({ params: { tableName: "c.s.t", idField: "OBJECTID" } });
+      expect(lhMeta.idField).to.equal("OBJECTID"); // Lakehouse keeps the configured spelling
+    });
+
+    it("a malformed delete id fails alone; the valid ids are still deleted", async () => {
+      lakebaseQueryResult = { rows: [{ id: 1 }, { id: 2 }] };
+      const r = await new Model().editData(lb(), { deletes: "1,abc,2" });
+      expect(lakebaseQueryLog[0].params).to.deep.equal([1, 2]);
+      const bad = r.deleteResults.find((x) => !x.success);
+      expect(bad.error.code).to.equal(1018);
+      expect(r.deleteResults.filter((x) => x.success).map((x) => x.objectId)).to.deep.equal([1, 2]);
+    });
+
+    it("empty entries in an array of deletes are dropped, never sent as id 0", async () => {
+      lakebaseQueryResult = { rows: [{ id: 5 }] };
+      const r = await new Model().editData(lb(), { deletes: ["5", "", null, "  "] });
+      expect(lakebaseQueryLog[0].params).to.deep.equal([5]);
+      expect(r.deleteResults).to.have.lengthOf(1);
+    });
+
+    it("an update with a non-integer id fails that row (1019) without running SQL", async () => {
+      const r = await new Model().editData(lb(), { updates: [{ attributes: { id: "abc", name: "x" } }] });
+      expect(r.updateResults[0].error.code).to.equal(1019);
+      expect(lakebaseQueryLog.some((q) => q.sql.includes("UPDATE"))).to.equal(false);
+    });
+
+    it("a service published with editingEnabled=false refuses edits", async () => {
+      let err;
+      try { await new Model().editData(lb({ editingEnabled: "false" }), { deletes: [1] }); } catch (e) { err = e; }
+      expect(err, "should refuse").to.exist;
+      expect(err.message).to.include("not enabled");
+      expect(lakebaseQueryLog).to.have.lengthOf(0);
+      // unset (older services) stays editable
+      lakebaseQueryResult = { rows: [{ id: 1 }] };
+      const ok = await new Model().editData(lb(), { deletes: [1] });
+      expect(ok.deleteResults[0].success).to.equal(true);
+    });
+
+    it("an INSERT whose new id is above 2^53 - 1 is reported as such, not as a rounded id", async () => {
+      lakebaseQueryResult = [{ rows: [{ id: "9007199254740993" }] }];
+      const r = await new Model().editData(lb(), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }] });
+      expect(r.addResults[0].success).to.equal(false);
+      expect(r.addResults[0].error.description).to.include("2^53");
+    });
+
+    it("a transaction client whose ROLLBACK fails is discarded, not recycled", async () => {
+      // A failing INSERT is caught per row, so drive the outer error path: BEGIN and ROLLBACK both fail (dead connection).
+      const origPush = lakebaseQueryLog.push.bind(lakebaseQueryLog);
+      lakebaseQueryLog.push = (q) => { if (q.sql === "BEGIN" || q.sql === "ROLLBACK") throw new Error("connection terminated"); return origPush(q); };
+      let err;
+      try { await new Model().editData(lb(), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }], rollbackOnFailure: true }); } catch (e) { err = e; }
+      lakebaseQueryLog.push = origPush;
+      expect(err, "edit should fail").to.exist;
+      expect(lakebaseClientReleases).to.have.lengthOf(1);
+      expect(lakebaseClientReleases[0]).to.be.an("error"); // pg discards a client released with an Error
+    });
   });
 
   describe("connection release on error", () => {

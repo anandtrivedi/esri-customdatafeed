@@ -129,6 +129,28 @@ describe("lakebaseQuery", () => {
       expect(params).to.deep.equal([2]);
     });
 
+    it("bounds returnIdsOnly and returnDistinctValues by the ceiling (maxReturnIds + 1)", () => {
+      expect(buildLakebaseSelectSql({ returnIdsOnly: true }, { ...baseConfig, maxReturnIds: 500 }).sql).to.include("LIMIT 501");
+      const d = buildLakebaseSelectSql({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { ...baseConfig, maxReturnIds: 500 }).sql;
+      expect(d).to.include("LIMIT 501");
+      expect(d).to.not.include("ST_AsGeoJSON"); // distinct values don't need geometry
+      expect(buildLakebaseSelectSql({ returnIdsOnly: true }, baseConfig).sql).to.not.include("LIMIT"); // no ceiling configured
+    });
+
+    it("reads the filter geometry's own spatialReference when there is no inSR", () => {
+      const env = JSON.stringify({ xmin: -8700000, ymin: 4500000, xmax: -8600000, ymax: 4600000, spatialReference: { wkid: 102100, latestWkid: 3857 } });
+      const { sql } = buildLakebaseSelectSql({ geometry: env }, baseConfig);
+      expect(sql).to.include("ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($1), 102100), 4326)");
+    });
+
+    it("treats an SR-less envelope in meters as Web Mercator (Map Viewer tile envelopes), like the Lakehouse path", () => {
+      const env = JSON.stringify({ xmin: -8700000, ymin: 4500000, xmax: -8600000, ymax: 4600000 });
+      const { sql } = buildLakebaseSelectSql({ geometry: env }, baseConfig);
+      expect(sql).to.include("ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($1), 3857), 4326)");
+      const deg = JSON.stringify({ xmin: -78, ymin: 38, xmax: -77, ymax: 39 });
+      expect(buildLakebaseSelectSql({ geometry: deg }, baseConfig).sql).to.not.include("ST_Transform");
+    });
+
     it("should apply spatial filter with parameterized geometry", () => {
       const envelope = JSON.stringify({ xmin: -78, ymin: 38, xmax: -77, ymax: 39 });
       const { sql, params } = buildLakebaseSelectSql(

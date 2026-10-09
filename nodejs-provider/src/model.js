@@ -59,7 +59,15 @@ const config = {
     // Feature-tile queries (resultType=tile) are cancelled after this many ms; 0 disables. ArcGIS Server doesn't pass a
     // browser's abort through to the CDF, so an abandoned tile otherwise runs to the session STATEMENT_TIMEOUT (default
     // 2 min) while holding a pool connection. Tiles are a drawing sample, so failing one fast is the better trade.
-    tileQueryTimeout: parseInt(process.env.DATABRICKS_TILE_QUERY_TIMEOUT ?? '30000', 10),
+    // Fail-safe like maxReturnIds: an unparseable value ("", "30s") must not silently disable the timeout.
+    tileQueryTimeout: (() => {
+      const raw = process.env.DATABRICKS_TILE_QUERY_TIMEOUT;
+      if (raw === undefined) return 30000;
+      const n = Number(raw);
+      if (raw.trim() !== '' && Number.isInteger(n) && n >= 0) return n;
+      console.warn(`[CDF] Invalid DATABRICKS_TILE_QUERY_TIMEOUT="${raw}"; using default 30000 (milliseconds; 0 disables).`);
+      return 30000;
+    })(),
     // returnIdsOnly must return ALL matching object ids (clients page through them), so it carries no row limit.
     // On a huge table an unbounded ids-only query can return millions of ids inline (seen: 1.95M ids / ~559 MB RSS),
     // which — now that CloudFetch is off — all lands in the CDF process and can exhaust its memory. This is a hard
@@ -81,8 +89,6 @@ const config = {
   }
 };
 
-// Options for every executeStatement call, so none of them can fall back to the driver's CloudFetch default.
-// Per statement on purpose: in 1.12.0 the DBSQLClient constructor ignores a config argument.
 /**
  * applyEdits `deletes` arrives the way the REST parameter does: a single id (number), a comma-separated string
  * ("1,2,3"), sometimes bracketed ("[1,2]"), or an array. Treating only arrays as lists silently dropped every
@@ -90,8 +96,9 @@ const config = {
  */
 function normalizeDeleteIds(raw) {
   if (raw === undefined || raw === null || raw === '') return [];
-  if (Array.isArray(raw)) return raw;
-  return String(raw).replace(/^\s*\[|\]\s*$/g, '').split(',').map((s) => s.trim()).filter(Boolean);
+  const parts = Array.isArray(raw) ? raw : String(raw).replace(/^\s*\[|\]\s*$/g, '').split(',');
+  // Drop empty entries: Number('') and Number(null) are 0, which would otherwise delete the row with id 0.
+  return parts.filter((v) => v !== null && v !== undefined && String(v).trim() !== '').map((v) => (typeof v === 'string' ? v.trim() : v));
 }
 
 // ArcGIS OBJECTIDs travel as JavaScript numbers, which can't hold integers above 2^53 - 1 exactly: 9007199254740993
@@ -100,6 +107,8 @@ function unsafeIdMessage(idField, id) {
   return `${idField}=${id} is above 2^53 - 1 (9007199254740991), so ArcGIS can't carry it exactly and the edit could hit the wrong row. Publish the layer with a unique integer idField below that limit.`;
 }
 
+// Options for every executeStatement call, so none of them can fall back to the driver's CloudFetch default.
+// Per statement on purpose: in 1.12.0 the DBSQLClient constructor ignores a config argument.
 function statementOptions() {
   return {
     runAsync: true,
@@ -215,13 +224,11 @@ function timeRowsToRange(rows) {
 try {
   process.on('SIGTERM', async () => {
     console.log('Received SIGTERM, shutting down connection pools...');
-    await shutdownPool();
-    await shutdownLakebasePools();
+    try { await shutdownPool(); await shutdownLakebasePools(); } catch (e) { console.error('Shutdown error:', e.message); }
   });
   process.on('SIGINT', async () => {
     console.log('Received SIGINT, shutting down connection pools...');
-    await shutdownPool();
-    await shutdownLakebasePools();
+    try { await shutdownPool(); await shutdownLakebasePools(); } catch (e) { console.error('Shutdown error:', e.message); }
   });
 } catch (e) { /* signal handlers may not be available in CDF runtime */ }
 
@@ -351,10 +358,11 @@ class Model {
   // even opened (a failed open leaves the session suspect, mirroring getData's destroy-on-query-failure).
   _releaseExtentConnection(pool, conn, op, cancel, forceDestroy) {
     (async () => {
+      let cancelFailed = false;
       if (cancel && op) {
-        try { await op.cancel(); } catch (e) { /* may already be finished */ }
+        try { await op.cancel(); } catch (e) { cancelFailed = true; } // the aggregate may still be running
       }
-      let clean = !forceDestroy;
+      let clean = !forceDestroy && !cancelFailed;
       if (op) {
         try { await op.close(); } catch (e) { clean = false; }
       }
@@ -447,8 +455,10 @@ class Model {
           // statement-open (a queued borrow resolves or rejects within the pool's acquire timeout, so it can't hang),
           // and the detached cleanup then cancels whatever materialized — a late borrow can never leak its connection
           // or run an orphaned query to completion.
-          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
-          this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
+          // Never got a connection/statement = pool contention, not a slow query: retry soon (as the spatial extent does).
+          const ttl = handles.op ? EXTENT_RETRY_MS : EXTENT_ERROR_RETRY_MS;
+          extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl });
+          this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(ttl / 60000)} min`);
           work.catch(() => {}).then(() => release(true));
           return;
         }
@@ -781,7 +791,12 @@ class Model {
             // fetchAll finished before the cancel took effect; don't build a response for a client that's gone
             throw new Error(`Query cancelled: ${cancelReason}`);
           }
-          await queryOperation.close();
+          // The rows are already fetched: a failing close() shouldn't fail the response, but the session's state is
+          // unknown, so it is destroyed rather than recycled.
+          try { await queryOperation.close(); } catch (e) {
+            this.logger.warn(`Query ${requestCounter}: Error closing query operation: ${e.message}`);
+            queryFailed = true;
+          }
           queryOperation = null;
 
           this.logger.info(`Query ${requestCounter}: Received ${rows.length} rows`);
@@ -789,10 +804,10 @@ class Model {
           // returnIdsOnly is fetched with LIMIT maxReturnIds + 1 (see buildSqlQuery). If we got the extra row the id
           // set is larger than the ceiling; return an actionable error rather than a silently-truncated (wrong) set.
           const idCeiling = config.databricks.maxReturnIds;
-          if (geoserviceParams.returnIdsOnly && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
+          if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
             this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
             const tooMany = new Error(
-              `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` +
+              (geoserviceParams.returnIdsOnly ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
               `Narrow the request with where / time / geometry filters, or raise the DATABRICKS_MAX_RETURN_IDS ` +
               `environment variable on the server (set it to 0 to disable the ceiling).`
             );
@@ -901,6 +916,7 @@ class Model {
           if (queryOperation) {
             try { await queryOperation.close(); } catch (e) {
               this.logger.error(`Query ${requestCounter}: Error closing query operation: ${e.message}`);
+              queryFailed = true; // session state unknown — don't recycle it
             }
           }
 
@@ -985,8 +1001,11 @@ class Model {
    * Falls back to the defaults when called without a request (older runtime hooks).
    */
   async getMetadata(req) {
+    if (req && req.params) normalizeServiceParams(req);
+    const idField = req?.params?.idField || 'id';
     return {
-      idField: req?.params?.idField || 'id',
+      // Lakebase rows come back keyed in lowercase (unquoted Postgres identifiers), so report the same spelling.
+      idField: req?.params?.lakebaseHost ? idField.toLowerCase() : idField,
       inputCrs: parseInt(req?.params?.srid) || config.databricks.srid || 4326,
     };
   }
@@ -1011,8 +1030,10 @@ class Model {
     const { query: geoserviceParams } = req;
     const { returnCountOnly } = geoserviceParams;
 
-    const rawGeometryColumn = req.params.geometryColumn || 'geometry';
-    const rawIdField = req.params.idField || 'id';
+    // Lakebase SQL uses unquoted identifiers, which Postgres folds to lowercase — so result rows are keyed in lowercase.
+    // Use that spelling throughout, or an idField configured as "OBJECTID" never matches the returned "objectid".
+    const rawGeometryColumn = (req.params.geometryColumn || 'geometry').toLowerCase();
+    const rawIdField = (req.params.idField || 'id').toLowerCase();
 
     try {
       validateIdentifier(rawGeometryColumn);
@@ -1066,22 +1087,44 @@ class Model {
 
     let sql, params, fetchSize;
     try {
-      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, sourceConfig));
+      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, { ...sourceConfig, maxReturnIds: config.databricks.maxReturnIds }));
     } catch (validationError) {
       this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
       return callback(validationError);
     }
     this.logger.info(`Query ${requestCounter}: ${sql.length > 400 ? `${sql.substring(0, 160)} … ${sql.slice(-240)}` : sql}`);
 
+    // Exactly one response, and a throwing callback can't re-enter via .catch (a second throw there would be an
+    // unhandled rejection, which exits the one Node process serving every service). Same guard as the Lakehouse path.
+    let responded = false;
+    const respond = (err, data) => {
+      if (responded) return;
+      responded = true;
+      try { callback(err, data); } catch (e) { this.logger.error(`Query ${requestCounter}: response callback threw: ${e.message}`); }
+    };
+
     pool.query(sql, params)
       .then((result) => {
         const rows = result.rows;
         this.logger.info(`Query ${requestCounter}: Lakebase returned ${rows.length} rows`);
 
+        // Same returnIdsOnly ceiling as the Lakehouse path (buildLakebaseSelectSql fetches maxReturnIds + 1).
+        const idCeiling = config.databricks.maxReturnIds;
+        if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
+          this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
+          const tooMany = new Error(
+            (geoserviceParams.returnIdsOnly ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
+            `Narrow the request with where / time / geometry filters, or raise the DATABRICKS_MAX_RETURN_IDS ` +
+            `environment variable on the server (set it to 0 to disable the ceiling).`
+          );
+          tooMany.code = 400;
+          return respond(tooMany);
+        }
+
         let geojson = { type: 'FeatureCollection', features: [] };
 
         if (rows.length === 0) {
-          return callback(null, geojson);
+          return respond(null, geojson);
         }
 
         if (returnCountOnly) {
@@ -1126,11 +1169,11 @@ class Model {
           properties: { name: `urn:ogc:def:crs:EPSG::${sourceConfig.dbWKID}` },
         };
 
-        callback(null, geojson);
+        respond(null, geojson);
       })
       .catch((error) => {
         this.logger.error(`Query ${requestCounter}: Lakebase error: ${error.message}`);
-        callback(error);
+        respond(error);
       });
   }
 
@@ -1154,8 +1197,9 @@ class Model {
   async editData(req, data, callback) {
     try {
       normalizeServiceParams(req); // '-', 'na', blanks etc. (publish-form placeholders) => unset
-      const rawGeometryColumn = req.params.geometryColumn || 'geometry';
-      const rawIdField = req.params.idField || 'id';
+      // Lowercase for the same reason as getDataFromLakebase: RETURNING keys come back folded to lowercase.
+      const rawGeometryColumn = (req.params.geometryColumn || 'geometry').toLowerCase();
+      const rawIdField = (req.params.idField || 'id').toLowerCase();
       const schema = req.params.lakebaseSchema || 'public';
       const table = req.params.lakebaseTable;
       const srid = parseInt(req.params.srid) || config.databricks.srid || 4326;
@@ -1165,6 +1209,11 @@ class Model {
 
       if (!req.params.lakebaseHost) {
         throw new Error('Editing requires lakebaseHost service parameter');
+      }
+      // cdconfig's provider-level editingEnabled turns editData on for EVERY service of this provider, so a service
+      // published read-only (editingEnabled=false) must refuse here. Unset stays editable (older services omit it).
+      if (String(req.params.editingEnabled).trim().toLowerCase() === 'false') {
+        throw new Error('Editing is not enabled for this service (editingEnabled=false)');
       }
       if (!table) {
         throw new Error('Editing requires lakebaseTable service parameter');
@@ -1196,6 +1245,7 @@ class Model {
 
       // Use a dedicated client for transaction support
       const client = rollbackOnFailure ? await pool.connect() : null;
+      let clientBroken = null;
       const query = client
         ? (sql, params) => client.query(sql, params)
         : (sql, params) => pool.query(sql, params);
@@ -1212,7 +1262,13 @@ class Model {
             const geometry = feature.geometry || null;
             const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
             const result = await query(sql, params);
-            const newId = result.rows[0][rawIdField];
+            const newId = result.rows[0] && result.rows[0][rawIdField];
+            if (newId === undefined || newId === null) throw new Error(`INSERT returned no ${rawIdField}`);
+            if (!Number.isSafeInteger(Number(newId))) {
+              // The row exists, but its id can't be reported exactly; say so instead of returning a rounded id.
+              addResults.push({ success: false, error: { code: 1017, description: unsafeIdMessage(rawIdField, newId) } });
+              continue;
+            }
             addResults.push({ objectId: Number(newId), success: true });
           } catch (error) {
             this.logger.error(`Edit add failed: ${error.message}`);
@@ -1226,7 +1282,11 @@ class Model {
             const attributes = feature.attributes || feature.properties || {};
             const geometry = feature.geometry || null;
             const oid = Number(attributes[rawIdField]);
-            if (Number.isFinite(oid) && Number.isInteger(oid) && !Number.isSafeInteger(oid)) {
+            if (!Number.isInteger(oid)) {
+              updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Update needs an integer ${rawIdField}; got ${JSON.stringify(attributes[rawIdField])}` } });
+              continue;
+            }
+            if (!Number.isSafeInteger(oid)) {
               updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: unsafeIdMessage(rawIdField, oid) } });
               continue;
             }
@@ -1249,7 +1309,10 @@ class Model {
         const safeDeletes = [];
         for (const raw of deletes) {
           const id = Number(raw);
-          if (Number.isFinite(id) && Number.isInteger(id) && !Number.isSafeInteger(id)) {
+          if (!Number.isInteger(id)) {
+            // One malformed id (e.g. "1,abc,2") must not fail the DELETE for the valid ones.
+            deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: `Invalid ${rawIdField} ${JSON.stringify(raw)}: not an integer` } });
+          } else if (!Number.isSafeInteger(id)) {
             deleteResults.push({ objectId: id, success: false, error: { code: 1018, description: unsafeIdMessage(rawIdField, raw) } });
           } else {
             safeDeletes.push(raw);
@@ -1311,14 +1374,14 @@ class Model {
         return result;
       } catch (error) {
         if (client) {
-          try { await client.query('ROLLBACK'); } catch (e) { /* ignore rollback error */ }
+          try { await client.query('ROLLBACK'); } catch (e) { clientBroken = e; } // dead or still in a transaction
         }
         this.logger.error(`Edit error: ${error.message}`);
         if (typeof callback === 'function') return callback(error);
         throw error;
       } finally {
         if (client) {
-          client.release();
+          client.release(clientBroken || undefined); // an Error discards the client instead of recycling it
         }
       }
     } catch (err) {

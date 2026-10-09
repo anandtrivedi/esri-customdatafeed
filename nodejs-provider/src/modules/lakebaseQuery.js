@@ -17,6 +17,7 @@ const {
   validateInteger,
 } = require('./sanitize');
 const { esriRingsToGeoJSON, esriPathsToGeoJSON } = require('./esriGeometry');
+const { looksProjectedGeometry } = require('./geometry');
 
 /**
  * Build a parameterized SELECT statement for Lakebase reads.
@@ -46,6 +47,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     resultRecordCount,
     returnCountOnly,
     returnIdsOnly,
+    returnDistinctValues,
     returnGeometry = true,
     resultType,
   } = geoParams;
@@ -72,6 +74,11 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     selectClause = 'COUNT(*) AS count';
   } else if (returnIdsOnly) {
     selectClause = idField;
+  } else if (returnDistinctValues && !returnGeometry) {
+    // Same as the Lakehouse builder: requested fields + id, no geometry; the CDF runtime dedupes the values.
+    const fieldList = outFields === '*' ? ['*'] : outFields.split(',').map(f => validateFieldName(f));
+    if (fieldList[0] !== '*' && !fieldList.includes(idField)) fieldList.push(idField);
+    selectClause = fieldList.join(', ');
   } else {
     const geomExpr = `ST_AsGeoJSON(${geometryColumn}) AS ${geometryColumn}`;
 
@@ -118,7 +125,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     const geoJsonFilter = parseGeometryFilter(geometry);
     if (geoJsonFilter) {
       params.push(JSON.stringify(geoJsonFilter));
-      const geomParam = buildGeomParam(paramIndex, srid, inSR);
+      const geomParam = buildGeomParam(paramIndex, srid, inSR || geometrySourceSR(geometry, srid));
       const spatialPredicate = getSpatialPredicate(spatialRel, geometryColumn, geomParam);
       whereClauses.push(spatialPredicate);
       paramIndex++;
@@ -146,7 +153,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   // --- LIMIT / OFFSET ---
   let limitStr = '';
   let offsetStr = '';
-  if (!returnCountOnly && !returnIdsOnly) {
+  if (!returnCountOnly && !returnIdsOnly && !returnDistinctValues) {
     // Fetch one extra row to detect exceededTransferLimit
     limitStr = ` LIMIT ${Number(fetchSize) + 1}`;
 
@@ -155,6 +162,11 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
       offsetStr = ` OFFSET ${offset}`;
     }
   }
+
+  // returnIdsOnly has no page LIMIT (clients want every id); bound it to the ceiling + 1 like the Lakehouse builder so
+  // the caller can error instead of holding millions of ids in the shared process.
+  const maxReturnIds = Number(sourceConfig.maxReturnIds) || 0;
+  if ((returnIdsOnly || returnDistinctValues) && !returnCountOnly && maxReturnIds > 0) limitStr = ` LIMIT ${maxReturnIds + 1}`;
 
   const sql = `SELECT ${selectClause} FROM ${schema}.${table}${whereStr}${orderByStr}${limitStr}${offsetStr}`;
   return { sql, params, fetchSize };
@@ -257,6 +269,24 @@ function buildGeomParam(paramIndex, srid, inSR) {
  * @param {string|number|object} inSR
  * @returns {number|null}
  */
+/**
+ * Source SRID when the request has no inSR: the filter geometry's own spatialReference, else Web Mercator if the
+ * coordinates can't be degrees (Map Viewer tile envelopes can carry neither — same fallback as geometry.js).
+ */
+function geometrySourceSR(geometry, srid) {
+  let g = geometry;
+  if (typeof g === 'string') {
+    try { g = JSON.parse(g); } catch (e) { return null; } // "xmin,ymin,xmax,ymax" — no SR to read
+  }
+  const sr = g && g.spatialReference;
+  if (sr && (sr.latestWkid || sr.wkid)) return sr.latestWkid === Number(srid) ? sr.latestWkid : (sr.wkid || sr.latestWkid);
+  if (Number(srid) === 4326 && looksProjectedGeometry(g)) {
+    console.warn('[lakebaseQuery] filter has no SR and out-of-4326-range coords; assuming Web Mercator (3857)');
+    return 3857;
+  }
+  return null;
+}
+
 function parseInSR(inSR) {
   if (!inSR) return null;
   if (typeof inSR === 'number') return inSR;

@@ -328,4 +328,5 @@ function getExtentFromGeoJson(geoJsonPolygon, dbWKID) {
 module.exports = {
   getGeometryQuery,
   getExtentFromGeoJson,
+  looksProjectedGeometry,
 };
