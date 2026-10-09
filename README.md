@@ -339,7 +339,8 @@ Provider init failed silently. Tail the server log for `Custom_data_feeds` lines
 - **No data:** verify the fully-qualified table name + geometry column; test the warehouse independently.
 - **OBJECTID:** `idField` must be an integer ≤ 2,147,483,647 with unique values.
 - **Editing fails:** `capabilities:"Query,Editing"` + `editingEnabled:"true"` both set; `lakebaseHost` present (editing is Lakebase-only); ArcGIS 12.0+. On federated Portal, the user's role needs "Edit features".
-- **Lakebase service 404s (native login):** a native-login table (`LAKEBASE_USER`/`LAKEBASE_PASSWORD`) needs `workspace` set to a **PAT** profile. With an **OAuth-M2M** profile the provider uses the SP `client_id` as the Postgres user instead — wrong user, so the FeatureServer 404s with no logged error.
+- **Every `applyEdits` answers `Invalid URL`:** the service was published with hosted-layer style capabilities (`Create,Delete,Query,Update`). A Custom Data Feed service needs exactly `Query,Editing` — fix `capabilities` on the service and restart it.
+- **Lakebase `password authentication failed for user '<uuid>'` (native login):** with `LAKEBASE_PASSWORD` set, set `LAKEBASE_USER` to the password role — it takes priority over the service principal's client id. (Older builds used the client id on OAuth-M2M profiles.)
 - **Slow:** Lakehouse cold start (5–15 s) after idle; add `OPTIMIZE … ZORDER BY (geom)` (Lakehouse) or `CREATE INDEX … USING GIST (geom)` (Lakebase).
 
 </details>

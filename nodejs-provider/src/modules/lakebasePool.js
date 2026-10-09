@@ -488,6 +488,9 @@ async function resolveTokenOwner(workspaceConfig) {
 async function resolvePgUser(config) {
   const ws = config.workspaceConfig;
   if (config.user) return config.user;
+  // A static LAKEBASE_PASSWORD is a native-login password for the LAKEBASE_USER role, not a credential minted for the
+  // workspace identity — so that role wins over the SP client id (else: password authentication failed for '<clientId>').
+  if (process.env.LAKEBASE_PASSWORD && process.env.LAKEBASE_USER) return process.env.LAKEBASE_USER;
   if (ws && ws.authType === 'oauth-m2m' && ws.clientId) return ws.clientId;
   if (process.env.LAKEBASE_USER) return process.env.LAKEBASE_USER;
   if (ws && ws.authType === 'pat' && !process.env.LAKEBASE_PASSWORD) {

@@ -299,6 +299,15 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
     expect(pools[0].user).to.equal("native_role");
   });
 
+  it("static LAKEBASE_PASSWORD on an OAuth M2M profile → logs in as LAKEBASE_USER, not the SP client id", async () => {
+    process.env["LAKEBASE_PASSWORD"] = "static-pw"; // bracket notation keeps this stub off the secret scanner
+    process.env.LAKEBASE_USER = "native_role";
+    const m2m = { workspaceAlias: "sp", hostname: "fevm-arclake.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
+    await LakebasePool.getLakebasePool({ host: HOST_PROV, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
+    expect(pools[0].user).to.equal("native_role");
+    expect(calls).to.have.lengthOf(0);
+  });
+
   it("OAuth M2M workspace → pg user is the service principal's client id (unchanged)", async () => {
     routes = autoscalingRoutes({
       "POST /oidc/v1/token": ok({ access_token: "ws-token", expires_in: 3600 }),

@@ -1036,6 +1036,44 @@ describe("model", () => {
       expect(lakebaseQueryLog[0].sql).to.include("IN ($1, $2, $3)");
     });
 
+    // The runtime passes `deletes` the way the REST parameter arrives — not always an array. Only arrays used to
+    // work; a number or "1,2" was silently ignored (logged "undefined deletes", nothing deleted, nothing reported).
+    const deleteReq = () => ({
+      params: {
+        lakebaseHost: "lakebase.example.com",
+        lakebaseDatabase: "testdb",
+        lakebaseTable: "cell_towers",
+        lakebaseSchema: "public",
+        geometryColumn: "geometry",
+        idField: "id",
+      },
+      ip: "127.0.0.1",
+    });
+    for (const [label, deletes, ids] of [
+      ["a single number", 7, [7]],
+      ["a comma-separated string", "7, 8,9", [7, 8, 9]],
+      ["a bracketed string", "[7,8]", [7, 8]],
+      ["a single-id string", "7", [7]],
+    ]) {
+      it(`should process deletes given as ${label}`, async () => {
+        lakebaseQueryResult = { rows: ids.map((id) => ({ id })) };
+        const result = await new Model().editData(deleteReq(), { deletes });
+        expect(result.deleteResults.map((r) => r.objectId)).to.deep.equal(ids);
+        result.deleteResults.forEach((r) => expect(r.success).to.be.true);
+        expect(lakebaseQueryLog[0].sql).to.include("DELETE FROM");
+        expect(lakebaseQueryLog[0].params).to.deep.equal(ids);
+      });
+    }
+
+    it("should treat an empty deletes value as no deletes (no DELETE issued)", async () => {
+      for (const deletes of ["", null, undefined, []]) {
+        lakebaseQueryLog = [];
+        const result = await new Model().editData(deleteReq(), { deletes });
+        expect(result.deleteResults).to.deep.equal([]);
+        expect(lakebaseQueryLog.some((q) => q.sql.includes("DELETE"))).to.equal(false);
+      }
+    });
+
     it("should process mixed adds, updates, and deletes", async () => {
       // Queue: INSERT returns new ID, UPDATE returns rowCount=1, DELETE returns deleted row
       lakebaseQueryResult = [

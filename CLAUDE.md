@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (512 tests, ~7s)
+# Run all tests (524 tests, ~7s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -113,7 +113,7 @@ Each format wraps differently:
 `lakebasePool.js` manages auto-refreshing tokens:
 1. If `LAKEBASE_PASSWORD` env var is set, uses it as static credential (no refresh)
 2. Otherwise: looks the host up as a Provisioned instance (`/api/2.0/database/instances` → `/api/2.0/database/credentials`); if absent, scans Autoscaling `/api/2.0/postgres/projects` → `/api/2.0/postgres/{project}/branches` → `/api/2.0/postgres/{branch}/endpoints` (paginated, cached per workspace+host) and mints via `POST /api/2.0/postgres/credentials {"endpoint": name}` (`expire_time`). Both tiers use `ep-*` hostnames, so the host alone can't pick the tier. `LAKEBASE_ENDPOINT_NAME` skips the scan only if that endpoint serves the host; `LAKEBASE_INSTANCE_NAME` is the last fallback.
-   - pg user: per-service user → SP client id (OAuth M2M) → `LAKEBASE_USER` → PAT owner from SCIM `/Me` (PAT profiles) → `'databricks'`.
+   - pg user: per-service user → `LAKEBASE_USER` when `LAKEBASE_PASSWORD` is set (a native password role is any name, not the workspace identity) → SP client id (OAuth M2M) → `LAKEBASE_USER` → PAT owner from SCIM `/Me` (PAT profiles) → `'databricks'`.
 3. Tokens refresh proactively 5 minutes before expiry
 4. On auth errors from idle pool clients, pool is destroyed and recreated on next request
 5. Pool keyed by `"host:port/database"` — one pool per unique connection string
@@ -122,6 +122,7 @@ Each format wraps differently:
 
 `model.js editData()`:
 - Processes adds, updates, deletes sequentially
+- `deletes` is normalized by `normalizeDeleteIds`: the runtime passes it as the REST parameter arrives (a number, `"1,2"`, `"[1,2]"`) — not only an array. Treating it as an array silently dropped every delete from Pro/Field Maps/JS SDK.
 - `rollbackOnFailure=true`: wraps all ops in BEGIN/COMMIT with ROLLBACK on any failure (uses `pool.connect()` for dedicated client)
 - Error codes follow Esri convention: 1003=rolled back, 1017=insert failure, 1018=delete failure, 1019=update failure
 - DELETE uses `RETURNING idField` to identify which rows were actually deleted vs not found
@@ -130,10 +131,10 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**512 tests across 20 files:**
+**524 tests across 20 files:**
 | File | Count | Tests |
 |------|-------|-------|
-| `model.test.js` | 98 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
+| `model.test.js` | 103 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
 | `sanitize.test.js` | 59 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
 | `lakebaseQuery.test.js` | 53 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
 | `sql.test.js` | 41 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
@@ -151,7 +152,7 @@ Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `la
 | `version.test.js` | 10 | Provider version reporting |
 | `connectionPool.test.js` | 16 | Databricks SQL pool sizing, idle cleanup, wait queue, creation cap |
 | `scale.test.js` | 4 | minScale parameter parsing/advertising |
-| `lakebaseCredentials.test.js` | 18 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user |
+| `lakebaseCredentials.test.js` | 25 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user |
 | `lakebasePool.test.js` | 2 | Pool keying basics |
 
 Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exception: `model.test.js` tests the full `model.js` including getData/editData integration.

@@ -83,6 +83,17 @@ const config = {
 
 // Options for every executeStatement call, so none of them can fall back to the driver's CloudFetch default.
 // Per statement on purpose: in 1.12.0 the DBSQLClient constructor ignores a config argument.
+/**
+ * applyEdits `deletes` arrives the way the REST parameter does: a single id (number), a comma-separated string
+ * ("1,2,3"), sometimes bracketed ("[1,2]"), or an array. Treating only arrays as lists silently dropped every
+ * delete sent by Pro, Field Maps and the JS SDK. Returns an array of trimmed, non-empty ids.
+ */
+function normalizeDeleteIds(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (Array.isArray(raw)) return raw;
+  return String(raw).replace(/^\s*\[|\]\s*$/g, '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 function statementOptions() {
   return {
     runAsync: true,
@@ -1167,7 +1178,7 @@ class Model {
 
       const adds = data.adds || [];
       const updates = data.updates || [];
-      const deletes = data.deletes || [];
+      const deletes = normalizeDeleteIds(data.deletes);
       const rollbackOnFailure = data.rollbackOnFailure === true ||
         data.rollbackOnFailure === 'true';
 
