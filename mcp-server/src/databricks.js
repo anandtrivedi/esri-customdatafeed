@@ -118,7 +118,8 @@ async function apiCall(auth, method, apiPath, body) {
     json = { raw: text };
   }
   if (!res.ok) {
-    throw new Error(`Databricks API ${apiPath} → HTTP ${res.status}: ${json.message || text.slice(0, 300)}`);
+    // error_code in the message: callers match on it (e.g. RESOURCE_DOES_NOT_EXIST for a missing secret scope).
+    throw new Error(`Databricks API ${apiPath} → HTTP ${res.status}: ${json.error_code ? `${json.error_code}: ` : ""}${json.message || text.slice(0, 300)}`);
   }
   return json;
 }

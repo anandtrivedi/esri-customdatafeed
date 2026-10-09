@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { getAuth } from "../src/databricks.js";
+import { getAuth, listSecretKeys } from "../src/databricks.js";
 
 // Snapshot + restore the env vars getAuth reads, and global.fetch.
 const ENV_KEYS = ["DATABRICKS_HOST", "DATABRICKS_TOKEN", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET"];
@@ -70,5 +70,29 @@ describe("getAuth app-runtime OAuth M2M", () => {
     };
     const auth = await getAuth({});
     expect(auth.token).to.equal("pat-token");
+  });
+});
+
+describe("listSecretKeys", () => {
+  let savedFetch;
+  beforeEach(() => { savedFetch = global.fetch; });
+  afterEach(() => { global.fetch = savedFetch; });
+
+  it("treats a missing scope as no targets (matches error_code, which the message itself doesn't contain)", async () => {
+    global.fetch = async () => ({
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ error_code: "RESOURCE_DOES_NOT_EXIST", message: "Scope gis-targets does not exist!" }),
+    });
+    const keys = await listSecretKeys({ host: "https://ws", token: "t" }, "gis-targets");
+    expect(keys).to.deep.equal([]);
+  });
+
+  it("still throws other API errors", async () => {
+    global.fetch = async () => ({ ok: false, status: 403, text: async () => JSON.stringify({ error_code: "PERMISSION_DENIED", message: "no" }) });
+    let err;
+    try { await listSecretKeys({ host: "https://ws", token: "t" }, "gis-targets"); } catch (e) { err = e; }
+    expect(err).to.exist;
+    expect(err.message).to.include("PERMISSION_DENIED");
   });
 });

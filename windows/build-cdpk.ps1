@@ -129,6 +129,8 @@ function Assert-GovCloudAllowlist([string]$NodeModules) {
 
 # --- resolve paths ----------------------------------------------------------------------------
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }   # windows/ -> repo root
+# Absolute: zip entry names are cut from Get-ChildItem's absolute FullName by the length of this prefix.
+$RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $NodeDir = Join-Path $RepoRoot 'nodejs-provider'
 if (-not $OutDir) { $OutDir = Join-Path $RepoRoot 'dist' }
 $cdconfigPath = Join-Path $NodeDir 'cdconfig.json'
@@ -143,7 +145,10 @@ $version      = $pkg.version
 if (-not $providerName) { throw "could not read provider name from cdconfig.json." }
 if (-not $cdpkName)     { throw "could not read fileName from cdconfig.json." }
 if (-not $version)      { throw "could not read version from package.json." }
-$gitSha = (& git -C $RepoRoot rev-parse --short HEAD 2>$null); if (-not $gitSha) { $gitSha = 'unknown' }
+# try/catch: under PS 5.1 + EAP=Stop, git's stderr (not a repo / git missing) is a terminating error even with 2>$null.
+$gitSha = $null
+try { $gitSha = (& git -C $RepoRoot rev-parse --short HEAD 2>$null) } catch { $gitSha = $null }
+if (-not $gitSha) { $gitSha = 'unknown' }
 
 # --- normalize cdconfig.json (BOM-free; optional ArcGIS version retarget) ----------------------
 # ArcGIS Server rejects a cdconfig.json that carries a UTF-8 BOM with the SAME generic error as a
@@ -229,6 +234,8 @@ function Test-Excluded([string]$rel) {
   if ($rel -eq '.env')                                 { return $true }
   if (($rel -like '.env.*') -and ($rel -notmatch '/')) { return $true }   # root-level dotenv only
   if ($rel -like 'test/*')                             { return $true }
+  # Gitignored local credentials (build-release.sh excludes it too): a packaged copy once shipped a PAT.
+  if ($rel -eq 'src/databricks-config.json')           { return $true }
   if ($rel -like '*.md')                               { return $true }
   return $false
 }
