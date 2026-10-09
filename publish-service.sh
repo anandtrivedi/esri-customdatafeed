@@ -569,6 +569,47 @@ offer_lakehouse_grants() {
   done
 }
 
+check_id_range() {
+  # Warn-only: MIN/MAX of the id column (usually answered from Delta file statistics, so fast even on big tables).
+  # Esri OBJECTIDs are 32-bit; larger ids worked in our own testing but are outside what Esri supports. Above
+  # 2^53 - 1 they can't be carried exactly and selection/identify/edits hit the wrong features. Services published
+  # another way (Portal, admin API) get the same check from diagnose-service.sh.
+  [ "$CLI_OK" = 1 ] || return 0
+  local wid="${WAREHOUSE_PATH##*/}"
+  printf '%s' "$wid" | grep -qE '^[A-Za-z0-9]+$' || return 0
+  printf '%s' "$ID_FIELD" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$' || return 0
+  local cat sch tbl p
+  IFS=. read -r cat sch tbl <<<"$TABLE"
+  for p in "$cat" "$sch" "$tbl"; do printf '%s' "$p" | grep -qE '^[A-Za-z0-9_-]+$' || return 0; done
+  echo "  (checking the range of '$ID_FIELD'...)"
+  local stmt="SELECT CAST(MIN(\`$ID_FIELD\`) AS STRING), CAST(MAX(\`$ID_FIELD\`) AS STRING) FROM \`$cat\`.\`$sch\`.\`$tbl\`"
+  local body out
+  body=$(python3 -c "import json,sys;print(json.dumps({'warehouse_id':sys.argv[1],'statement':sys.argv[2],'wait_timeout':'30s','on_wait_timeout':'CANCEL'}))" "$wid" "$stmt")
+  out=$(timeout 45 databricks api post /api/2.0/sql/statements --profile "${WORKSPACE:-DEFAULT}" --json "$body" 2>/dev/null \
+    | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    if (d.get('status') or {}).get('state')!='SUCCEEDED': raise SystemExit
+    lo,hi=d['result']['data_array'][0]
+    lo,hi=int(lo),int(hi)
+except (Exception, SystemExit): print('?'); sys.exit()
+print('over53' if max(abs(lo),abs(hi))>9007199254740991 else 'over32' if hi>2147483647 or lo<0 else 'ok', lo, hi)
+" 2>/dev/null)
+  set -- $out
+  case "${1:-?}" in
+    over53)
+      echo "   !! '$ID_FIELD' ranges $2..$3 — beyond 2^53 - 1 (9,007,199,254,740,991). ArcGIS can't carry these ids"
+      echo "      exactly: neighbouring ids merge, so selection, identify and edits hit the wrong features (drawing still"
+      echo "      works). Strongly consider a unique integer column below 2,147,483,647. Continuing — your call." ;;
+    over32)
+      echo "   !! '$ID_FIELD' ranges $2..$3 — outside Esri's 32-bit OBJECTID range (0..2,147,483,647). Larger ids worked"
+      echo "      in our own testing (drawing, selection, identify), but Esri doesn't support them — use at your own risk." ;;
+    ok) echo "   ok — '$ID_FIELD' ranges $2..$3 (within the 32-bit OBJECTID range)." ;;
+    *)  echo "   (couldn't check the id range — not a whole-number column, no access, or it took >30s; skipped)" ;;
+  esac
+}
+
 offer_lakebase_grants() {
   # Emit-only, but still refuse to build SQL from identifiers outside [A-Za-z0-9_] — an
   # embedded double-quote would let a copied statement target something unintended.
@@ -662,6 +703,7 @@ while true; do
       1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
     esac
     while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "$SUG_ID" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    check_id_range
     ask_int "SRID (EPSG code)" "4326" SRID 1 999999
     # Strongly recommended: without a time column the layer isn't time-enabled, and Map Viewer and other clients
     # request every date in each tile — a full scan on a large multi-year table. With one, clients get a time slider

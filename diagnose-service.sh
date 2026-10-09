@@ -360,6 +360,65 @@ else:
   echo
 fi
 
+# --- idField range ---------------------------------------------------------------
+# Esri OBJECTIDs are 32-bit (max 2,147,483,647). Larger ids worked in our own testing (drawing, selection, identify),
+# but that is outside what Esri supports. Above 2^53 - 1 they can't be carried exactly: neighbouring ids merge, so
+# selection, identify and edits hit the wrong features. Works for any service, however it was published.
+ID_RANGE=""   # "" unknown | ok | over32 | over53
+if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
+  echo "-- idField range ('$IDFIELD') --"
+  # 1) What the provider has already logged for this idField (free, and definitive once the layer has been used).
+  LOGS=""
+  for d in /opt/arcgis/server/usr/logs /home/arcgis/server/usr/logs /arcgis/server/usr/logs; do
+    [ -d "$d" ] && LOGS="$LOGS $(ls -t "$d"/*/server/server-*.log 2>/dev/null | head -10 | tr '\n' ' ')"
+  done
+  if [ -n "${LOGS// /}" ]; then
+    # shellcheck disable=SC2086
+    if grep -qF "idField \"$IDFIELD\" has values above 2^53" $LOGS 2>/dev/null; then
+      ID_RANGE="over53"; echo "  [PROBLEM] the provider logged ids above 2^53 - 1 for idField '$IDFIELD' (recent server logs)."
+    elif grep -qF "Invalid ID value for idField \"$IDFIELD\"" $LOGS 2>/dev/null; then
+      ID_RANGE="over32"; echo "  [note] the provider logged ids outside the 32-bit OBJECTID range for idField '$IDFIELD'."
+    else
+      echo "  (no id-range messages for '$IDFIELD' in the recent server logs)"
+    fi
+    echo "  (log messages name the idField, not the service — another service with the same idField name could be the source)"
+  else
+    echo "  (server logs not readable here — run as root or the arcgis user to include them)"
+  fi
+  # 2) Optional live check: the largest id, through the service itself.
+  case "$SMOKE" in
+    ok:*)
+      ask "Check the largest '$IDFIELD' through the service? It sorts the table: instant on Lakebase/small tables, can take minutes on billion-row tables (y/N)" "n" IDCHK
+      case "$IDCHK" in y|Y|yes|YES)
+        R=$("${CURL[@]}" --max-time 300 -G -H "Referer: $SERVER" "$SERVER/$CTX/rest/services/$SVC/FeatureServer/0/query" \
+          --data-urlencode "where=1=1" --data-urlencode "outFields=$IDFIELD" --data-urlencode "orderByFields=$IDFIELD DESC" \
+          --data-urlencode "resultRecordCount=1" --data-urlencode "returnGeometry=false" \
+          --data-urlencode "token=$QTOKEN" --data-urlencode "f=json")
+        MAXID=$(RESP="$R" F="$IDFIELD" python3 -c "
+import os,json
+try:
+    d=json.loads(os.environ['RESP']); a=d['features'][0]['attributes']
+    v=a.get(os.environ['F'])
+    if v is None: v=next((x for k,x in a.items() if k.lower()==os.environ['F'].lower()), None)
+    print(int(v))
+except Exception: print('')
+" 2>/dev/null)
+        if [ -z "$MAXID" ]; then
+          echo "  [info] couldn't read the largest id (timeout, empty table or token) — inconclusive."
+        elif python3 -c "import sys;sys.exit(0 if int(sys.argv[1])>9007199254740991 else 1)" "$MAXID"; then
+          ID_RANGE="over53"; echo "  [PROBLEM] largest id is about $MAXID — above 2^53 - 1."
+        elif python3 -c "import sys;sys.exit(0 if int(sys.argv[1])>2147483647 else 1)" "$MAXID"; then
+          [ "$ID_RANGE" = "over53" ] || ID_RANGE="over32"; echo "  [note] largest id is $MAXID — above the 32-bit OBJECTID range (2,147,483,647)."
+        else
+          [ -n "$ID_RANGE" ] || ID_RANGE="ok"; echo "  [ok] largest id is $MAXID — within the 32-bit OBJECTID range."
+        fi ;;
+      *) echo "  (live check skipped)" ;;
+      esac ;;
+    *) echo "  (live check skipped — the smoke query above didn't return data with this token)" ;;
+  esac
+  echo
+fi
+
 # --- ASSESSMENT -----------------------------------------------------------------
 echo "============================================================"
 echo " ASSESSMENT — likely problem(s) and what to do"
@@ -445,6 +504,18 @@ else
     echo "     -> Raise maxInstancesPerNode."
     PROBLEMS=$((PROBLEMS+1))
   fi
+  # idField range (see the idField range section above)
+  case "$ID_RANGE" in
+    over53)
+      echo " * idField '$IDFIELD' has values above 2^53 - 1 (9,007,199,254,740,991). ArcGIS can't carry them exactly:"
+      echo "     neighbouring ids merge, so selection, identify and edits hit the wrong features (drawing is unaffected;"
+      echo "     the provider refuses edits on such ids). -> Republish with a unique integer column below 2,147,483,647."
+      PROBLEMS=$((PROBLEMS+1)) ;;
+    over32)
+      echo " * idField '$IDFIELD' has values above 2,147,483,647. Esri OBJECTIDs are 32-bit; larger ids worked in our"
+      echo "     own testing (drawing, selection, identify) but are outside what Esri supports — use at your own risk."
+      echo "     -> For full support, publish with a unique integer column below 2,147,483,647." ;;
+  esac
   # idField uniqueness reminder (can't verify from here)
   if [ -n "$IDFIELD" ]; then
     echo " * idField = '$IDFIELD' — verify it is a UNIQUE integer per row (ArcGIS OBJECTID)."
