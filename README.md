@@ -210,7 +210,7 @@ A service created **without** a `workspace` parameter resolves in order: `[DEFAU
 <details>
 <summary><b>Lakebase backend setup</b> (skip if you only use Lakehouse)</summary>
 
-Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic (the provider mints short-lived Lakebase OAuth tokens; set `LAKEBASE_PASSWORD` in `init_user_param.sh` to use a fixed credential instead).
+Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic: the provider mints short-lived Lakebase OAuth tokens for both **Autoscaling** endpoints and Provisioned instances, and signs in as the workspace identity (the service principal's client id for an OAuth M2M profile, the token owner for a PAT profile). In a workspace with many Lakebase projects, set `LAKEBASE_ENDPOINT_NAME=projects/<p>/branches/<b>/endpoints/<e>` to skip the endpoint lookup. To use a fixed credential instead, set `LAKEBASE_PASSWORD` (+ `LAKEBASE_USER`) in `init_user_param.sh` — note it then applies to **every** Lakebase service on that server.
 
 > **Synced Tables caveat:** Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns. Store geometry as WKT in a STRING column, sync that, and convert on the Lakebase side — see [Known Limitations](#known-limitations).
 
@@ -493,7 +493,7 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 |---|---|
 | `DATABRICKS_SERVER_HOSTNAME` / `DATABRICKS_HTTP_PATH` / `DATABRICKS_ACCESS_TOKEN` | Lakehouse connection (env-var fallback when not using `.databrickscfg`) |
 | `DATABRICKS_CONFIG_FILE` | Override the `.databrickscfg` path. Auto-found in the service-account home — `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows); set only if the file is elsewhere |
-| `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` | Lakebase connection (token auto-generated if omitted) |
+| `LAKEBASE_PASSWORD` / `LAKEBASE_USER` / `LAKEBASE_INSTANCE_NAME` / `LAKEBASE_ENDPOINT_NAME` | Lakebase connection (token auto-generated if omitted) |
 | `DATABRICKS_MAX_RECORD_COUNT` (`2000`) / `DATABRICKS_QUERY_TIMEOUT` (`120000`) / `DATABRICKS_SRID` (`4326`) | Query defaults |
 | `DATABRICKS_USE_CLOUDFETCH` (`false`) | `true` lets the driver download large results from presigned cloud-storage URLs. Leave off unless the ArcGIS host can reach the workspace's storage bucket — a refused download (403) can crash the CDF process. Results come back inline when off. |
 | `DATABRICKS_TILE_QUERY_TIMEOUT` (`30000`) | Cancel a feature-tile query (`resultType=tile`) after this many ms; `0` disables. ArcGIS Server doesn't pass a browser's abort to the CDF, so an abandoned tile otherwise runs until the statement timeout. |
