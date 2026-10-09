@@ -141,7 +141,8 @@ echo "-- Registered CDF providers --"
 PRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/types/customdataproviders?token=$TOKEN&f=json")
 # Did the provider list actually parse? A transient error / bad token / HTML proxy response
 # yields empty PROVS that must NOT be read as "no providers registered".
-PROV_PARSE_OK=$(RESP="$PRESP" python3 -c "import os,json;json.loads(os.environ['RESP']);print('yes')" 2>/dev/null)
+# "yes" only for a real provider listing: an admin error reply ({"error":...}) parses as JSON but lists nothing.
+PROV_PARSE_OK=$(RESP="$PRESP" python3 -c "import os,json;d=json.loads(os.environ['RESP']);ok=isinstance(d,dict) and 'error' not in d and d.get('status')!='error';print('yes' if ok else 'no')" 2>/dev/null)
 PROVS=$(RESP="$PRESP" python3 <<'PY' 2>/dev/null || true
 import os,json
 d=json.loads(os.environ["RESP"]); found=[]
@@ -163,7 +164,9 @@ DRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer?token=$TOKE
 FOUND=$(jget "$DRESP" '"no" if (d.get("status")=="error" or "error" in d) else "yes"'); FOUND=${FOUND:-no}
 if [ "$FOUND" != "yes" ]; then
   echo "  !! service not found / error:"
-  jget "$DRESP" 'd.get("messages") or (d.get("error") or {}).get("message") or d'
+  _why=$(jget "$DRESP" 'd.get("messages") or (d.get("error") or {}).get("message") or d')
+  # Not JSON (proxy/HTML error page, login redirect, wrong context): show the raw reply, not a blank line.
+  if [ -n "$_why" ]; then echo "  $_why"; else echo "  (not a JSON reply — wrong Admin URL/context or a proxy page?):"; printf '%s\n' "$DRESP" | head -c 400; echo; fi
   # It may be in a FOLDER (root path won't find it). List folders so the operator can retry.
   FRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services?token=$TOKEN&f=json")
   FOLDERS=$(jget "$FRESP" '", ".join(f for f in d.get("folders",[]) if f and f!="/")')

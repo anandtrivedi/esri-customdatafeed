@@ -24,7 +24,8 @@ describe("sql", () => {
       args.fetchSize,
       args.geometryFormat,
       args.timeColumn,
-      args.maxReturnIds
+      args.maxReturnIds,
+      args.maxDistinctRows
     );
   }
 
@@ -172,9 +173,9 @@ describe("sql", () => {
     });
 
     it("returnDistinctValues is bounded by the returnIds ceiling (it has no page LIMIT)", () => {
-      const sql = build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxReturnIds: 1000 });
-      expect(sql).to.include("LIMIT 1001");
-      expect(build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxReturnIds: 0 })).to.not.include("LIMIT");
+      const sql = build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxReturnIds: 10, maxDistinctRows: 1000 });
+      expect(sql).to.include("LIMIT 1001"); // its own cap, not the ids ceiling
+      expect(build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxDistinctRows: 0 })).to.not.include("LIMIT");
     });
 
     it("should reject non-integer objectIds (injection attempt returns empty)", () => {

@@ -131,8 +131,8 @@ describe("lakebaseQuery", () => {
 
     it("bounds returnIdsOnly and returnDistinctValues by the ceiling (maxReturnIds + 1)", () => {
       expect(buildLakebaseSelectSql({ returnIdsOnly: true }, { ...baseConfig, maxReturnIds: 500 }).sql).to.include("LIMIT 501");
-      const d = buildLakebaseSelectSql({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { ...baseConfig, maxReturnIds: 500 }).sql;
-      expect(d).to.include("LIMIT 501");
+      const d = buildLakebaseSelectSql({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { ...baseConfig, maxReturnIds: 500, maxDistinctRows: 9000 }).sql;
+      expect(d).to.include("LIMIT 9001"); // distinct has its own, larger cap
       expect(d).to.not.include("ST_AsGeoJSON"); // distinct values don't need geometry
       expect(buildLakebaseSelectSql({ returnIdsOnly: true }, baseConfig).sql).to.not.include("LIMIT"); // no ceiling configured
     });

@@ -728,6 +728,13 @@ describe("model", () => {
       expect(lakebaseQueryLog.some((q) => q.sql.includes("UPDATE"))).to.equal(false);
     });
 
+    it("deletes given as a JSON array string ('[\"1\",\"2\"]') delete both ids", async () => {
+      lakebaseQueryResult = { rows: [{ id: 1 }, { id: 2 }] };
+      const r = await new Model().editData(lb(), { deletes: '["1","2"]' });
+      expect(lakebaseQueryLog[0].params).to.deep.equal([1, 2]);
+      expect(r.deleteResults.every((x) => x.success)).to.equal(true);
+    });
+
     it("a service published with editingEnabled=false refuses edits", async () => {
       let err;
       try { await new Model().editData(lb({ editingEnabled: "false" }), { deletes: [1] }); } catch (e) { err = e; }

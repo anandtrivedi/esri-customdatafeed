@@ -490,6 +490,8 @@ import sys,json,os
 target=os.environ['PROVIDER_NAME']
 try: d=json.load(sys.stdin)
 except Exception: print('unknown'); sys.exit()
+# an admin error reply ({"error":...} / {"status":"error"}) is not an empty list — don't decide REGISTER from it
+if not isinstance(d,dict) or 'error' in d or d.get('status')=='error': print('unknown'); sys.exit()
 names=[]
 if isinstance(d,dict):
     for entries in d.values():
@@ -558,8 +560,10 @@ if [ "$ACTION" = "update" ] && [ -d "$PROVIDER_DIR" ]; then
   echo "-> backing up the current provider dir before update:"
   echo "     $PROVIDER_DIR"
   echo "     -> $BACKUP_FILE"
-  if run_as_arcgis mkdir -p "$_bkdir" && run_as_arcgis tar czf "$BACKUP_FILE" -C "$(dirname "$PROVIDER_DIR")" "$PROVIDER_NAME"; then
-    echo "   [ok] backup created."
+  # 700/600: the provider dir can hold a .env with Databricks credentials, so the backup mustn't be world-readable.
+  if run_as_arcgis mkdir -p "$_bkdir" && run_as_arcgis chmod 700 "$_bkdir" \
+     && run_as_arcgis sh -c 'umask 077; tar czf "$1" -C "$2" "$3"' _ "$BACKUP_FILE" "$(dirname "$PROVIDER_DIR")" "$PROVIDER_NAME"; then
+    echo "   [ok] backup created (mode 600)."
   else
     echo "   [warn] could not create the backup (permissions?) — continuing WITHOUT a rollback copy."
     BACKUP_FILE=""
@@ -645,6 +649,8 @@ import sys,json,os
 target=os.environ['PROVIDER_NAME']
 try: d=json.load(sys.stdin)
 except Exception: print('unknown'); sys.exit()
+# an admin error reply ({"error":...} / {"status":"error"}) is not an empty list — don't decide REGISTER from it
+if not isinstance(d,dict) or 'error' in d or d.get('status')=='error': print('unknown'); sys.exit()
 names=[]
 if isinstance(d,dict):
     for entries in d.values():

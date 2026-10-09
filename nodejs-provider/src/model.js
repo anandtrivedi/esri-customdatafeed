@@ -85,6 +85,19 @@ const config = {
         return 500000;
       }
       return n;
+    })(),
+    // returnDistinctValues has no page LIMIT either: the runtime dedupes, so the query returns one row per matching
+    // table row. Its own, larger safety cap (a category list on a big table legitimately returns many rows) so an
+    // unbounded distinct can't pull a whole huge table into the process. Same fail-safe parse; 0 disables.
+    maxDistinctRows: (() => {
+      const raw = process.env.DATABRICKS_MAX_DISTINCT_ROWS;
+      if (raw === undefined || raw === '') return 1000000;
+      const n = parseInt(raw, 10);
+      if (!Number.isInteger(n) || n < 0) {
+        console.warn(`[CDF] Invalid DATABRICKS_MAX_DISTINCT_ROWS="${raw}"; using default 1000000 (a non-negative integer; 0 disables the cap).`);
+        return 1000000;
+      }
+      return n;
     })()
   }
 };
@@ -96,7 +109,13 @@ const config = {
  */
 function normalizeDeleteIds(raw) {
   if (raw === undefined || raw === null || raw === '') return [];
-  const parts = Array.isArray(raw) ? raw : String(raw).replace(/^\s*\[|\]\s*$/g, '').split(',');
+  let parts = raw;
+  if (!Array.isArray(raw)) {
+    const str = String(raw).trim();
+    // A JSON array string ('[1,2]' or '["1","2"]'); otherwise a comma-separated list.
+    if (str.startsWith('[')) { try { const a = JSON.parse(str); if (Array.isArray(a)) parts = a; } catch (e) { /* not JSON */ } }
+    if (!Array.isArray(parts)) parts = str.replace(/^\[|\]$/g, '').split(',');
+  }
   // Drop empty entries: Number('') and Number(null) are 0, which would otherwise delete the row with id 0.
   return parts.filter((v) => v !== null && v !== undefined && String(v).trim() !== '').map((v) => (typeof v === 'string' ? v.trim() : v));
 }
@@ -729,7 +748,8 @@ class Model {
             fetchSize,
             resolvedFormat,
             sourceConfig.timeColumn,
-            config.databricks.maxReturnIds
+            config.databricks.maxReturnIds,
+            config.databricks.maxDistinctRows
           );
 
           // The time and objectIds filters come after the (long) geometry filter, so a plain prefix hid them; log the
@@ -803,12 +823,15 @@ class Model {
 
           // returnIdsOnly is fetched with LIMIT maxReturnIds + 1 (see buildSqlQuery). If we got the extra row the id
           // set is larger than the ceiling; return an actionable error rather than a silently-truncated (wrong) set.
-          const idCeiling = config.databricks.maxReturnIds;
+          const idCeiling = geoserviceParams.returnIdsOnly ? config.databricks.maxReturnIds : config.databricks.maxDistinctRows;
           if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
             this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
             const tooMany = new Error(
-              (geoserviceParams.returnIdsOnly ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
-              `Narrow the request with where / time / geometry filters, or raise the DATABRICKS_MAX_RETURN_IDS ` +
+              (geoserviceParams.returnIdsOnly
+                ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. `
+                : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
+              `Narrow the request with where / time / geometry filters, or raise the ` +
+              `${geoserviceParams.returnIdsOnly ? 'DATABRICKS_MAX_RETURN_IDS' : 'DATABRICKS_MAX_DISTINCT_ROWS'} ` +
               `environment variable on the server (set it to 0 to disable the ceiling).`
             );
             tooMany.code = 400; // client should narrow the query — a 4xx, not a generic server error
@@ -1087,7 +1110,7 @@ class Model {
 
     let sql, params, fetchSize;
     try {
-      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, { ...sourceConfig, maxReturnIds: config.databricks.maxReturnIds }));
+      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, { ...sourceConfig, maxReturnIds: config.databricks.maxReturnIds, maxDistinctRows: config.databricks.maxDistinctRows }));
     } catch (validationError) {
       this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
       return callback(validationError);
@@ -1109,12 +1132,15 @@ class Model {
         this.logger.info(`Query ${requestCounter}: Lakebase returned ${rows.length} rows`);
 
         // Same returnIdsOnly ceiling as the Lakehouse path (buildLakebaseSelectSql fetches maxReturnIds + 1).
-        const idCeiling = config.databricks.maxReturnIds;
+        const idCeiling = geoserviceParams.returnIdsOnly ? config.databricks.maxReturnIds : config.databricks.maxDistinctRows;
         if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
           this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
           const tooMany = new Error(
-            (geoserviceParams.returnIdsOnly ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. ` : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
-            `Narrow the request with where / time / geometry filters, or raise the DATABRICKS_MAX_RETURN_IDS ` +
+            (geoserviceParams.returnIdsOnly
+              ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. `
+              : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
+            `Narrow the request with where / time / geometry filters, or raise the ` +
+            `${geoserviceParams.returnIdsOnly ? 'DATABRICKS_MAX_RETURN_IDS' : 'DATABRICKS_MAX_DISTINCT_ROWS'} ` +
             `environment variable on the server (set it to 0 to disable the ceiling).`
           );
           tooMany.code = 400;

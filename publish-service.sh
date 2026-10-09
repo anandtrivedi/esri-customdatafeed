@@ -200,7 +200,8 @@ echo "  [ok]   ArcGIS admin reachable, token acquired"
 
 PROV_JSON=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/services/types/customdataproviders" \
   --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
-PROV_PARSE_OK=$(printf '%s' "$PROV_JSON" | python3 -c "import sys,json; json.load(sys.stdin); print('yes')" 2>/dev/null)
+# "yes" only for a real provider listing: an admin error reply ({"error":...}) parses as JSON but lists nothing.
+PROV_PARSE_OK=$(printf '%s' "$PROV_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); ok=isinstance(d,dict) and 'error' not in d and d.get('status')!='error'; print('yes' if ok else 'no')" 2>/dev/null)
 PROVS=()
 while IFS= read -r line; do [ -n "$line" ] && PROVS+=("$line"); done < <(printf '%s' "$PROV_JSON" | python3 -c "
 import sys,json

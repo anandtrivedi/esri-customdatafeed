@@ -166,7 +166,9 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   // returnIdsOnly has no page LIMIT (clients want every id); bound it to the ceiling + 1 like the Lakehouse builder so
   // the caller can error instead of holding millions of ids in the shared process.
   const maxReturnIds = Number(sourceConfig.maxReturnIds) || 0;
-  if ((returnIdsOnly || returnDistinctValues) && !returnCountOnly && maxReturnIds > 0) limitStr = ` LIMIT ${maxReturnIds + 1}`;
+  const maxDistinctRows = Number(sourceConfig.maxDistinctRows) || 0;
+  if (returnIdsOnly && !returnCountOnly && maxReturnIds > 0) limitStr = ` LIMIT ${maxReturnIds + 1}`;
+  else if (returnDistinctValues && !returnIdsOnly && !returnCountOnly && maxDistinctRows > 0) limitStr = ` LIMIT ${maxDistinctRows + 1}`;
 
   const sql = `SELECT ${selectClause} FROM ${schema}.${table}${whereStr}${orderByStr}${limitStr}${offsetStr}`;
   return { sql, params, fetchSize };

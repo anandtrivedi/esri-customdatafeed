@@ -103,16 +103,16 @@ function checkWhereClauseSafety(clause) {
   // Parentheses must balance (outside string literals). Both builders wrap the client WHERE as (where) before ANDing
   // the geometry/time/objectId filters; "1=1) OR (1=1" would close that wrapper early and drop those filters.
   let depth = 0;
-  let inString = false;
+  let quote = null; // ' (string literal) or " (quoted identifier)
   for (let i = 0; i < clause.length; i++) {
     const ch = clause[i];
-    if (inString) {
-      if (ch === "'") {
-        if (clause[i + 1] === "'") i++; // escaped quote ''
-        else inString = false;
+    if (quote) {
+      if (ch === quote) {
+        if (clause[i + 1] === quote) i++; // doubled quote escapes itself
+        else quote = null;
       }
-    } else if (ch === "'") {
-      inString = true;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
     } else if (ch === '(') {
       depth++;
     } else if (ch === ')') {

@@ -129,6 +129,7 @@ describe("sanitize", () => {
       expect(checkWhereClauseSafety("(a = 1) OR (b IN (2, 3))")).to.equal("(a = 1) OR (b IN (2, 3))");
       expect(checkWhereClauseSafety("name = 'smile :)'")).to.equal("name = 'smile :)'");
       expect(checkWhereClauseSafety("name = 'it''s (x'")).to.equal("name = 'it''s (x'");
+      expect(checkWhereClauseSafety('"odd(col" = 1')).to.equal('"odd(col" = 1'); // quoted identifier
     });
 
     it("should allow normal WHERE clauses", () => {
