@@ -130,6 +130,8 @@ describe("sanitize", () => {
       expect(checkWhereClauseSafety("name = 'smile :)'")).to.equal("name = 'smile :)'");
       expect(checkWhereClauseSafety("name = 'it''s (x'")).to.equal("name = 'it''s (x'");
       expect(checkWhereClauseSafety('"odd(col" = 1')).to.equal('"odd(col" = 1'); // quoted identifier
+      expect(checkWhereClauseSafety("name = 'it\\'s (x'")).to.equal("name = 'it\\'s (x'"); // Databricks backslash escape
+      expect(checkWhereClauseSafety("`odd(col` = 1")).to.equal("`odd(col` = 1"); // backtick identifier
     });
 
     it("should allow normal WHERE clauses", () => {

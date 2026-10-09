@@ -129,18 +129,29 @@ describe("lakebaseQuery", () => {
       expect(params).to.deep.equal([2]);
     });
 
-    it("bounds returnIdsOnly and returnDistinctValues by the ceiling (maxReturnIds + 1)", () => {
+    it("bounds returnIdsOnly by the ceiling (maxReturnIds + 1); distinct keeps normal paging", () => {
       expect(buildLakebaseSelectSql({ returnIdsOnly: true }, { ...baseConfig, maxReturnIds: 500 }).sql).to.include("LIMIT 501");
-      const d = buildLakebaseSelectSql({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { ...baseConfig, maxReturnIds: 500, maxDistinctRows: 9000 }).sql;
-      expect(d).to.include("LIMIT 9001"); // distinct has its own, larger cap
-      expect(d).to.not.include("ST_AsGeoJSON"); // distinct values don't need geometry
       expect(buildLakebaseSelectSql({ returnIdsOnly: true }, baseConfig).sql).to.not.include("LIMIT"); // no ceiling configured
+      const d = buildLakebaseSelectSql({ returnDistinctValues: true, outFields: "kind", resultOffset: "2000" }, { ...baseConfig, maxReturnIds: 500 }).sql;
+      expect(d).to.include("LIMIT 2001").and.include("OFFSET 2000"); // a page, like main — not the ids ceiling
     });
 
     it("reads the filter geometry's own spatialReference when there is no inSR", () => {
       const env = JSON.stringify({ xmin: -8700000, ymin: 4500000, xmax: -8600000, ymax: 4600000, spatialReference: { wkid: 102100, latestWkid: 3857 } });
       const { sql } = buildLakebaseSelectSql({ geometry: env }, baseConfig);
-      expect(sql).to.include("ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($1), 102100), 4326)");
+      expect(sql).to.include("ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($1), 3857), 4326)"); // latestWkid (EPSG), not 102100
+    });
+
+    it("maps Esri Web Mercator codes to EPSG:3857 (102100 isn't in PostGIS spatial_ref_sys)", () => {
+      const env = JSON.stringify({ xmin: -8700000, ymin: 4500000, xmax: -8600000, ymax: 4600000 });
+      for (const inSR of ["102100", 102100, '{"wkid":102100}', "102113"]) {
+        expect(buildLakebaseSelectSql({ geometry: env, inSR }, baseConfig).sql).to.include("ST_SetSRID(ST_GeomFromGeoJSON($1), 3857)");
+      }
+    });
+
+    it("applies the Web Mercator heuristic to a comma-separated envelope in meters too", () => {
+      const { sql } = buildLakebaseSelectSql({ geometry: "-8700000,4500000,-8600000,4600000" }, baseConfig);
+      expect(sql).to.include("ST_SetSRID(ST_GeomFromGeoJSON($1), 3857)");
     });
 
     it("treats an SR-less envelope in meters as Web Mercator (Map Viewer tile envelopes), like the Lakehouse path", () => {

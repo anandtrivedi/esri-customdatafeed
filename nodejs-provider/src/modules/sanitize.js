@@ -103,15 +103,17 @@ function checkWhereClauseSafety(clause) {
   // Parentheses must balance (outside string literals). Both builders wrap the client WHERE as (where) before ANDing
   // the geometry/time/objectId filters; "1=1) OR (1=1" would close that wrapper early and drop those filters.
   let depth = 0;
-  let quote = null; // ' (string literal) or " (quoted identifier)
+  let quote = null; // ' or " (string literal / quoted identifier) or ` (Databricks identifier)
   for (let i = 0; i < clause.length; i++) {
     const ch = clause[i];
     if (quote) {
-      if (ch === quote) {
+      if (ch === '\\' && quote !== '`') {
+        i++; // Databricks backslash escape (\' inside '...')
+      } else if (ch === quote) {
         if (clause[i + 1] === quote) i++; // doubled quote escapes itself
         else quote = null;
       }
-    } else if (ch === "'" || ch === '"') {
+    } else if (ch === "'" || ch === '"' || ch === '`') {
       quote = ch;
     } else if (ch === '(') {
       depth++;

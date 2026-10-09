@@ -8,6 +8,8 @@
 // Populated on first query via DESCRIBE TABLE, persists for CDF process lifetime.
 // Column types don't change at runtime, so no expiry needed.
 const formatCache = new Map();
+const failedProbes = new Map(); // cacheKey -> retry-after (ms epoch) for a DESCRIBE that failed
+const PROBE_RETRY_MS = parseInt(process.env.CDF_GEOMETRY_PROBE_RETRY_MS) || 60 * 1000;
 
 /**
  * Detect geometry format using explicit configuration or name-based detection
@@ -173,6 +175,7 @@ async function resolveGeometryFormat(tableName, geometryColumn, explicitFormat, 
   if (formatCache.has(cacheKey)) {
     return formatCache.get(cacheKey);
   }
+  if ((failedProbes.get(cacheKey) || 0) > Date.now()) return 'GEOMETRY';
 
   // Probe the table schema via DESCRIBE TABLE to determine the column's data type.
   // This runs once per table+column combination and is cached for the process lifetime.
@@ -206,9 +209,11 @@ async function resolveGeometryFormat(tableName, geometryColumn, explicitFormat, 
     formatCache.set(cacheKey, 'GEOMETRY');
     return 'GEOMETRY';
   } catch (error) {
-    // Probe failed (permissions, network, a warehouse still resuming) — default to GEOMETRY for THIS request but don't
-    // cache it: caching pinned a wrong guess for the life of the process if the first probe hit a transient error.
-    console.warn(`DESCRIBE TABLE probe failed for ${tableName}: ${error.message}, defaulting to GEOMETRY (not cached)`);
+    // Probe failed (permissions, network, a warehouse still resuming) — default to GEOMETRY, but only remember that for
+    // a minute: caching it for good pinned a wrong guess after one transient error, and not caching it at all would add
+    // a failing DESCRIBE to every request when the failure is persistent (no permission).
+    console.warn(`DESCRIBE TABLE probe failed for ${tableName}: ${error.message}, defaulting to GEOMETRY for ${PROBE_RETRY_MS / 1000} s`);
+    failedProbes.set(cacheKey, Date.now() + PROBE_RETRY_MS);
     return 'GEOMETRY';
   }
 }
@@ -218,6 +223,7 @@ async function resolveGeometryFormat(tableName, geometryColumn, explicitFormat, 
  */
 function clearFormatCache() {
   formatCache.clear();
+  failedProbes.clear();
 }
 
 module.exports = {

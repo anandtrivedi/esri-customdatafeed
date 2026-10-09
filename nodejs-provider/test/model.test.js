@@ -747,11 +747,26 @@ describe("model", () => {
       expect(ok.deleteResults[0].success).to.equal(true);
     });
 
-    it("an INSERT whose new id is above 2^53 - 1 is reported as such, not as a rounded id", async () => {
-      lakebaseQueryResult = [{ rows: [{ id: "9007199254740993" }] }];
+    it("an INSERT whose new id is above 2^53 - 1 is undone (exact id) and reported, not returned as a rounded id", async () => {
+      lakebaseQueryResult = [{ rows: [{ id: "9007199254740993" }], rowCount: 1 }, { rows: [], rowCount: 1 }];
       const r = await new Model().editData(lb(), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }] });
       expect(r.addResults[0].success).to.equal(false);
       expect(r.addResults[0].error.description).to.include("2^53");
+      const undo = lakebaseQueryLog.find((q) => /^DELETE/.test(q.sql));
+      expect(undo, "compensating delete").to.exist;
+      expect(undo.params).to.deep.equal(["9007199254740993"]); // the exact id, as text — not a rounded number
+    });
+
+    it("a read-only service (editingEnabled=false) advertises no edit templates or editable fields", (done) => {
+      lakebaseQueryResult = { rows: [{ id: 1, name: "a", geometry: '{"type":"Point","coordinates":[-77,38]}' }] };
+      new Model().getData(lb({ editingEnabled: "false" }), (err, fc) => {
+        try {
+          expect(err).to.be.null;
+          expect(fc.metadata).to.not.have.property("templates");
+          expect(fc.metadata.fields.every((f) => !f.editable)).to.equal(true);
+          done();
+        } catch (e) { done(e); }
+      });
     });
 
     it("a transaction client whose ROLLBACK fails is discarded, not recycled", async () => {

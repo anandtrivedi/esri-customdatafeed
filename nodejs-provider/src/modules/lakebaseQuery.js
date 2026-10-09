@@ -47,7 +47,6 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     resultRecordCount,
     returnCountOnly,
     returnIdsOnly,
-    returnDistinctValues,
     returnGeometry = true,
     resultType,
   } = geoParams;
@@ -74,11 +73,6 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
     selectClause = 'COUNT(*) AS count';
   } else if (returnIdsOnly) {
     selectClause = idField;
-  } else if (returnDistinctValues && !returnGeometry) {
-    // Same as the Lakehouse builder: requested fields + id, no geometry; the CDF runtime dedupes the values.
-    const fieldList = outFields === '*' ? ['*'] : outFields.split(',').map(f => validateFieldName(f));
-    if (fieldList[0] !== '*' && !fieldList.includes(idField)) fieldList.push(idField);
-    selectClause = fieldList.join(', ');
   } else {
     const geomExpr = `ST_AsGeoJSON(${geometryColumn}) AS ${geometryColumn}`;
 
@@ -153,7 +147,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   // --- LIMIT / OFFSET ---
   let limitStr = '';
   let offsetStr = '';
-  if (!returnCountOnly && !returnIdsOnly && !returnDistinctValues) {
+  if (!returnCountOnly && !returnIdsOnly) {
     // Fetch one extra row to detect exceededTransferLimit
     limitStr = ` LIMIT ${Number(fetchSize) + 1}`;
 
@@ -166,9 +160,7 @@ function buildLakebaseSelectSql(geoParams, sourceConfig) {
   // returnIdsOnly has no page LIMIT (clients want every id); bound it to the ceiling + 1 like the Lakehouse builder so
   // the caller can error instead of holding millions of ids in the shared process.
   const maxReturnIds = Number(sourceConfig.maxReturnIds) || 0;
-  const maxDistinctRows = Number(sourceConfig.maxDistinctRows) || 0;
   if (returnIdsOnly && !returnCountOnly && maxReturnIds > 0) limitStr = ` LIMIT ${maxReturnIds + 1}`;
-  else if (returnDistinctValues && !returnIdsOnly && !returnCountOnly && maxDistinctRows > 0) limitStr = ` LIMIT ${maxDistinctRows + 1}`;
 
   const sql = `SELECT ${selectClause} FROM ${schema}.${table}${whereStr}${orderByStr}${limitStr}${offsetStr}`;
   return { sql, params, fetchSize };
@@ -257,7 +249,9 @@ function buildGeomParam(paramIndex, srid, inSR) {
   // geometry's embedded spatialReference), and it is interpolated (not parameterized) below —
   // validate to prevent SQL injection. validateInteger parses leading digits, 0 (falsy) for garbage.
   const rawSR = parseInSR(inSR);
-  const sourceSR = rawSR == null ? null : validateInteger(rawSR, 0);
+  let sourceSR = rawSR == null ? null : validateInteger(rawSR, 0);
+  // Esri's Web Mercator codes aren't in PostGIS's spatial_ref_sys; ST_Transform needs the EPSG code.
+  if (ESRI_WEB_MERCATOR.has(sourceSR)) sourceSR = 3857;
   if (sourceSR && sourceSR !== Number(srid)) {
     return `ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${sourceSR}), ${Number(srid)})`;
   }
@@ -278,10 +272,14 @@ function buildGeomParam(paramIndex, srid, inSR) {
 function geometrySourceSR(geometry, srid) {
   let g = geometry;
   if (typeof g === 'string') {
-    try { g = JSON.parse(g); } catch (e) { return null; } // "xmin,ymin,xmax,ymax" — no SR to read
+    try { g = JSON.parse(g); } catch (e) {
+      g = g.split(',').map(Number); // "xmin,ymin,xmax,ymax" — no SR to read, but the heuristic still applies
+      if (g.length !== 4 || g.some((v) => !Number.isFinite(v))) return null;
+    }
   }
   const sr = g && g.spatialReference;
-  if (sr && (sr.latestWkid || sr.wkid)) return sr.latestWkid === Number(srid) ? sr.latestWkid : (sr.wkid || sr.latestWkid);
+  // latestWkid is the EPSG code (3857); wkid can be Esri's 102100, which PostGIS doesn't know.
+  if (sr && (sr.latestWkid || sr.wkid)) return sr.latestWkid || sr.wkid;
   if (Number(srid) === 4326 && looksProjectedGeometry(g)) {
     console.warn('[lakebaseQuery] filter has no SR and out-of-4326-range coords; assuming Web Mercator (3857)');
     return 3857;
@@ -289,20 +287,22 @@ function geometrySourceSR(geometry, srid) {
   return null;
 }
 
+const ESRI_WEB_MERCATOR = new Set([102100, 102113, 900913]);
+
 function parseInSR(inSR) {
   if (!inSR) return null;
   if (typeof inSR === 'number') return inSR;
   if (typeof inSR === 'string') {
     try {
       const parsed = JSON.parse(inSR);
-      return parsed.spatialReference?.wkid || parsed.wkid || parseInt(inSR, 10) || null;
+      return parsed.spatialReference?.latestWkid || parsed.spatialReference?.wkid || parsed.latestWkid || parsed.wkid || parseInt(inSR, 10) || null;
     } catch {
       const num = parseInt(inSR, 10);
       return isNaN(num) ? null : num;
     }
   }
   if (typeof inSR === 'object') {
-    return inSR.spatialReference?.wkid || inSR.wkid || null;
+    return inSR.spatialReference?.latestWkid || inSR.spatialReference?.wkid || inSR.latestWkid || inSR.wkid || null;
   }
   return null;
 }

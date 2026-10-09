@@ -243,11 +243,11 @@ function timeRowsToRange(rows) {
 try {
   process.on('SIGTERM', async () => {
     console.log('Received SIGTERM, shutting down connection pools...');
-    try { await shutdownPool(); await shutdownLakebasePools(); } catch (e) { console.error('Shutdown error:', e.message); }
+    await Promise.allSettled([shutdownPool(), shutdownLakebasePools()]);
   });
   process.on('SIGINT', async () => {
     console.log('Received SIGINT, shutting down connection pools...');
-    try { await shutdownPool(); await shutdownLakebasePools(); } catch (e) { console.error('Shutdown error:', e.message); }
+    await Promise.allSettled([shutdownPool(), shutdownLakebasePools()]);
   });
 } catch (e) { /* signal handlers may not be available in CDF runtime */ }
 
@@ -483,10 +483,11 @@ class Model {
         }
         const rows = await Promise.race([opened.fetchP, cap]); // fetch vs whatever is left of the cap
         if (rows === EXTENT_TIMED_OUT) {
-          try { await handles.op.cancel(); } catch (e) { /* already finished */ }
+          let cancelFailed = false;
+          try { await handles.op.cancel(); } catch (e) { cancelFailed = true; } // the min/max may still be running
           extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_RETRY_MS });
           this.logger.warn(`time extent of ${sourceConfig.tableName} gave up after ${Math.round(TIME_EXTENT_BG_MS / 1000)} s; retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min`);
-          release(false);
+          this._releaseExtentConnection(pool, handles.conn, handles.op, false, cancelFailed);
           return;
         }
         extentCache.set(cacheKey, { extent: timeRowsToRange(rows), at: Date.now(), ttl: EXTENT_CACHE_MS });
@@ -1110,7 +1111,7 @@ class Model {
 
     let sql, params, fetchSize;
     try {
-      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, { ...sourceConfig, maxReturnIds: config.databricks.maxReturnIds, maxDistinctRows: config.databricks.maxDistinctRows }));
+      ({ sql, params, fetchSize } = buildLakebaseSelectSql(geoserviceParams, { ...sourceConfig, maxReturnIds: config.databricks.maxReturnIds }));
     } catch (validationError) {
       this.logger.error(`Query ${requestCounter}: Input validation failed: ${validationError.message}`);
       return callback(validationError);
@@ -1132,8 +1133,9 @@ class Model {
         this.logger.info(`Query ${requestCounter}: Lakebase returned ${rows.length} rows`);
 
         // Same returnIdsOnly ceiling as the Lakehouse path (buildLakebaseSelectSql fetches maxReturnIds + 1).
-        const idCeiling = geoserviceParams.returnIdsOnly ? config.databricks.maxReturnIds : config.databricks.maxDistinctRows;
-        if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
+        // Lakebase pages distinct requests like any other query, so only ids-only needs the ceiling.
+        const idCeiling = config.databricks.maxReturnIds;
+        if (geoserviceParams.returnIdsOnly && !returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
           this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
           const tooMany = new Error(
             (geoserviceParams.returnIdsOnly
@@ -1168,7 +1170,9 @@ class Model {
           geojson = translateToGeoJSON(rows, sourceConfig);
 
           const geometryType = this.inferGeometryType(rows, sourceConfig.geometryColumn);
-          const fields = this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField, true);
+          // A service published read-only (editingEnabled=false) mustn't advertise editable fields or templates.
+          const editable = String(req.params.editingEnabled).trim().toLowerCase() !== 'false';
+          const fields = this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField, editable);
 
           geojson.metadata = {
             name: sourceConfig.name,
@@ -1180,7 +1184,7 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields,
-            templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)],
+            ...(editable && { templates: [this.buildEditTemplate(geometryType, fields, sourceConfig.idField)] }),
           };
         }
 
@@ -1239,7 +1243,9 @@ class Model {
       // cdconfig's provider-level editingEnabled turns editData on for EVERY service of this provider, so a service
       // published read-only (editingEnabled=false) must refuse here. Unset stays editable (older services omit it).
       if (String(req.params.editingEnabled).trim().toLowerCase() === 'false') {
-        throw new Error('Editing is not enabled for this service (editingEnabled=false)');
+        const readOnly = new Error('Editing is not enabled for this service (editingEnabled=false)');
+        readOnly.code = 400;
+        throw readOnly;
       }
       if (!table) {
         throw new Error('Editing requires lakebaseTable service parameter');
@@ -1291,7 +1297,9 @@ class Model {
             const newId = result.rows[0] && result.rows[0][rawIdField];
             if (newId === undefined || newId === null) throw new Error(`INSERT returned no ${rawIdField}`);
             if (!Number.isSafeInteger(Number(newId))) {
-              // The row exists, but its id can't be reported exactly; say so instead of returning a rounded id.
+              // Its id can't be reported exactly, so undo the insert (exact id as a text parameter) and report the
+              // failure: a committed row reported as failed would be duplicated by the client's retry.
+              await query(`DELETE FROM ${schema}.${table} WHERE ${rawIdField} = $1`, [String(newId)]);
               addResults.push({ success: false, error: { code: 1017, description: unsafeIdMessage(rawIdField, newId) } });
               continue;
             }
