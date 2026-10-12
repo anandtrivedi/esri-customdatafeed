@@ -212,7 +212,7 @@ To add or change the `.env`, update the package in place. Don't unzip and re-zip
 
 Keep the name `databricks-geospatial-provider.cdpk`, upload it as an update, and restart ArcGIS Server. Changing a credential means repeating this.
 
-A `.databrickscfg` profile with the same name, on a given machine, wins over the `.env`. The secrets then live inside the uploaded package: ArcGIS stores it and extracts it on every machine, readable by ArcGIS administrators and included in backups.
+A `.databrickscfg` profile with the same name, on a given machine, wins over the `.env`. The secrets then live inside the uploaded package. ArcGIS keeps a copy of the registered package in its config store (`config-store/customdataproviders` or `customdataresources`) and extracts it on every machine, readable by ArcGIS administrators and included in backups. Each upload also stays under `arcgisuploads/` until deleted, so after an update delete the upload (Server Admin → uploads → item → delete). Backups of the provider folder taken before an update contain the old `.env` too.
 
 </details>
 
