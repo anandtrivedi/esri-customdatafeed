@@ -24,6 +24,7 @@ const {
   buildSqlQuery,
   generateFiltersApplied,
   getExtentFromGeoJson,
+  getWorldExtent,
   getAuditLogger,
   getGeometryFieldExpression,
   resolveGeometryFormat,
@@ -211,7 +212,7 @@ let requestSeq = 0;
 // Layer extent for metadata responses, per table. ST_Envelope_Agg is a full-table aggregate, so on a multi-billion-row
 // table it runs for minutes and every metadata request (ArcGIS asks after each restart) piled one more onto the
 // warehouse and onto the connection pool. Computed once, cached; if it doesn't finish inside the wait budget it's
-// cancelled, the metadata goes out without an extent (clients fall back to the data's own bounds), and the table is
+// cancelled, the metadata advertises a whole-world extent for 4326/Web Mercator tables (otherwise none), and the table is
 // remembered as too big to try again for a while. Concurrent cold-cache callers share one in-flight query (see
 // getLayerExtent) so a burst of metadata requests doesn't fire N full scans.
 const EXTENT_CACHE_MS = parseInt(process.env.CDF_EXTENT_CACHE_MS) || 24 * 3600 * 1000;
@@ -224,8 +225,9 @@ const EXTENT_TIMED_OUT = Symbol("extent-timed-out");
 // running in the background (capped here), filling the cache for the next metadata request.
 const TIME_EXTENT_BG_MS = parseInt(process.env.CDF_TIME_EXTENT_BG_MS) || 120 * 1000;
 const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: ms }
-const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
+const extentInFlight = new Map(); // key -> Promise<{ extent, unknown }> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
+const warnedWorldExtent = new Set(); // tables already warned about advertising the world-extent fallback
 
 // [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / the column is all-NULL /
 // values are non-finite. Guard against SQL NULL first: an empty table or all-NULL column makes min/max return NULL,
@@ -334,12 +336,13 @@ class Model {
   /**
    * Resolve the layer extent for a metadata request: serve a fresh value from the cache if one is valid, otherwise
    * compute it (de-duping concurrent cold-cache callers so a burst of metadata requests shares a single query).
-   * Always resolves to an extent object or null — never rejects — so callers can serve metadata either way.
+   * Always resolves to { extent, unknown } — never rejects — so callers can serve metadata either way. `unknown` means
+   * the extent query timed out or failed (as opposed to answering "no geometries"), so the bounds aren't known.
    */
   async getLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter) {
     const cached = extentCache.get(cacheKey);
     if (cached && Date.now() - cached.at < cached.ttl) {
-      return cached.extent;
+      return { extent: cached.extent, unknown: Boolean(cached.unknown) };
     }
     let inflight = extentInFlight.get(cacheKey);
     if (!inflight) {
@@ -544,12 +547,13 @@ class Model {
         ? EXTENT_TIMED_OUT
         : await Promise.race([opened.fetchP, timedOut]); // fetch vs whatever is left of the budget
       if (extentRows === EXTENT_TIMED_OUT) {
-        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelling in the background; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
+        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelling in the background; serving metadata without the computed extent (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
         // A slow FETCH means the table genuinely may be too big — retry in 1 h. But if the budget expired while still
         // BORROWING/opening, the table itself was never the problem (pool contention is transient) — retry in a minute.
         const timedOutWhileOpening = !handles.op;
         extentCache.set(cacheKey, {
           extent: null,
+          unknown: true, // not computed (vs. computed as empty): metadata advertises a world extent meanwhile
           at: Date.now(),
           ttl: timedOutWhileOpening ? EXTENT_ERROR_RETRY_MS : EXTENT_RETRY_MS,
         });
@@ -564,7 +568,7 @@ class Model {
         } else {
           work.catch(() => {}).then(() => this._releaseExtentConnection(pool, handles.conn, handles.op, true));
         }
-        return null;
+        return { extent: null, unknown: true };
       }
       let extent = null;
       if (extentRows.length > 0 && extentRows[0].extent) {
@@ -572,15 +576,15 @@ class Model {
       }
       extentCache.set(cacheKey, { extent, at: Date.now(), ttl: EXTENT_CACHE_MS });
       this._releaseExtentConnection(pool, handles.conn, handles.op, false);
-      return extent;
+      return { extent, unknown: false };
     } catch (error) {
       this.logger.warn(`Query ${requestCounter}: Failed to calculate extent for ${sourceConfig.tableName}: ${error.message}`);
       // Negatively cache non-timeout failures too (short TTL — they're often transient) so a persistent error doesn't
       // re-run the full-table scan on every metadata request.
-      extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+      extentCache.set(cacheKey, { extent: null, unknown: true, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
       // If the statement never opened, the session's state is unknown — destroy instead of recycle.
       this._releaseExtentConnection(pool, handles.conn, handles.op, false, !handles.op);
-      return null;
+      return { extent: null, unknown: true };
     } finally {
       clearTimeout(timer); // always clear — every path lands here
     }
@@ -763,6 +767,7 @@ class Model {
             this.logger.warn(`${sourceConfig.tableName}: no timeColumn configured — the layer isn't time-enabled, so clients (Map Viewer) request every date in each tile. Set timeColumn for any table with more than one record per place over time.`);
           }
           let dbExtent = null;
+          let extentUnknown = false; // the extent query timed out or failed, so we don't know the table's bounds
           // timeInfo goes out on every response; outside metadata requests use whatever is cached, never compute
           const timeKey = `${pool.poolLabel()}|${sourceConfig.tableName}|time|${sourceConfig.timeColumn}`;
           const cachedTime = sourceConfig.timeColumn ? extentCache.get(timeKey) : null;
@@ -778,13 +783,14 @@ class Model {
             // 20 s+ on a cold cache, and each timeout added awaited cancel()/close() round-trips before the metadata
             // response could go out (15–21 s observed live). De-duped per cache key, so a burst of cold metadata
             // requests still shares one query per extent — at most one extra connection per extent per table.
-            const [computedExtent, computedTimeExtent] = await Promise.all([
+            const [layerExtent, computedTimeExtent] = await Promise.all([
               this.getLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter),
               sourceConfig.timeColumn
                 ? this.getLayerTimeExtent(pool, timeKey, sourceConfig, requestCounter)
                 : null,
             ]);
-            dbExtent = computedExtent;
+            dbExtent = layerExtent.extent;
+            extentUnknown = layerExtent.unknown;
             dbTimeExtent = sourceConfig.timeColumn ? computedTimeExtent : dbTimeExtent;
           }
 
@@ -875,6 +881,15 @@ class Model {
             sourceConfig.geometryColumn
           );
 
+          // Without an extent the runtime derives one from the few rows in this response (seen live: a single point in
+          // Hawaii for a global 28B-row table), and clients zoom there. A world box is merely too wide.
+          const worldExtent = !dbExtent && extentUnknown ? getWorldExtent(sourceConfig.dbWKID) : null;
+          const worldWarnKey = `${pool.poolLabel()}|${sourceConfig.tableName}`;
+          if (worldExtent && !warnedWorldExtent.has(worldWarnKey)) {
+            warnedWorldExtent.add(worldWarnKey);
+            this.logger.warn(`${sourceConfig.tableName}: extent not available yet — advertising the whole world (WKID ${sourceConfig.dbWKID}) until it computes`);
+          }
+
           // Add metadata
           geojson.metadata = {
             name: sourceConfig.name,
@@ -886,7 +901,7 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
-            ...(dbExtent && { extent: dbExtent }),
+            ...((dbExtent || worldExtent) && { extent: dbExtent || worldExtent }),
             ...(sourceConfig.timeColumn && {
               timeInfo: {
                 startTimeField: sourceConfig.timeColumn,
