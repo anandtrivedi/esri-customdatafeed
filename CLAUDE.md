@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (569 tests, ~11s)
+# Run all tests (570 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -132,7 +132,7 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**569 tests across 20 files:**
+**570 tests across 21 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 107 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
@@ -155,8 +155,9 @@ Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `la
 | `scale.test.js` | 4 | minScale parameter parsing/advertising |
 | `lakebaseCredentials.test.js` | 25 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user |
 | `lakebasePool.test.js` | 2 | Pool keying basics |
+| `cdconfig.test.js` | 1 | Publish-form line length (Server Manager renders each parameter on one nowrap line) |
 
-Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exception: `model.test.js` tests the full `model.js` including getData/editData integration.
+Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exceptions: `model.test.js` tests the full `model.js` including getData/editData integration; `cdconfig.test.js` checks the manifest.
 
 ### model.test.js setup pattern
 
@@ -243,6 +244,8 @@ expect(() => checkWhereClauseSafety("1=1; DROP TABLE x")).to.throw();
 ```
 
 ## Service parameters
+
+**Keep each `label (description)` under 115 characters** (`test/cdconfig.test.js`). Server Manager's publish form renders every parameter as one `nowrap` line with the input after it: the long descriptions written for Portal's ⓘ tooltips widened the dialog to ~4,200 px and pushed every input off-screen. Detailed guidance lives in the README.
 
 Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When creating a service via Admin REST API, all must be included — use empty strings for unused ones. The presence of `lakebaseHost` determines backend routing. `maxRecordCount` and `srid` can be set per-service (fallback: env var, then 2000/4326 defaults).
 
