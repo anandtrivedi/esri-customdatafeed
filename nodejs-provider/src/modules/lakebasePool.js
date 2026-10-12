@@ -30,6 +30,8 @@ const pools = {};
 // second overwrites the first in `pools` — orphaning the first pool (its idle connections never
 // close, it's not in `pools` for shutdown, and its token never refreshes).
 const poolsCreating = {};
+// Socket timeout for Databricks REST calls (credential mint, endpoint lookup, SCIM /Me).
+const API_TIMEOUT_MS = parseInt(process.env.LAKEBASE_API_TIMEOUT_MS) || 30000;
 
 // Cache of `${workspaceAlias}|${host}` -> instanceName (doesn't change per workspace)
 const instanceNameCache = {};
@@ -109,6 +111,8 @@ function mintWorkspaceApiToken(workspaceConfig) {
       });
     });
 
+    // A blackholed workspace API must fail, not hang: the pool's single-flight creation awaits this call.
+    req.setTimeout(API_TIMEOUT_MS, () => req.destroy(new Error(`timed out after ${API_TIMEOUT_MS} ms`)));
     req.on('error', (err) => {
       reject(new Error(`OAuth M2M token request failed: ${err.message}`));
     });
@@ -192,6 +196,8 @@ async function databricksApiRequest(method, path, body, workspaceConfig) {
       });
     });
 
+    // A blackholed workspace API must fail, not hang: the pool's single-flight creation awaits this call.
+    req.setTimeout(API_TIMEOUT_MS, () => req.destroy(new Error(`timed out after ${API_TIMEOUT_MS} ms`)));
     req.on('error', (err) => {
       reject(new Error(`Databricks API request failed: ${err.message}`));
     });
@@ -461,7 +467,8 @@ const tokenOwnerCache = {};
 
 /** Username that owns the workspace PAT — the identity a minted Lakebase credential belongs to. */
 async function resolveTokenOwner(workspaceConfig) {
-  const alias = workspaceConfig.workspaceAlias;
+  // Keyed by alias + token fingerprint: a PAT rotated to a different identity must re-resolve its owner.
+  const alias = `${workspaceConfig.workspaceAlias}|${require('crypto').createHash('sha256').update(String(workspaceConfig.token || '')).digest('hex').slice(0, 16)}`;
   if (tokenOwnerCache[alias]) return tokenOwnerCache[alias];
   try {
     const me = await databricksApiRequest('GET', '/api/2.0/preview/scim/v2/Me', null, workspaceConfig);
@@ -488,6 +495,9 @@ async function resolveTokenOwner(workspaceConfig) {
 async function resolvePgUser(config) {
   const ws = config.workspaceConfig;
   if (config.user) return config.user;
+  // A static LAKEBASE_PASSWORD is a native-login password for the LAKEBASE_USER role, not a credential minted for the
+  // workspace identity — so that role wins over the SP client id (else: password authentication failed for '<clientId>').
+  if (process.env.LAKEBASE_PASSWORD && process.env.LAKEBASE_USER) return process.env.LAKEBASE_USER;
   if (ws && ws.authType === 'oauth-m2m' && ws.clientId) return ws.clientId;
   if (process.env.LAKEBASE_USER) return process.env.LAKEBASE_USER;
   if (ws && ws.authType === 'pat' && !process.env.LAKEBASE_PASSWORD) {
@@ -506,11 +516,10 @@ async function resolvePgUser(config) {
 async function createLakebasePool(key, config) {
   if (pools[key]) {
     console.log(`[LakebasePool] Token expired for ${key}, refreshing...`);
-    try {
-      await pools[key].pool.end();
-    } catch (err) {
-      console.error(`[LakebasePool] Error closing expired pool ${key}:`, err.message);
-    }
+    // Detached: pg's end() waits for every checked-out client, so awaiting it let one long query past token expiry
+    // stall the refresh — and, through the single-flight, every request for this database. Old clients drain on release.
+    const oldPool = pools[key].pool;
+    oldPool.end().catch((err) => console.error(`[LakebasePool] Error closing expired pool ${key}:`, err.message));
     delete pools[key];
   }
 
@@ -535,11 +544,24 @@ async function createLakebasePool(key, config) {
     connectionTimeoutMillis: 30000,
   });
 
+  // Server-side cap per statement (Postgres defaults to none): an abandoned tile or a huge count can't pin a pool
+  // client indefinitely and starve every Lakebase service on this pool. Same budget as the Lakehouse sessions. Set
+  // with SET on connect rather than pg's statement_timeout startup parameter, which a connection pooler (the
+  // endpoint's -pooler host) can reject. pg runs this before any query issued on the new client.
+  const statementTimeoutMs = parseInt(process.env.LAKEBASE_STATEMENT_TIMEOUT_MS) || parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000;
+  pool.on('connect', (client) => {
+    client.query(`SET statement_timeout = ${statementTimeoutMs}`).catch((err) =>
+      console.error(`[LakebasePool] Could not set statement_timeout on ${key}:`, err.message));
+  });
+
   pool.on('error', (err) => {
     console.error(`[LakebasePool] Unexpected error on idle client (${key}):`, err.message);
-    if (err.message && err.message.includes('authorization')) {
+    // Postgres says "password authentication failed"; Lakebase says "...authorization...". Drop THIS pool (not a newer
+    // one created since) and end it so its clients aren't orphaned; the next request mints a fresh credential.
+    if (err.message && /authentication|authorization/i.test(err.message) && pools[key] && pools[key].pool === pool) {
       console.log(`[LakebasePool] Auth error detected, invalidating pool ${key}`);
       delete pools[key];
+      pool.end().catch(() => {});
     }
   });
 

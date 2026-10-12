@@ -51,7 +51,9 @@ class DatabricksConnectionPool {
     try {
       const promises = [];
       for (let i = 0; i < this.minConnections; i++) {
-        promises.push(this.createConnection());
+        // Counted in `creating` like acquire()'s opens, so concurrent first requests can't open past max meanwhile.
+        this.creating++;
+        promises.push(this.createConnection().finally(() => { this.creating--; }));
       }
       await Promise.all(promises);
       console.log(`[Pool ${this.poolLabel()}] Warmed up with ${this.minConnections} connections`);

@@ -49,6 +49,8 @@ describe("repackageCdpk", () => {
   it("rejects invalid provider names and env var names", () => {
     expect(() => repackageCdpk(makeCdpk(), { providerName: "Bad Name!" })).to.throw(/Provider name/);
     expect(() => repackageCdpk(makeCdpk(), { envVars: { "bad-key": "v" } })).to.throw(/Invalid env var names/);
+    // a line break in a VALUE would inject extra KEY=value lines into the packaged .env
+    expect(() => repackageCdpk(makeCdpk(), { envVars: { DATABRICKS_SERVER_HOSTNAME: "x\nDATABRICKS_ACCESS_TOKEN=evil" } })).to.throw(/line breaks/);
   });
 
   it("rejects archives without cdconfig.json", () => {

@@ -118,7 +118,8 @@ async function apiCall(auth, method, apiPath, body) {
     json = { raw: text };
   }
   if (!res.ok) {
-    throw new Error(`Databricks API ${apiPath} → HTTP ${res.status}: ${json.message || text.slice(0, 300)}`);
+    // error_code in the message: callers match on it (e.g. RESOURCE_DOES_NOT_EXIST for a missing secret scope).
+    throw new Error(`Databricks API ${apiPath} → HTTP ${res.status}: ${json.error_code ? `${json.error_code}: ` : ""}${json.message || text.slice(0, 300)}`);
   }
   return json;
 }
@@ -138,7 +139,11 @@ export async function execSql(auth, warehouseId, statement, { timeoutSeconds = 5
   });
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (["PENDING", "RUNNING"].includes(result.status?.state)) {
-    if (Date.now() > deadline) throw new Error(`SQL statement timed out after ${timeoutSeconds}s: ${statement.slice(0, 120)}`);
+    if (Date.now() > deadline) {
+      // Cancel it, or it keeps running (and costing) on the warehouse after we've given up.
+      await apiCall(auth, "POST", `/api/2.0/sql/statements/${result.statement_id}/cancel`).catch(() => {});
+      throw new Error(`SQL statement timed out after ${timeoutSeconds}s: ${statement.slice(0, 120)}`);
+    }
     await new Promise((r) => setTimeout(r, 2000));
     result = await apiCall(auth, "GET", `/api/2.0/sql/statements/${result.statement_id}`);
   }

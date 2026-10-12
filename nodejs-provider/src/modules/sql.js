@@ -23,7 +23,8 @@ function buildSqlQuery(
   fetchSize,
   geometryFormat = null,
   timeColumn = null,
-  maxReturnIds = 0
+  maxReturnIds = 0,
+  maxDistinctRows = 0
 ) {
   const {
     where,
@@ -103,6 +104,10 @@ function buildSqlQuery(
   let limitClause = "";
   if (returnIdsOnly && !returnCountOnly) {
     limitClause = maxReturnIds > 0 ? ` LIMIT ${maxReturnIds + 1}` : "";
+  } else if (returnDistinctValues && !returnCountOnly) {
+    // No page LIMIT either (the runtime dedupes), so a separate, larger safety cap: without one a distinct request on
+    // a huge table pulled every row into the shared process.
+    limitClause = maxDistinctRows > 0 ? ` LIMIT ${maxDistinctRows + 1}` : "";
   } else if (fetchSize && !returnIdsOnly && !returnDistinctValues) {
     limitClause = ` LIMIT ${fetchSize + 1}`;
   }
@@ -137,7 +142,7 @@ function buildSqlWhere({
 
   // Add WHERE clause (with DDL/DML keyword check)
   if (where) {
-    checkWhereClauseSafety(where);
+    checkWhereClauseSafety(where, { backslashEscapes: true }); // Databricks SQL string escapes
     // Parenthesized: the time/geometry/objectId filters are ANDed on below, and AND binds tighter than OR, so a bare
     // "a OR b" would leave those filters applying to "b" only — on a large table, a near-full scan.
     sqlWhereComponents.push(`(${where})`);
@@ -150,7 +155,9 @@ function buildSqlWhere({
       .map((val) => val.trim())
       .filter((val) => val !== "")
       .map(Number)
-      .filter((n) => Number.isFinite(n) && Number.isInteger(n));
+      // Safe integers only: an id above 2^53 - 1 has already been rounded, and querying the rounded value would
+      // return a different feature (or none). Dropping it gives an honest empty match instead of a wrong one.
+      .filter((n) => Number.isSafeInteger(n));
 
     if (ids.length > 0) {
       sqlWhereComponents.push(`${idField} IN (${ids.join(",")})`);

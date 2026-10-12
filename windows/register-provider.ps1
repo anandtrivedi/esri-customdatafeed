@@ -135,8 +135,9 @@ function Send-CdpkUpload([string]$Server,[string]$Ctx,[string]$Token,[string]$Pa
   # URL-encode the token - ArcGIS tokens can contain +, /, = which would otherwise corrupt the query.
   $tok = [System.Uri]::EscapeDataString($Token)
   $uri = "$Server/$Ctx/admin/uploads/upload?token=$tok&f=json"
+  # -TimeoutSec: the PS 5.1 default is 100 s; an 11 MB upload / provider install routinely takes 30-120 s.
   $r = Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=$boundary" `
-       -Body $bodyBytes @IwrExtra
+       -Body $bodyBytes -TimeoutSec 600 @IwrExtra
   if ($r.item -and $r.item.itemID) { return $r.item.itemID }
   throw "Upload did not return an itemID. Server said: $($r | ConvertTo-Json -Depth 6)"
 }
@@ -305,7 +306,7 @@ Write-Host "   ok (itemID $itemId)."
 # --- register / update ------------------------------------------------------
 Write-Host "-> ${action}ing the provider..."
 $resp = Invoke-RestMethod -Uri "$AdminUrl/$Context/admin/services/types/customdataproviders/$action" `
-        -Method Post -Body @{ id = $itemId; token = $token; f = 'json' } @IwrExtra
+        -Method Post -Body @{ id = $itemId; token = $token; f = 'json' } -TimeoutSec 600 @IwrExtra
 if ($resp.status -eq 'success') {
   Write-Host "   [ok] $action succeeded." -ForegroundColor Green
 } else {

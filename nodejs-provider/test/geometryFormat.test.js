@@ -307,6 +307,26 @@ describe("geometryFormat", () => {
         await resolveGeometryFormat("catalog.schema.tbl", "geometry", null, stub);
         expect(probeCount).to.equal(2);
       });
+
+      it("remembers a failed probe for a minute only: no DESCRIBE per request, but a transient error is retried", async () => {
+        clearFormatCache();
+        let probeCount = 0;
+        const flaky = async () => {
+          probeCount++;
+          if (probeCount === 1) throw new Error("warehouse is starting");
+          return [{ col_name: "geom", data_type: "string" }];
+        };
+        const realNow = Date.now;
+        try {
+          expect(await resolveGeometryFormat("cat.sch.flaky", "geom", null, flaky)).to.equal("GEOMETRY");
+          expect(await resolveGeometryFormat("cat.sch.flaky", "geom", null, flaky)).to.equal("GEOMETRY"); // within the minute
+          expect(probeCount).to.equal(1);
+          const t = realNow() + 61000;
+          Date.now = () => t;
+          expect(await resolveGeometryFormat("cat.sch.flaky", "geom", null, flaky)).to.equal("WKT"); // re-probed
+          expect(probeCount).to.equal(2);
+        } finally { Date.now = realNow; }
+      });
     });
   });
 });

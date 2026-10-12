@@ -170,7 +170,8 @@ probe_machine() {   # $1 = machineName -> prints "code|detail"
   local mc="$1" base r
   base="https://$mc:6443/$CTX"
   # Is the machine's admin API reachable at all on :6443?
-  r=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$base/rest/info?f=json" 2>/dev/null || echo "000")
+  # curl already prints 000 on a failed connection; `|| echo 000` would append a second one (000000).
+  r=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$base/rest/info?f=json" 2>/dev/null || true); r="${r:-000}"
   if [ "$r" = "000" ]; then echo "unreachable|:6443 not reachable from this box (DNS/SG/host firewall?) — run the on-disk check on $mc directly"; return; fi
   # Direct read-only /query against THIS machine.
   local q

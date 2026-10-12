@@ -315,7 +315,9 @@ export function buildServer({ registry, deps = {} } = {}) {
       try {
         const target = await reg.resolve(targetParam);
         const { runSql } = await sqlRunner(target, { profile, warehouseId });
-        const sql = buildPublishViewSql(sourceTable, viewName, { orderBy });
+        const { columns } = await runSql(`SELECT * FROM ${validateTableName(sourceTable)} LIMIT 0`);
+        const sourceHasObjectId = (columns || []).some((c) => String(c.name).toLowerCase() === "objectid");
+        const sql = buildPublishViewSql(sourceTable, viewName, { orderBy, sourceHasObjectId });
         await runSql(sql);
         return text({ created: viewName, sql, note: "Publish this view with publish_layer. ROW_NUMBER ids are not stable across refreshes unless orderBy is a stable column." });
       } catch (e) {

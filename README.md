@@ -249,7 +249,7 @@ Restart ArcGIS Server after editing it. Credentials stay in `.databrickscfg`, no
 <details>
 <summary><b>Optional tuning knobs & admin-token binding (requestip vs referer)</b></summary>
 
-Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABRICKS_QUERY_TIMEOUT`, `DATABRICKS_USE_CLOUDFETCH`, `DATABRICKS_TILE_QUERY_TIMEOUT`, `DATABRICKS_MAX_RETURN_IDS`, `ENABLE_AUDIT_LOG`, pool sizes — see [Environment Variables](#reference).
+Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABRICKS_QUERY_TIMEOUT`, `DATABRICKS_USE_CLOUDFETCH`, `DATABRICKS_TILE_QUERY_TIMEOUT`, `DATABRICKS_MAX_RETURN_IDS`, `DATABRICKS_MAX_DISTINCT_ROWS`, `LAKEBASE_STATEMENT_TIMEOUT_MS`, `ENABLE_AUDIT_LOG`, pool sizes — see [Environment Variables](#reference).
 
 **Admin-token binding:** `client=requestip` (used throughout this guide) ties the token to your IP — no `Referer` header on admin calls, simplest on the box. `client=referer` ties it to a URL and **every** admin call must send a matching `Referer` header (mismatch → `HTTP 498`). Note: a feature-service `/query` validates more strictly and may reject a `requestip` token — query it with a `referer`-bound token **plus** a matching `Referer` header (the publish wizard does this for its verify step).
 
@@ -337,9 +337,10 @@ Provider init failed silently. Tail the server log for `Custom_data_feeds` lines
 - **404 that recovers on refresh:** `minInstancesPerNode=0` keeps no warm instance — set `min=1`, `max≥2` (per service; `setup.sh` option 9 does it in place).
 - **Updated `.databrickscfg` but change ignored:** the provider caches it at first read — **restart ArcGIS Server** after any edit.
 - **No data:** verify the fully-qualified table name + geometry column; test the warehouse independently.
-- **OBJECTID:** `idField` must be an integer ≤ 2,147,483,647 with unique values.
+- **OBJECTID:** `idField` must be a unique integer ≤ 2,147,483,647 (see [Known Limitations](#known-limitations) for larger ids). `diagnose-service.sh` checks the range for any service.
 - **Editing fails:** `capabilities:"Query,Editing"` + `editingEnabled:"true"` both set; `lakebaseHost` present (editing is Lakebase-only); ArcGIS 12.0+. On federated Portal, the user's role needs "Edit features".
-- **Lakebase service 404s (native login):** a native-login table (`LAKEBASE_USER`/`LAKEBASE_PASSWORD`) needs `workspace` set to a **PAT** profile. With an **OAuth-M2M** profile the provider uses the SP `client_id` as the Postgres user instead — wrong user, so the FeatureServer 404s with no logged error.
+- **Every `applyEdits` answers `Invalid URL`:** the service was published with hosted-layer style capabilities (`Create,Delete,Query,Update`). A Custom Data Feed service needs exactly `Query,Editing` — fix `capabilities` on the service and restart it.
+- **Lakebase `password authentication failed for user '<uuid>'` (native login):** with `LAKEBASE_PASSWORD` set, set `LAKEBASE_USER` to the password role — it takes priority over the service principal's client id. (Older builds used the client id on OAuth-M2M profiles.)
 - **Slow:** Lakehouse cold start (5–15 s) after idle; add `OPTIMIZE … ZORDER BY (geom)` (Lakehouse) or `CREATE INDEX … USING GIST (geom)` (Lakebase).
 
 </details>
@@ -388,6 +389,10 @@ Tables created directly in Lakebase with native PostGIS geometry work fine.
 **PBF feature tiles are on.** Clients get quantized PBF tiles (about 3–9× smaller than JSON), which render in Map Viewer and the JS SDK on ArcGIS 12.1. Versions 1.1.3–1.1.4 turned PBF off after large layers drew blank in Map Viewer; that turned out to be the provider's own Web Mercator tile-geometry bug (fixed in 1.1.3), not the ArcGIS runtime. The old `enablePbf` service parameter is ignored and kept only so existing services validate.
 
 **Set a time column for anything with history.** Without one the layer isn't time-enabled, and Map Viewer and other clients request every date in each tile — a full scan on a large multi-year table, slow enough to back up every service on the server. With one, the provider reports the data's time range (computed once and cached), clients show a time slider, and they query one interval at a time. The publish wizard suggests a DATE/TIMESTAMP column and asks you to confirm before publishing without one.
+
+**idField values above 2,147,483,647.** Esri OBJECTIDs are 32-bit. Larger ids (e.g. 64-bit AIS ids) drew, selected and identified correctly in our own testing, but that range is not supported by Esri — use it at your own risk; the server log shows a one-time warning per field. Above 9,007,199,254,740,991 (2^53 − 1) ids can't be carried exactly: neighbouring ids merge, so selection, identify and edits hit the wrong features. The provider refuses edits on such ids, lookups by them return nothing, and the log shows one error per field. `publish-service.sh` (Lakehouse) and `diagnose-service.sh` warn about both ranges.
+
+**Lakebase layers need at least one row to publish.** Field and geometry types come from the data, so an empty editable table publishes with no fields; add one seed row first.
 
 **Polygons and lines crossing the 180° meridian** are unwrapped on output (negative longitudes shifted by +360 for that shape), so they no longer draw as bands across the map. Filters still run against the stored geometry.
 
@@ -498,6 +503,9 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 | `DATABRICKS_USE_CLOUDFETCH` (`false`) | `true` lets the driver download large results from presigned cloud-storage URLs. Leave off unless the ArcGIS host can reach the workspace's storage bucket — a refused download (403) can crash the CDF process. Results come back inline when off. |
 | `DATABRICKS_TILE_QUERY_TIMEOUT` (`30000`) | Cancel a feature-tile query (`resultType=tile`) after this many ms; `0` disables. ArcGIS Server doesn't pass a browser's abort to the CDF, so an abandoned tile otherwise runs until the statement timeout. |
 | `DATABRICKS_MAX_RETURN_IDS` (`500000`) | Ceiling on object ids a `returnIdsOnly` request may return (such requests carry no page limit). If a request would exceed it, it **errors** (narrow the query with `where`/`time`/`geometry`) rather than returning a truncated id set. `0` disables. |
+| `DATABRICKS_MAX_DISTINCT_ROWS` (`1000000`) | Lakehouse safety cap for `returnDistinctValues` (also unpaged; the server dedupes). Over it, the request errors instead of loading the whole table into memory. `0` disables. |
+| `LAKEBASE_STATEMENT_TIMEOUT_MS` (`DATABRICKS_QUERY_TIMEOUT`, else `120000`) | Server-side cap per Lakebase statement, so an abandoned tile can't hold a pool connection indefinitely. |
+| `LAKEBASE_API_TIMEOUT_MS` (`30000`) | Timeout for Databricks REST calls the provider makes for Lakebase (credential mint, endpoint lookup). |
 | `DATABRICKS_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_POOL_MIN`/`MAX` (`2`/`10`) · `LAKEBASE_SSL_VERIFY` (`false`) | Pool tuning |
 | `ENABLE_USER_AUTH` / `ENABLE_AUDIT_LOG` / `DATABRICKS_API_SSL_VERIFY` | Security |
 

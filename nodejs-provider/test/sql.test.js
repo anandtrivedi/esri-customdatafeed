@@ -24,7 +24,8 @@ describe("sql", () => {
       args.fetchSize,
       args.geometryFormat,
       args.timeColumn,
-      args.maxReturnIds
+      args.maxReturnIds,
+      args.maxDistinctRows
     );
   }
 
@@ -162,6 +163,19 @@ describe("sql", () => {
       expect(() =>
         build({ outFields: "(SELECT password FROM users)" })
       ).to.throw(/Invalid field name/);
+    });
+
+    it("drops objectIds above 2^53 - 1 (already rounded → would match the wrong row)", () => {
+      expect(build({ objectIds: "1,9007199254740993" })).to.include("IN (1)");
+      const sql = build({ objectIds: "9007199254740993,12345678901234567" });
+      expect(sql).to.include("1 = 0");
+      expect(sql).to.not.include("9007199254740992");
+    });
+
+    it("returnDistinctValues is bounded by the returnIds ceiling (it has no page LIMIT)", () => {
+      const sql = build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxReturnIds: 10, maxDistinctRows: 1000 });
+      expect(sql).to.include("LIMIT 1001"); // its own cap, not the ids ceiling
+      expect(build({ returnDistinctValues: true, returnGeometry: false, outFields: "kind" }, { maxDistinctRows: 0 })).to.not.include("LIMIT");
     });
 
     it("should reject non-integer objectIds (injection attempt returns empty)", () => {

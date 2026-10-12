@@ -52,6 +52,17 @@ function toGeoJSON(geom) {
 }
 
 /**
+ * Reads unwrap dateline-crossing shapes for display (translate.js normalizeAntimeridian: -179.9 is served as 180.1),
+ * and clients send that geometry back on edit. Wrap longitudes into [-180, 180] before saving so the stored data keeps
+ * its original form and spatial filters still find it. Geographic (4326) only.
+ */
+function wrapLongitudes(geojson, srid) {
+  if (!geojson || Number(srid) !== 4326) return geojson;
+  const wrap = (c) => (Array.isArray(c[0]) ? c.map(wrap) : [c[0] > 180 ? c[0] - 360 : c[0] < -180 ? c[0] + 360 : c[0], ...c.slice(1)]);
+  return { ...geojson, coordinates: wrap(geojson.coordinates) };
+}
+
+/**
  * Build a parameterized INSERT statement.
  *
  * @param {string} schema - PostgreSQL schema name
@@ -88,7 +99,7 @@ function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idF
 
   // Add geometry column
   if (geometry) {
-    const geoJson = toGeoJSON(geometry);
+    const geoJson = wrapLongitudes(toGeoJSON(geometry), srid);
     if (geoJson) {
       columns.push(geometryColumn);
       placeholders.push(`ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${Number(srid)})`);
@@ -101,7 +112,7 @@ function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idF
     throw new Error('INSERT requires at least one column');
   }
 
-  const sql = `INSERT INTO ${schema}.${table} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING ${idField}`;
+  const sql = `INSERT INTO ${schema}.${table} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING ${idField}::text AS ${idField}`; // exact id text, whatever the int8 parser
   return { sql, params };
 }
 
@@ -144,7 +155,7 @@ function buildUpdateSql(schema, table, attributes, geometry, geometryColumn, idF
 
   // Add geometry SET clause
   if (geometry) {
-    const geoJson = toGeoJSON(geometry);
+    const geoJson = wrapLongitudes(toGeoJSON(geometry), srid);
     if (geoJson) {
       setClauses.push(`${geometryColumn} = ST_SetSRID(ST_GeomFromGeoJSON($${paramIndex}), ${Number(srid)})`);
       params.push(JSON.stringify(geoJson));

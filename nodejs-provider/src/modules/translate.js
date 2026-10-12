@@ -7,6 +7,7 @@
 // feature. A 64-bit id (e.g. AIS `bigid`) would otherwise emit one console.warn for every row, flooding the ArcGIS
 // log under tile load (seen: ~8,900 warnings per view) and slowing the response.
 const warnedInvalidId = new Set();
+const warnedUnsafeId = new Set();
 
 function translateToGeoJSON(data, config) {
   if (!data || data.length === 0) {
@@ -49,7 +50,14 @@ function formatFeature(values, columns, idField, geometryField, dbWKID, warnKey 
       // Cast to integer — Databricks returns BIGINT as strings/BigInts,
       // but CDF runtime requires safe integers for OBJECTID recognition
       const intValue = Number(value);
-      if (!isValidId(intValue) && !warnedInvalidId.has(warnKey)) {
+      if (Number.isInteger(intValue) && !Number.isSafeInteger(intValue)) {
+        // Above 2^53 - 1 the id is rounded, so neighbouring ids collapse into one OBJECTID: drawing still works, but
+        // selection, identify and edits land on the wrong features. Logged as an error, once per table+field.
+        if (!warnedUnsafeId.has(warnKey)) {
+          warnedUnsafeId.add(warnKey);
+          console.error(`idField "${idField}" has values above 2^53 - 1 (9007199254740991), e.g. ${value}. ArcGIS can't represent them exactly: selection, identify and editing will hit the wrong features (drawing is unaffected). Publish with a unique integer column below that limit.`);
+        }
+      } else if (!isValidId(intValue) && !warnedInvalidId.has(warnKey)) {
         warnedInvalidId.add(warnKey);
         console.warn(`Invalid ID value for idField "${idField}" (e.g. ${value}): outside the 32-bit OBJECTID range (0..2147483647) or non-integer. Use a 32-bit-fitting unique integer idField. Suppressing further per-feature warnings for this field.`);
       }

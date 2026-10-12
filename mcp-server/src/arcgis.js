@@ -23,6 +23,7 @@ function httpsRequest(urlString, { method = "GET", body, allowSelfSigned = false
       },
       (res) => {
         let data = "";
+        res.setEncoding("utf8"); // decode across chunk boundaries (a multi-byte character can straddle two chunks)
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       }
@@ -98,9 +99,16 @@ export class ArcGisClient {
     return parseArcgisJson(res, restPath);
   }
 
+  /** Every service, including those in folders (as "folder/name", which the admin and REST URLs accept). */
   async listServices() {
     const json = await this.request("services");
-    return json.services || [];
+    const services = [...(json.services || [])];
+    for (const folder of json.folders || []) {
+      if (!folder || folder === "/" || /^(System|Utilities|Hosted)$/i.test(folder)) continue;
+      const f = await this.request(`services/${encodeURIComponent(folder)}`);
+      for (const s of f.services || []) services.push({ ...s, serviceName: `${folder}/${s.serviceName}` });
+    }
+    return services;
   }
 
   async getService(serviceName) {
@@ -132,7 +140,7 @@ export class ArcGisClient {
     );
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([head, buffer, tail]);
-    const url = new URL(`${this.adminUrl}/uploads/upload?token=${token}&f=json`);
+    const url = new URL(`${this.adminUrl}/uploads/upload?token=${encodeURIComponent(token)}&f=json`); // tokens can contain + / =
     const res = await new Promise((resolve, reject) => {
       const req = https.request(
         {
@@ -149,6 +157,7 @@ export class ArcGisClient {
         },
         (r) => {
           let data = "";
+          r.setEncoding("utf8");
           r.on("data", (c) => (data += c));
           r.on("end", () => resolve({ status: r.statusCode, body: data }));
         }

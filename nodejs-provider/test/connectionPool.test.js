@@ -204,6 +204,25 @@ describe('connectionPool', () => {
     });
   });
 
+  describe('warm-up connections count against max', () => {
+    it('never opens more than max when acquires arrive while warm-up is still opening', async () => {
+      let opened = 0;
+      const SlowClient = class {
+        async connect() { await new Promise((r) => setTimeout(r, 20)); }
+        async openSession() { opened++; return { close: async () => {} }; }
+        async close() {}
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: SlowClient } });
+      const ws = { workspaceAlias: 'W', hostname: 'w.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/w', { min: 2, max: 4, connectionTimeout: 500 });
+      const got = await Promise.allSettled(Array.from({ length: 6 }, () => pool.acquire()));
+      await new Promise((r) => setTimeout(r, 50)); // warm-up settles
+      expect(opened).to.equal(4); // was 6: 2 uncounted warm-up opens + 4 for the acquires
+      for (const g of got) if (g.status === 'fulfilled') pool.release(g.value);
+      await cp.shutdownPool();
+    });
+  });
+
   describe('new connections are checked out before they join the pool', () => {
     it('a connection created for acquire() is already inUse when it is pushed to the pool', async () => {
       const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: class {

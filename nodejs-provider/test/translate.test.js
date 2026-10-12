@@ -153,6 +153,25 @@ describe("translate", () => {
       } finally { console.warn = orig; }
       expect(calls).to.equal(1); // one warning for three overflowing-id rows, not three
     });
+
+    it("ids above 2^53 - 1 log ONE error per table+field (not the 32-bit warning), and drawing still works", () => {
+      const rows = [
+        { big: "9007199254740993", geom: '{"type":"Point","coordinates":[0,0]}' },
+        { big: "9007199254740995", geom: '{"type":"Point","coordinates":[1,1]}' },
+      ];
+      const oe = console.error; const ow = console.warn; const errors = []; let warns = 0;
+      console.error = (m) => errors.push(m); console.warn = () => { warns++; };
+      let fc;
+      try {
+        fc = translateToGeoJSON(rows, { idField: "big", geometryColumn: "geom", dbWKID: 4326, tableName: "t_unsafe" });
+        translateToGeoJSON(rows, { idField: "big", geometryColumn: "geom", dbWKID: 4326, tableName: "t_unsafe" });
+      } finally { console.error = oe; console.warn = ow; }
+      expect(errors).to.have.lengthOf(1);
+      expect(errors[0]).to.include("2^53").and.include("big");
+      expect(warns).to.equal(0);
+      expect(fc.features).to.have.lengthOf(2);
+      expect(fc.features[1].geometry.coordinates).to.deep.equal([1, 1]);
+    });
   });
 });
 

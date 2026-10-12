@@ -39,11 +39,14 @@ function promptHidden(question) {
     rl.stdoutMuted = true;
     process.stderr.write(question);
     rl._writeToOutput = () => {}; // mute echo
+    let answered = false;
     rl.question("", (answer) => {
+      answered = true;
       rl.close();
       process.stderr.write("\n");
       resolve(answer);
     });
+    rl.on("close", () => { if (!answered) resolve(""); }); // stdin closed (EOF) — don't hang forever
   });
 }
 
@@ -89,12 +92,23 @@ async function serveHttp(port) {
       });
       await server.connect(transport);
       let body = "";
+      req.setEncoding("utf8");
       for await (const chunk of req) body += chunk;
-      await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
+      let parsed;
+      try { parsed = body ? JSON.parse(body) : undefined; } catch {
+        if (!res.headersSent) res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid JSON body" }));
+        return;
+      }
+      await transport.handleRequest(req, res, parsed);
     } catch (e) {
       console.error("request failed:", e);
       if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: String(e.message) }));
     }
+  });
+  // A bind failure (port in use, no permission) would otherwise be an unhandled 'error' event.
+  httpServer.on("error", (e) => {
+    console.error(`databricks-cdf-mcp: HTTP server error on :${port}: ${e.message}`);
+    process.exit(1);
   });
   httpServer.listen(port, "0.0.0.0", () => {
     console.error(

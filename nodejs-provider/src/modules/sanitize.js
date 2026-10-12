@@ -75,7 +75,7 @@ function escapeSqlString(value) {
  * @returns {string} The clause if safe
  * @throws {Error} If a dangerous keyword is detected
  */
-function checkWhereClauseSafety(clause) {
+function checkWhereClauseSafety(clause, { backslashEscapes = false } = {}) {
   if (!clause || typeof clause !== 'string') {
     return clause;
   }
@@ -98,6 +98,33 @@ function checkWhereClauseSafety(clause) {
   // Block SQL comments that could hide injected code
   if (/--/.test(clause) || /\/\*/.test(clause)) {
     throw new Error('SQL comments are not allowed in WHERE clause');
+  }
+
+  // Parentheses must balance (outside string literals). Both builders wrap the client WHERE as (where) before ANDing
+  // the geometry/time/objectId filters; "1=1) OR (1=1" would close that wrapper early and drop those filters.
+  let depth = 0;
+  let quote = null; // ' or " (string literal / quoted identifier) or ` (Databricks identifier)
+  for (let i = 0; i < clause.length; i++) {
+    const ch = clause[i];
+    if (quote) {
+      if (backslashEscapes && ch === '\\' && quote !== '`') {
+        // Databricks SQL: \' escapes a quote. NOT Postgres (standard_conforming_strings): there \ is an ordinary
+        // character, so honouring it on the Lakebase path would let 'a\' ...) OR (1=1 slip past this check.
+        i++;
+      } else if (ch === quote) {
+        if (clause[i + 1] === quote) i++; // doubled quote escapes itself
+        else quote = null;
+      }
+    } else if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+    } else if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      if (--depth < 0) break;
+    }
+  }
+  if (depth !== 0) {
+    throw new Error('Unbalanced parentheses in WHERE clause');
   }
 
   return clause;

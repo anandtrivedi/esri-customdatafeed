@@ -211,9 +211,11 @@ export async function inspectTable(runSql, table, { sampleLimit = 5, overrides =
 }
 
 /** SQL for a publish-safe view when the source table has no usable int32 id. */
-export function buildPublishViewSql(sourceTable, viewName, { orderBy } = {}) {
+export function buildPublishViewSql(sourceTable, viewName, { orderBy, sourceHasObjectId = false } = {}) {
   const src = validateTableName(sourceTable);
   const view = validateTableName(viewName);
   const order = orderBy && IDENT_RE.test(orderBy) ? orderBy : "1";
-  return `CREATE OR REPLACE VIEW ${view} AS SELECT CAST(ROW_NUMBER() OVER (ORDER BY ${order}) AS INT) AS objectid, * FROM ${src}`;
+  // A source that already has an objectid (often why the view is needed: a BIGINT one) would duplicate the column.
+  const rest = sourceHasObjectId ? "* EXCEPT (objectid)" : "*";
+  return `CREATE OR REPLACE VIEW ${view} AS SELECT CAST(ROW_NUMBER() OVER (ORDER BY ${order}) AS INT) AS objectid, ${rest} FROM ${src}`;
 }

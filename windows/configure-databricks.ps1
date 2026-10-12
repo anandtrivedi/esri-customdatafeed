@@ -183,11 +183,18 @@ if ($AuthMode -eq 'oauth') {
   $ini[$ProfileName]['token'] = $tokenPlain
 }
 
-# Atomic same-dir write: temp -> lock ACL -> move.
+# Atomic same-dir write: empty temp -> lock ACL -> write secrets -> move. The ACL goes on BEFORE any secret is
+# written (WriteAllText keeps an existing file's ACL), and a failure removes the temp instead of leaving it behind.
 $tmp = Join-Path $destDir (".databrickscfg.cdftmp." + [Guid]::NewGuid().ToString("N"))
-Write-Ini $ini $tmp
-Set-CfgAcl $tmp
-Move-Item -LiteralPath $tmp -Destination $ConfigFile -Force
+New-Item -ItemType File -Path $tmp -Force | Out-Null
+try {
+  Set-CfgAcl $tmp
+  Write-Ini $ini $tmp
+  Move-Item -LiteralPath $tmp -Destination $ConfigFile -Force
+} catch {
+  Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  throw
+}
 Write-Host "  [ok] wrote $ConfigFile (profile '$ProfileName', $AuthMode auth, host $DatabricksHost)." -ForegroundColor Green
 
 # scrub secrets from memory
@@ -207,7 +214,11 @@ $dbx = Get-Command databricks -ErrorAction SilentlyContinue
 if ($dbx) {
   Write-Host "-> checking the profile with the Databricks CLI..."
   $env:DATABRICKS_CONFIG_FILE = $ConfigFile
+  # PS 5.1 + $ErrorActionPreference='Stop' turns a native command's redirected stderr into a terminating error, so
+  # a failed (or merely chatty) CLI check would abort the script after a successful write. Check the exit code only.
+  $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
   & databricks current-user me --profile $ProfileName -o json *> $null
+  $ErrorActionPreference = $prevEap
   if ($LASTEXITCODE -eq 0) { Write-Host "   [ok] authenticated to Databricks as profile '$ProfileName'." -ForegroundColor Green }
   else { Write-Host "   [warn] CLI could not authenticate (bad token/secret, wrong host, or no network). File was written; fix and re-run if needed." -ForegroundColor Yellow }
 } else {

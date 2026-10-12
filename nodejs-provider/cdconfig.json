@@ -20,7 +20,7 @@
       {
         "key": "idField",
         "label": "3. Common - ID Field",
-        "description": "BOTH backends. A unique integer id column (<= 2147483647, not a UUID), e.g. objectid. Required."
+        "description": "BOTH backends. A unique integer id column (not a UUID), e.g. objectid. Required. Esri OBJECTIDs are 32-bit (max 2147483647): larger ids worked in our own testing but are not supported by Esri, so use them at your own risk. Above 9007199254740991 selection, identify and editing hit the wrong features."
       },
       {
         "key": "srid",

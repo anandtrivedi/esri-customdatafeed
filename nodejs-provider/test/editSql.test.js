@@ -109,7 +109,7 @@ describe("editSql", () => {
         "geometry", "id", 4326
       );
       expect(result.sql).to.equal(
-        "INSERT INTO public.cell_towers (name, height, geometry) VALUES ($1, $2, ST_SetSRID(ST_GeomFromGeoJSON($3), 4326)) RETURNING id"
+        "INSERT INTO public.cell_towers (name, height, geometry) VALUES ($1, $2, ST_SetSRID(ST_GeomFromGeoJSON($3), 4326)) RETURNING id::text AS id"
       );
       expect(result.params).to.have.lengthOf(3);
       expect(result.params[0]).to.equal("Tower A");
@@ -169,7 +169,7 @@ describe("editSql", () => {
         null,
         "geometry", "objectid", 4326
       );
-      expect(result.sql).to.include("RETURNING objectid");
+      expect(result.sql).to.include("RETURNING objectid::text AS objectid");
     });
 
     it("should reject invalid schema name (SQL injection)", () => {
@@ -294,6 +294,21 @@ describe("editSql", () => {
     it("should convert string IDs to numbers", () => {
       const result = buildDeleteSql("public", "towers", "id", ["42", "43"]);
       expect(result.params).to.deep.equal([42, 43]);
+    });
+  });
+
+  describe("dateline write-back", () => {
+    it("wraps longitudes past 180 (served unwrapped for display) back into range before saving, in 4326", () => {
+      const ring = [[179.5, 10], [180.5, 10], [180.5, 11], [179.5, 11], [179.5, 10]];
+      const { params } = buildUpdateSql("public", "t", { id: 1 }, { rings: [ring] }, "geom", "id", 4326);
+      const saved = JSON.parse(params.find((p) => typeof p === "string" && p.includes("coordinates")));
+      expect(saved.coordinates[0].map((c) => c[0])).to.deep.equal([179.5, -179.5, -179.5, 179.5, 179.5]);
+    });
+
+    it("leaves projected coordinates alone", () => {
+      const { params } = buildInsertSql("public", "t", { name: "x" }, { x: 20037508, y: 0 }, "geom", "id", 3857);
+      const saved = JSON.parse(params.find((p) => typeof p === "string" && p.includes("coordinates")));
+      expect(saved.coordinates).to.deep.equal([20037508, 0]);
     });
   });
 });

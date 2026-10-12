@@ -8,6 +8,8 @@ const proxyquire = require("proxyquire").noCallThru();
 let lakehouseQueryRows = [];
 let lakehouseExecuteError = null;
 let lakehouseReleaseLog = [];
+let lakehouseCloseError = null;  // make the main query op's close() throw
+let lakebaseClientReleases = []; // what each dedicated (transaction) pg client was released with
 const connectionPoolStub = {
   getPool: () => ({
     poolLabel: () => "test-pool",
@@ -19,7 +21,7 @@ const connectionPoolStub = {
           return {
             // DESCRIBE TABLE probe (geometry format detection) gets no rows
             fetchAll: async () => (/^\s*DESCRIBE/i.test(sql) ? [] : lakehouseQueryRows),
-            close: async () => {},
+            close: async () => { if (lakehouseCloseError && /\bLIMIT\b/.test(sql) && !/ST_Envelope_Agg|unix_millis/.test(sql)) throw lakehouseCloseError; },
           };
         },
       },
@@ -67,7 +69,7 @@ const lakebasePoolStub = {
     // pool.connect() returns a client with query/release for transactions
     connect: async () => ({
       query: queryFn,
-      release: () => {},
+      release: (err) => { lakebaseClientReleases.push(err); },
     }),
   }),
   shutdownLakebasePools: async () => {},
@@ -103,6 +105,8 @@ describe("model", () => {
     lakehouseQueryRows = [];
     lakehouseExecuteError = null;
     lakehouseReleaseLog = [];
+    lakehouseCloseError = null;
+    lakebaseClientReleases = [];
   });
 
   after(() => {
@@ -635,6 +639,158 @@ describe("model", () => {
     }
   });
 
+  describe("full-codebase review fixes", () => {
+    const lb = (extra = {}, query = { f: "json" }) => ({
+      query,
+      params: { lakebaseHost: "lakebase.example.com", lakebaseDatabase: "testdb", lakebaseTable: "cell_towers", geometryColumn: "geometry", idField: "id", ...extra },
+      ip: "127.0.0.1",
+    });
+
+    it("Lakehouse: a failed close() of the main query destroys the connection instead of recycling it", (done) => {
+      lakehouseQueryRows = [{ id: 1, geometry: '{"type":"Point","coordinates":[-77,38]}' }];
+      lakehouseCloseError = new Error("close failed");
+      new Model().getData({ query: { f: "json", resultRecordCount: "5" }, params: { tableName: "catalog.schema.towers", geometryFormat: "GEOMETRY" }, ip: "127.0.0.1" }, (err) => {
+        // release() runs in getData's finally, after the (awaited, failing) close — poll briefly for it
+        setTimeout(() => {
+          try {
+            expect(err).to.be.null;
+            expect(lakehouseReleaseLog.at(-1)).to.include({ destroy: true });
+            done();
+          } catch (e) { done(e); }
+        }, 20);
+      });
+    });
+
+    it("Lakebase getData calls back exactly once even if the callback throws (no re-entry via .catch)", async () => {
+      lakebaseQueryResult = { rows: [{ id: 1, geometry: '{"type":"Point","coordinates":[-77,38]}' }] };
+      let calls = 0;
+      const unhandled = [];
+      const onUnhandled = (e) => unhandled.push(e);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        new Model().getData(lb(), () => { calls++; throw new Error("socket gone"); });
+        await new Promise((r) => setTimeout(r, 30));
+      } finally { process.removeListener("unhandledRejection", onUnhandled); }
+      expect(calls).to.equal(1);
+      expect(unhandled).to.have.lengthOf(0);
+    });
+
+    it("Lakebase returnIdsOnly over the ceiling → actionable 400, like the Lakehouse path", (done) => {
+      lakebaseQueryResult = { rows: Array.from({ length: 500001 }, (_, i) => ({ id: i + 1 })) };
+      new Model().getData(lb({}, { f: "json", returnIdsOnly: "true" }), (err) => {
+        expect(err).to.be.an("error");
+        expect(err.message).to.include("DATABRICKS_MAX_RETURN_IDS");
+        expect(err.code).to.equal(400);
+        expect(lakebaseQueryLog[0].sql).to.include("LIMIT 500001");
+        done();
+      });
+    });
+
+    it("Lakebase idField configured as OBJECTID matches the lowercase key Postgres returns (reads, adds, deletes, getMetadata)", async () => {
+      lakebaseQueryResult = { rows: [{ objectid: 7, geometry: '{"type":"Point","coordinates":[-77,38]}' }] };
+      const fc = await new Promise((ok, no) => new Model().getData(lb({ idField: "OBJECTID" }), (e, r) => (e ? no(e) : ok(r))));
+      expect(fc.metadata.idField).to.equal("objectid");
+      expect(fc.features[0].properties.objectid).to.equal(7);
+
+      lakebaseQueryResult = [{ rows: [{ objectid: 42 }] }];
+      const add = await new Model().editData(lb({ idField: "OBJECTID" }), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }] });
+      expect(add.addResults[0]).to.deep.equal({ objectId: 42, success: true });
+
+      lakebaseQueryResult = { rows: [{ objectid: 5 }] };
+      const del = await new Model().editData(lb({ idField: "OBJECTID" }), { deletes: "5" });
+      expect(del.deleteResults[0]).to.deep.equal({ objectId: 5, success: true });
+
+      const meta = await new Model().getMetadata(lb({ idField: "OBJECTID" }));
+      expect(meta.idField).to.equal("objectid");
+      const lhMeta = await new Model().getMetadata({ params: { tableName: "c.s.t", idField: "OBJECTID" } });
+      expect(lhMeta.idField).to.equal("OBJECTID"); // Lakehouse keeps the configured spelling
+    });
+
+    it("a malformed delete id fails alone; the valid ids are still deleted", async () => {
+      lakebaseQueryResult = { rows: [{ id: 1 }, { id: 2 }] };
+      const r = await new Model().editData(lb(), { deletes: "1,abc,2" });
+      expect(lakebaseQueryLog[0].params).to.deep.equal([1, 2]);
+      const bad = r.deleteResults.find((x) => !x.success);
+      expect(bad.error.code).to.equal(1018);
+      expect(r.deleteResults.filter((x) => x.success).map((x) => x.objectId)).to.deep.equal([1, 2]);
+    });
+
+    it("deleteResults follow REQUEST order when valid and rejected ids are mixed (clients pair result i with delete i)", async () => {
+      lakebaseQueryResult = { rows: [{ id: 10 }, { id: 20 }] };
+      const r = await new Model().editData(lb(), { deletes: [10, 9007199254740993, "abc", 20] });
+      expect(r.deleteResults.map((x) => x.success)).to.deep.equal([true, false, false, true]);
+      expect(r.deleteResults[0].objectId).to.equal(10);
+      expect(r.deleteResults[3].objectId).to.equal(20);
+      expect(r.deleteResults[2]).to.not.have.property("objectId"); // not NaN (JSON null)
+    });
+
+    it("empty entries in an array of deletes are dropped, never sent as id 0", async () => {
+      lakebaseQueryResult = { rows: [{ id: 5 }] };
+      const r = await new Model().editData(lb(), { deletes: ["5", "", null, "  "] });
+      expect(lakebaseQueryLog[0].params).to.deep.equal([5]);
+      expect(r.deleteResults).to.have.lengthOf(1);
+    });
+
+    it("an update with a non-integer id fails that row (1019) without running SQL", async () => {
+      const r = await new Model().editData(lb(), { updates: [{ attributes: { id: "abc", name: "x" } }] });
+      expect(r.updateResults[0].error.code).to.equal(1019);
+      expect(lakebaseQueryLog.some((q) => q.sql.includes("UPDATE"))).to.equal(false);
+    });
+
+    it("deletes given as a JSON array string ('[\"1\",\"2\"]') delete both ids", async () => {
+      lakebaseQueryResult = { rows: [{ id: 1 }, { id: 2 }] };
+      const r = await new Model().editData(lb(), { deletes: '["1","2"]' });
+      expect(lakebaseQueryLog[0].params).to.deep.equal([1, 2]);
+      expect(r.deleteResults.every((x) => x.success)).to.equal(true);
+    });
+
+    it("a service published with editingEnabled=false refuses edits", async () => {
+      let err;
+      try { await new Model().editData(lb({ editingEnabled: "false" }), { deletes: [1] }); } catch (e) { err = e; }
+      expect(err, "should refuse").to.exist;
+      expect(err.message).to.include("not enabled");
+      expect(lakebaseQueryLog).to.have.lengthOf(0);
+      // unset (older services) stays editable
+      lakebaseQueryResult = { rows: [{ id: 1 }] };
+      const ok = await new Model().editData(lb(), { deletes: [1] });
+      expect(ok.deleteResults[0].success).to.equal(true);
+    });
+
+    it("an INSERT whose new id is above 2^53 - 1 is undone (exact id) and reported, not returned as a rounded id", async () => {
+      lakebaseQueryResult = [{ rows: [{ id: "9007199254740993" }], rowCount: 1 }, { rows: [], rowCount: 1 }];
+      const r = await new Model().editData(lb(), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }] });
+      expect(r.addResults[0].success).to.equal(false);
+      expect(r.addResults[0].error.description).to.include("2^53");
+      const undo = lakebaseQueryLog.find((q) => /^DELETE/.test(q.sql));
+      expect(undo, "compensating delete").to.exist;
+      expect(undo.params).to.deep.equal(["9007199254740993"]); // the exact id, as text — not a rounded number
+    });
+
+    it("a read-only service (editingEnabled=false) advertises no edit templates or editable fields", (done) => {
+      lakebaseQueryResult = { rows: [{ id: 1, name: "a", geometry: '{"type":"Point","coordinates":[-77,38]}' }] };
+      new Model().getData(lb({ editingEnabled: "false" }), (err, fc) => {
+        try {
+          expect(err).to.be.null;
+          expect(fc.metadata).to.not.have.property("templates");
+          expect(fc.metadata.fields.every((f) => !f.editable)).to.equal(true);
+          done();
+        } catch (e) { done(e); }
+      });
+    });
+
+    it("a transaction client whose ROLLBACK fails is discarded, not recycled", async () => {
+      // A failing INSERT is caught per row, so drive the outer error path: BEGIN and ROLLBACK both fail (dead connection).
+      const origPush = lakebaseQueryLog.push.bind(lakebaseQueryLog);
+      lakebaseQueryLog.push = (q) => { if (q.sql === "BEGIN" || q.sql === "ROLLBACK") throw new Error("connection terminated"); return origPush(q); };
+      let err;
+      try { await new Model().editData(lb(), { adds: [{ attributes: { name: "x" }, geometry: { x: 0, y: 0 } }], rollbackOnFailure: true }); } catch (e) { err = e; }
+      lakebaseQueryLog.push = origPush;
+      expect(err, "edit should fail").to.exist;
+      expect(lakebaseClientReleases).to.have.lengthOf(1);
+      expect(lakebaseClientReleases[0]).to.be.an("error"); // pg discards a client released with an Error
+    });
+  });
+
   describe("connection release on error", () => {
     it("destroys the connection when the query fails", (done) => {
       lakehouseExecuteError = new Error("session expired");
@@ -1036,6 +1192,83 @@ describe("model", () => {
       expect(lakebaseQueryLog[0].sql).to.include("IN ($1, $2, $3)");
     });
 
+    // The runtime passes `deletes` the way the REST parameter arrives — not always an array. Only arrays used to
+    // work; a number or "1,2" was silently ignored (logged "undefined deletes", nothing deleted, nothing reported).
+    const deleteReq = () => ({
+      params: {
+        lakebaseHost: "lakebase.example.com",
+        lakebaseDatabase: "testdb",
+        lakebaseTable: "cell_towers",
+        lakebaseSchema: "public",
+        geometryColumn: "geometry",
+        idField: "id",
+      },
+      ip: "127.0.0.1",
+    });
+    for (const [label, deletes, ids] of [
+      ["a single number", 7, [7]],
+      ["a comma-separated string", "7, 8,9", [7, 8, 9]],
+      ["a bracketed string", "[7,8]", [7, 8]],
+      ["a single-id string", "7", [7]],
+    ]) {
+      it(`should process deletes given as ${label}`, async () => {
+        lakebaseQueryResult = { rows: ids.map((id) => ({ id })) };
+        const result = await new Model().editData(deleteReq(), { deletes });
+        expect(result.deleteResults.map((r) => r.objectId)).to.deep.equal(ids);
+        result.deleteResults.forEach((r) => expect(r.success).to.be.true);
+        expect(lakebaseQueryLog[0].sql).to.include("DELETE FROM");
+        expect(lakebaseQueryLog[0].params).to.deep.equal(ids);
+      });
+    }
+
+    it("update with an id above 2^53 - 1 fails that row (1019) and never runs the UPDATE", async () => {
+      lakebaseQueryResult = { rows: [], rowCount: 1 };
+      const result = await new Model().editData(deleteReq(), { updates: [{ attributes: { id: 9007199254740993, name: "x" } }] });
+      expect(result.updateResults).to.have.lengthOf(1);
+      expect(result.updateResults[0].success).to.equal(false);
+      expect(result.updateResults[0].error.code).to.equal(1019);
+      expect(result.updateResults[0].error.description).to.include("2^53");
+      expect(lakebaseQueryLog.some((q) => q.sql.includes("UPDATE"))).to.equal(false);
+    });
+
+    it("deletes: an id above 2^53 - 1 fails (1018) and is kept out of the DELETE; safe ids still delete", async () => {
+      lakebaseQueryResult = { rows: [{ id: 5 }] };
+      const result = await new Model().editData(deleteReq(), { deletes: "5,9007199254740993" });
+      expect(result.deleteResults).to.have.lengthOf(2);
+      const bad = result.deleteResults.find((r) => !r.success);
+      expect(bad.error.code).to.equal(1018);
+      expect(bad.error.description).to.include("2^53");
+      expect(result.deleteResults.find((r) => r.success).objectId).to.equal(5);
+      expect(lakebaseQueryLog[0].params).to.deep.equal([5]);
+    });
+
+    it("deletes with ONLY unsafe ids → no DELETE issued at all", async () => {
+      const result = await new Model().editData(deleteReq(), { deletes: [9007199254740993] });
+      expect(result.deleteResults[0].success).to.equal(false);
+      expect(lakebaseQueryLog.some((q) => q.sql.includes("DELETE"))).to.equal(false);
+    });
+
+    it("an unsafe id under rollbackOnFailure rolls the whole edit back (1003), keeping the unsafe-id error on its row", async () => {
+      lakebaseQueryResult = [{ rows: [] }, { rows: [{ id: 7 }] }, { rows: [] }]; // BEGIN, INSERT RETURNING, ROLLBACK
+      const result = await new Model().editData(deleteReq(), {
+        adds: [{ attributes: { name: "a" }, geometry: { x: 0, y: 0 } }],
+        deletes: [9007199254740993],
+        rollbackOnFailure: true,
+      });
+      expect(result.addResults[0].error.code).to.equal(1003);
+      expect(result.deleteResults[0].error.code).to.equal(1018);
+      expect(lakebaseQueryLog.map((q) => q.sql)).to.include("ROLLBACK");
+    });
+
+    it("should treat an empty deletes value as no deletes (no DELETE issued)", async () => {
+      for (const deletes of ["", null, undefined, []]) {
+        lakebaseQueryLog = [];
+        const result = await new Model().editData(deleteReq(), { deletes });
+        expect(result.deleteResults).to.deep.equal([]);
+        expect(lakebaseQueryLog.some((q) => q.sql.includes("DELETE"))).to.equal(false);
+      }
+    });
+
     it("should process mixed adds, updates, and deletes", async () => {
       // Queue: INSERT returns new ID, UPDATE returns rowCount=1, DELETE returns deleted row
       lakebaseQueryResult = [
@@ -1242,11 +1475,12 @@ describe("model", () => {
       };
 
       const result = await model.editData(req, data);
-      // Both should be marked as failed due to rollback
+      // The add that worked is rolled back (1003); the update that failed keeps its real error (1019, not found)
       expect(result.addResults[0].success).to.be.false;
       expect(result.addResults[0].error.code).to.equal(1003);
       expect(result.updateResults[0].success).to.be.false;
-      expect(result.updateResults[0].error.code).to.equal(1003);
+      expect(result.updateResults[0].error.code).to.equal(1019);
+      expect(result.updateResults[0].error.description).to.include("not found");
       // Should have BEGIN and ROLLBACK in the query log
       const sqls = lakebaseQueryLog.map(q => q.sql);
       expect(sqls[0]).to.equal("BEGIN");

@@ -44,7 +44,8 @@ SSH_CMD="ssh $SSH_OPTS ${SSH_USER}@${IP}"
 
 ADMIN_USER="siteadmin"
 ADMIN_PASS="${ADMIN_PASS:?Set ADMIN_PASS env var}"
-ADMIN_PASS_ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${ADMIN_PASS}'))")
+# via the environment, not pasted into the Python source (a ' in the password broke it and could inject code)
+ADMIN_PASS_ENCODED=$(ADMIN_PASS="$ADMIN_PASS" python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["ADMIN_PASS"]))')
 SERVER_URL="https://localhost:6443"
 
 # Databricks credentials
@@ -102,9 +103,8 @@ echo 'TIMEOUT'
 exit 1
 WAITEOF
     script="${script//MAX_WAIT/$max_wait}"
-    remote_script "$script"
-    local status=$?
-    if [[ $status -ne 0 ]]; then
+    # `if !` rather than checking $? afterwards: under set -e a failing command would exit before the message.
+    if ! remote_script "$script"; then
         err "ArcGIS Server did not respond within ${max_wait}s"
         exit 1
     fi
@@ -240,6 +240,7 @@ ok "Provider files deployed"
 
 info "Creating .env file with Databricks credentials..."
 $SSH_CMD "bash -s" << ENVEOF
+umask 077  # the file holds a PAT
 cat > /tmp/cdf-env << 'INNEREOF'
 # Databricks Connection
 DATABRICKS_SERVER_HOSTNAME=e2-demo-field-eng.cloud.databricks.com
@@ -271,7 +272,7 @@ $SSH_CMD "bash -s" << INITEOF
 INIT_FILE='/opt/arcgis/server/usr/init_user_param.sh'
 sudo touch "\$INIT_FILE"
 sudo chown arcgis:arcgis "\$INIT_FILE"
-sudo chmod 755 "\$INIT_FILE"
+sudo chmod 700 "\$INIT_FILE"  # holds the PAT; only arcgis (its owner) sources it
 
 # Remove any old Databricks/Lakebase exports
 sudo sed -i '/DATABRICKS_SERVER_HOSTNAME/d' "\$INIT_FILE"
@@ -342,8 +343,8 @@ svc = {
     'capabilities': '${capabilities}',
     'provider': 'CUSTOMDATA',
     'clusterName': 'default',
-    'minInstancesPerNode': 0,
-    'maxInstancesPerNode': 0,
+    'minInstancesPerNode': 1,  # 0/0 gives the intermittent 404-then-works (see diagnose-service.sh)
+    'maxInstancesPerNode': 2,
     'instancesPerContainer': 1,
     'configuredState': 'STARTED',
     'properties': {'disableCaching': 'true'},
@@ -558,7 +559,7 @@ hdr "DEPLOYMENT COMPLETE"
 echo -e "  ${BOLD}Instance:${NC}      ${IP}"
 echo -e "  ${BOLD}REST Services:${NC} https://${IP}:6443/arcgis/rest/services"
 echo -e "  ${BOLD}Admin:${NC}         https://${IP}:6443/arcgis/admin"
-echo -e "  ${BOLD}Credentials:${NC}   ${ADMIN_USER} / ${ADMIN_PASS}"
+echo -e "  ${BOLD}Credentials:${NC}   ${ADMIN_USER} / (the password in \$ADMIN_PASS)"
 echo ""
 echo "  Services deployed:"
 for svc in "${SERVICES[@]}"; do
