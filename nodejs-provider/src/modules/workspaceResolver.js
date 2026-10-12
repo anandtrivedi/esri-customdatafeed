@@ -2,8 +2,9 @@
  * workspaceResolver.js
  * Resolves Databricks workspace credentials by profile alias.
  *
- * Reads ~/.databrickscfg (or DATABRICKS_CONFIG_FILE) for named profiles,
- * with env-var fallback for the implicit "default" profile.
+ * Reads ~/.databrickscfg (or DATABRICKS_CONFIG_FILE) for named profiles, then workspace-named env vars
+ * (DATABRICKS_<ALIAS>_HOST + _TOKEN or _CLIENT_ID/_CLIENT_SECRET) for a profile the file doesn't have, with the
+ * plain DATABRICKS_* env vars as the fallback for the implicit "default" profile.
  *
  * Profile shape returned:
  *   {
@@ -71,7 +72,8 @@ function getConfigFilePath() {
  *   - Key-value pairs before any section header are ignored
  */
 function parseIni(contents) {
-  const profiles = {};
+  // No prototype: a [__proto__] or [constructor] section must not touch Object.prototype or shadow a lookup.
+  const profiles = Object.create(null);
   let currentSection = null;
   const lines = contents.split(/\r?\n/);
 
@@ -82,7 +84,7 @@ function parseIni(contents) {
     const sectionMatch = line.match(/^\[(.+)\]$/);
     if (sectionMatch) {
       currentSection = sectionMatch[1].trim();
-      if (!profiles[currentSection]) profiles[currentSection] = {};
+      if (!profiles[currentSection]) profiles[currentSection] = Object.create(null);
       continue;
     }
 
@@ -104,7 +106,7 @@ function loadProfiles() {
 
   const filePath = getConfigFilePath();
   if (!fs.existsSync(filePath)) {
-    profileCache = {};
+    profileCache = Object.create(null);
     return profileCache;
   }
 
@@ -112,7 +114,7 @@ function loadProfiles() {
   try {
     contents = fs.readFileSync(filePath, 'utf8');
   } catch (err) {
-    throw new Error(`Failed to read Databricks config file ${filePath}: ${err.message}`);
+    throw configError(`Failed to read Databricks config file ${filePath}: ${err.message}`);
   }
 
   profileCache = parseIni(contents);
@@ -123,9 +125,16 @@ function clearProfileCache() {
   profileCache = null;
 }
 
-function buildProfileFromIni(alias, raw) {
+// A publisher-fixable config problem: 400, so it surfaces instead of collapsing into a 404.
+function configError(message) {
+  const err = new Error(message);
+  err.code = 400;
+  return err;
+}
+
+function buildProfileFromIni(alias, raw, source = getConfigFilePath()) {
   if (!raw.host) {
-    throw new Error(`Profile [${alias}] in ${getConfigFilePath()} is missing required "host"`);
+    throw configError(`Profile [${alias}] in ${source} is missing required "host"`);
   }
 
   const hasToken = Boolean(raw.token);
@@ -133,19 +142,19 @@ function buildProfileFromIni(alias, raw) {
   const hasClientSecret = Boolean(raw.client_secret);
 
   if (hasToken && (hasClientId || hasClientSecret)) {
-    throw new Error(
+    throw configError(
       `Profile [${alias}] is ambiguous: defines both PAT (token) and OAuth M2M (client_id/client_secret). Pick one.`
     );
   }
 
   if (hasClientId !== hasClientSecret) {
-    throw new Error(
+    throw configError(
       `Profile [${alias}] is incomplete: OAuth M2M requires both client_id and client_secret`
     );
   }
 
   if (!hasToken && !hasClientId) {
-    throw new Error(
+    throw configError(
       `Profile [${alias}] has no credentials: provide either token (PAT) or client_id + client_secret (OAuth M2M)`
     );
   }
@@ -206,18 +215,39 @@ function buildDefaultFromEnv() {
   return null;
 }
 
+// A workspace defined by env vars instead of a .databrickscfg section, so several workspaces can come from a Kubernetes
+// Secret, init_user_param.sh or a .env baked into the .cdpk without copying a file to every machine. The alias is
+// uppercased and anything outside A-Z0-9 becomes '_': workspace "DoD-FE" reads DATABRICKS_DOD_FE_HOST and friends.
+function envPrefixFor(alias) {
+  return `DATABRICKS_${alias.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_`;
+}
+
+function buildProfileFromEnvAlias(alias) {
+  const prefix = envPrefixFor(alias);
+  if (prefix === 'DATABRICKS_ACCESS_') return null; // its _TOKEN would be the default workspace's DATABRICKS_ACCESS_TOKEN
+  const read = (name) => (process.env[prefix + name] || '').trim() || undefined; // mounted Secrets often end in \n
+  const raw = { host: read('HOST'), token: read('TOKEN'), client_id: read('CLIENT_ID'), client_secret: read('CLIENT_SECRET') };
+  if (!raw.host) return null; // _HOST marks an env workspace
+  return buildProfileFromIni(alias, raw, `environment variables ${prefix}*`);
+}
+
 function resolveWorkspace(alias) {
   const requestedAlias = alias || 'default';
   const profiles = loadProfiles();
 
   if (requestedAlias !== 'default') {
     if (!profiles[requestedAlias]) {
+      const fromEnv = buildProfileFromEnvAlias(requestedAlias);
+      if (fromEnv) return fromEnv;
       const available = Object.keys(profiles).join(', ') || '(none)';
       const err = new Error(
         `Databricks workspace profile "${requestedAlias}" not found in ${getConfigFilePath()} ` +
         `on ArcGIS Server host "${os.hostname()}". Available profiles: ${available}. ` +
+        (envPrefixFor(requestedAlias) === 'DATABRICKS_ACCESS_'
+          ? `The name ACCESS can't come from env vars (DATABRICKS_ACCESS_TOKEN is the default workspace's token). `
+          : `No ${envPrefixFor(requestedAlias)}HOST environment variable either. `) +
         `The profile must exist on EVERY server machine — set it up with configure-databricks.sh ` +
-        `(README Step 3); registering the .cdpk does NOT install credentials.`
+        `(README Step 3) or DATABRICKS_<NAME>_* env vars; registering the .cdpk does NOT install a .databrickscfg.`
       );
       err.code = 400; // config error (publisher-fixable) — surface it, don't let it collapse into a 404
       throw err;
@@ -234,9 +264,9 @@ function resolveWorkspace(alias) {
 
   const err = new Error(
     `No default Databricks workspace configured on ArcGIS Server host "${os.hostname()}". ` +
-    `Define a [DEFAULT] profile in ${getConfigFilePath()} (or set DATABRICKS_SERVER_HOSTNAME and ` +
-    `DATABRICKS_ACCESS_TOKEN env vars) via configure-databricks.sh (README Step 3) — ` +
-    `registering the .cdpk does NOT install credentials.`
+    `Define a [DEFAULT] profile in ${getConfigFilePath()} via configure-databricks.sh (README Step 3), or set ` +
+    `DATABRICKS_SERVER_HOSTNAME plus DATABRICKS_ACCESS_TOKEN (or DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET) — ` +
+    `registering the .cdpk does NOT install a .databrickscfg.`
   );
   err.code = 400; // config error (publisher-fixable) — surface it, don't let it collapse into a 404
   throw err;
@@ -248,6 +278,7 @@ module.exports = {
   _internal: {
     parseIni,
     buildProfileFromIni,
+    envPrefixFor,
     getConfigFilePath,
     resolveConfigPath,
   },

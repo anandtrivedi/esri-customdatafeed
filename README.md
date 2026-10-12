@@ -179,6 +179,25 @@ token = dapi_your_pat_here
 > **Multi-machine sites:** registering the `.cdpk` is site-level (auto-propagates to every node), but `.databrickscfg` is **per-machine** — put the creds on **each** node, or point `DATABRICKS_CONFIG_FILE` (in `init_user_param.sh`) at a shared path. A one-node-only creds install makes the other nodes 404 intermittently.
 
 <details>
+<summary><b>Workspaces from environment variables (Kubernetes, large sites, no file to copy)</b></summary>
+
+A workspace that isn't in `.databrickscfg` can come from environment variables named after it, so you can set several workspaces from one Kubernetes Secret, `init_user_param.sh`, or a `.env` baked into the `.cdpk`:
+
+```bash
+# workspace "DoD-FE" (upper-cased; anything outside A-Z0-9 becomes _)
+DATABRICKS_DOD_FE_HOST=dod-fe.cloud.databricks.com
+DATABRICKS_DOD_FE_CLIENT_ID=<service-principal-client-id>
+DATABRICKS_DOD_FE_CLIENT_SECRET=<service-principal-secret>
+# workspace "WEST", PAT
+DATABRICKS_WEST_HOST=west.cloud.databricks.com
+DATABRICKS_WEST_TOKEN=dapiXXXXXXXX
+```
+
+A `.databrickscfg` section with exactly the same name (case-sensitive) wins. `_HOST` marks the workspace; then set `_TOKEN` or `_CLIENT_ID` + `_CLIENT_SECRET`. (A workspace named `ACCESS`, in any capitalization, can't use this, because `DATABRICKS_ACCESS_TOKEN` is the default workspace's token.) The default workspace (no `workspace` parameter) still uses `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`. Changes need a full ArcGIS Server restart. On Linux the provider's environment is readable only by the arcgis user and root; on Windows, machine-level variables are visible to every local account, so prefer `.databrickscfg` (or a `.env`) there. If you can mount one file instead, a multi-profile `.databrickscfg` with `DATABRICKS_CONFIG_FILE` pointing at it does the same job without code changes. `LAKEBASE_USER`/`LAKEBASE_PASSWORD` stay global (one native login for every workspace).
+
+</details>
+
+<details>
 <summary><b>Service principal (OAuth M2M, recommended for production) & multiple workspaces</b></summary>
 
 Same file, same location/permissions — only the profile contents differ. Add one section per workspace; each profile uses **one** auth mode.

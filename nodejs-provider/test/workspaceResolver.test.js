@@ -94,6 +94,12 @@ host = a.example.com
       expect(result).to.deep.equal({ A: { host: 'a.example.com' } });
     });
 
+    it('keeps a [__proto__] section from leaking keys into other profiles', () => {
+      const result = resolver._internal.parseIni('[__proto__]\nhost = attacker.example.com\n[PROD]\ntoken = dapi\n');
+      expect(result.PROD.host).to.equal(undefined);
+      expect({}.host).to.equal(undefined); // Object.prototype untouched
+    });
+
     it('preserves = in values (e.g. base64 secrets)', () => {
       const result = resolver._internal.parseIni(`
 [A]
@@ -285,6 +291,80 @@ client_secret = ss
 host = a.example.com
 `);
       expect(() => resolver.resolveWorkspace('A')).to.throw(/no credentials/);
+    });
+  });
+
+  describe('resolveWorkspace — workspace-named env vars (no .databrickscfg needed)', () => {
+    const set = {};
+    const env = (k, v) => { set[k] = true; process.env[k] = v; };
+    afterEach(() => { for (const k of Object.keys(set)) { delete process.env[k]; delete set[k]; } });
+
+    it('resolves a named PAT workspace from DATABRICKS_<ALIAS>_* (hyphens become underscores)', () => {
+      env('DATABRICKS_DOD_FE_HOST', 'https://dod.example.com/');
+      env('DATABRICKS_DOD_FE_TOKEN', 'dapi-env\n'); // a mounted Secret's trailing newline is trimmed
+      expect(resolver.resolveWorkspace('DoD-FE')).to.deep.equal({
+        workspaceAlias: 'DoD-FE', hostname: 'dod.example.com', authType: 'pat', token: 'dapi-env',
+      });
+    });
+
+    it('resolves an OAuth M2M and a PAT workspace side by side', () => {
+      env('DATABRICKS_WEST_HOST', 'west.example.com');
+      env('DATABRICKS_WEST_CLIENT_ID', 'id-w');
+      env('DATABRICKS_WEST_CLIENT_SECRET', 'secret-w');
+      env('DATABRICKS_EAST_HOST', 'east.example.com');
+      env('DATABRICKS_EAST_TOKEN', 'dapi-e');
+      expect(resolver.resolveWorkspace('west')).to.deep.equal({
+        workspaceAlias: 'west', hostname: 'west.example.com', authType: 'oauth-m2m', clientId: 'id-w', clientSecret: 'secret-w',
+      });
+      expect(resolver.resolveWorkspace('EAST')).to.include({ hostname: 'east.example.com', authType: 'pat' });
+    });
+
+    it('keeps a .databrickscfg profile winning over env vars for the same name', () => {
+      writeConfig('[WEST]\nhost = file.example.com\ntoken = dapi-file\n');
+      env('DATABRICKS_WEST_HOST', 'env.example.com');
+      env('DATABRICKS_WEST_TOKEN', 'dapi-env');
+      expect(resolver.resolveWorkspace('WEST')).to.include({ hostname: 'file.example.com', token: 'dapi-file' });
+    });
+
+    it('reports an incomplete env workspace by variable name, never by value', () => {
+      env('DATABRICKS_WEST_HOST', 'west.example.com');
+      env('DATABRICKS_WEST_CLIENT_ID', 'id-only-value');
+      let first;
+      try { resolver.resolveWorkspace('WEST'); } catch (e) { first = e; }
+      expect(first.message).to.match(/incomplete: OAuth M2M requires both/);
+      expect(first.message).to.not.include('id-only-value');
+      expect(first.code).to.equal(400); // a config error the publisher can fix, not a 404
+      env('DATABRICKS_WEST_CLIENT_SECRET', 'super-secret-value');
+      env('DATABRICKS_WEST_TOKEN', 'dapi-also');
+      let msg = '';
+      try { resolver.resolveWorkspace('WEST'); } catch (e) { msg = e.message; }
+      expect(msg).to.match(/ambiguous/);
+      expect(msg).to.not.include('super-secret-value');
+      expect(msg).to.not.include('dapi-also');
+    });
+
+    it('resolves a workspace whose name is an Object.prototype key (constructor) from env vars', () => {
+      env('DATABRICKS_CONSTRUCTOR_HOST', 'c.example.com');
+      env('DATABRICKS_CONSTRUCTOR_TOKEN', 'dapi-c');
+      expect(resolver.resolveWorkspace('constructor')).to.include({ hostname: 'c.example.com', authType: 'pat' });
+    });
+
+    it('names the env var it looked for when a workspace is found nowhere', () => {
+      expect(() => resolver.resolveWorkspace('DoD-FE')).to.throw(/No DATABRICKS_DOD_FE_HOST environment variable either/);
+    });
+
+    it("doesn't build a workspace out of the plain default env vars (alias ACCESS vs DATABRICKS_ACCESS_TOKEN)", () => {
+      env('DATABRICKS_ACCESS_TOKEN', 'dapi-default');
+      env('DATABRICKS_ACCESS_HOST', 'other.example.com'); // even with a _HOST, the default token must not be borrowed
+      expect(() => resolver.resolveWorkspace('ACCESS')).to.throw(/not found.*name ACCESS can't come from env vars/);
+    });
+
+    it('leaves the default workspace on the plain DATABRICKS_* vars', () => {
+      env('DATABRICKS_SERVER_HOSTNAME', 'default.example.com');
+      env('DATABRICKS_ACCESS_TOKEN', 'dapi-default');
+      env('DATABRICKS_WEST_HOST', 'west.example.com');
+      env('DATABRICKS_WEST_TOKEN', 'dapi-w');
+      expect(resolver.resolveWorkspace()).to.include({ hostname: 'default.example.com', token: 'dapi-default' });
     });
   });
 
