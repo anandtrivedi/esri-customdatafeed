@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (579 tests, ~11s)
+# Run all tests (582 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -80,7 +80,7 @@ Modules split by backend. Import from `modules/index.js` (the barrel export), no
 **CDF runtime compatibility:** `authorize()` and `editData()` support both calling conventions — 11.4 callback pattern `(req, callback)` and 12.0 async pattern (return/throw). `getData()` uses callback pattern (both versions).
 
 **Config layering** (2 config surfaces for users):
-- `.databrickscfg` — the one credentials file users author (auto-found at `~/.databrickscfg`, then `/home/arcgis/.databrickscfg`); profiles = workspaces. A workspace missing from the file can come from `DATABRICKS_<ALIAS>_HOST` + `_TOKEN` or `_CLIENT_ID`/`_CLIENT_SECRET` env vars (alias upper-cased, non-alphanumerics → `_`; `_HOST` required; the file wins) — for Kubernetes / large sites where copying the file to every node is impractical. Optional env/tuning (pool sizes, timeouts, `DATABRICKS_CONFIG_FILE` override) go in ArcGIS's `init_user_param.sh`.
+- `.databrickscfg` — the one credentials file users author (auto-found at `~/.databrickscfg`, then `/home/arcgis/.databrickscfg`); profiles = workspaces. Profiles can also be `[NAME]` sections in the provider's own `.env` (packaged in the `.cdpk`, so every machine gets them; same INI format; `.databrickscfg` wins on a name clash). Only the lines above the `.env`'s first section are loaded as env vars (`envVarsPart`); section keys never reach `process.env`. Optional env/tuning (pool sizes, timeouts, `DATABRICKS_CONFIG_FILE` override) go in ArcGIS's `init_user_param.sh`.
 - `req.params` (per-service) — Table name, geometry column, idField, maxRecordCount, srid, lakebase settings. Set during `createService`. Overrides env var defaults.
 
 ### Spatial filter handling differences
@@ -132,7 +132,7 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**579 tests across 21 files:**
+**582 tests across 21 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 107 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
@@ -142,7 +142,7 @@ Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `la
 | `geometryFormat.test.js` | 39 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
 | `editSql.test.js` | 33 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization |
 | `geometry.test.js` | 27 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
-| `workspaceResolver.test.js` | 37 | `.databrickscfg` profile resolution → workspace + auth config; workspace-named env vars |
+| `workspaceResolver.test.js` | 40 | `.databrickscfg` and `.env` [PROFILE] resolution → workspace + auth config |
 | `translate.test.js` | 18 | Row→GeoJSON, invalid geometry handling, ID casting, antimeridian |
 | `cloudFetch.test.js` | 13 | CloudFetch-off statement options, crash repro regression |
 | `extent.test.js` | 19 | Spatial extent cache/TTLs, de-dupe, own-connection, budget-bounded borrow, detached cleanup, world-extent fallback |

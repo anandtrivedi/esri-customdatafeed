@@ -15,9 +15,14 @@
  * Routing: if req.params.lakebaseHost is set → Lakebase, otherwise → Lakehouse.
  */
 
-// Load environment variables from .env file
-// Use explicit path since CDF runtime's working directory differs from provider directory
-try { require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }); } catch (e) { /* dotenv not available in CDF runtime */ }
+// Load the provider's .env (explicit path: the CDF runtime's working directory isn't the provider directory). Only the
+// lines above its first [SECTION] are env vars; [SECTION]s are workspace profiles, read by workspaceResolver. Variables
+// already set in the environment win.
+try {
+  const text = require('fs').readFileSync(require('path').join(__dirname, '..', '.env'), 'utf8');
+  const vars = require('dotenv').parse(require('./modules/workspaceResolver').envVarsPart(text));
+  for (const [k, v] of Object.entries(vars)) if (!(k in process.env)) process.env[k] = v;
+} catch (e) { /* no .env, or dotenv not available */ }
 
 const {
   translateToGeoJSON,

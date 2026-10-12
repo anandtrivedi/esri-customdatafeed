@@ -179,21 +179,40 @@ token = dapi_your_pat_here
 > **Multi-machine sites:** registering the `.cdpk` is site-level (auto-propagates to every node), but `.databrickscfg` is **per-machine** — put the creds on **each** node, or point `DATABRICKS_CONFIG_FILE` (in `init_user_param.sh`) at a shared path. A one-node-only creds install makes the other nodes 404 intermittently.
 
 <details>
-<summary><b>Workspaces from environment variables (Kubernetes, large sites, no file to copy)</b></summary>
+<summary><b>Credentials inside the .cdpk (no file to copy to each machine)</b></summary>
 
-A workspace that isn't in `.databrickscfg` can come from environment variables named after it, so you can set several workspaces from one Kubernetes Secret, `init_user_param.sh`, or a `.env` baked into the `.cdpk`:
+The provider also reads a `.env` at the top level of the `.cdpk`. ArcGIS extracts the package on every machine in the site, so this suits large sites and Kubernetes. Workspaces go in `[NAME]` sections, written exactly like `.databrickscfg`. Optional settings go above the first section:
 
-```bash
-# workspace "DoD-FE" (upper-cased; anything outside A-Z0-9 becomes _)
-DATABRICKS_DOD_FE_HOST=dod-fe.cloud.databricks.com
-DATABRICKS_DOD_FE_CLIENT_ID=<service-principal-client-id>
-DATABRICKS_DOD_FE_CLIENT_SECRET=<service-principal-secret>
-# workspace "WEST", PAT
-DATABRICKS_WEST_HOST=west.cloud.databricks.com
-DATABRICKS_WEST_TOKEN=dapiXXXXXXXX
+```ini
+# settings (optional), one per line, above the first section
+DATABRICKS_POOL_MAX=10
+
+# service principal
+[DOD_FE]
+host          = dod-fe.cloud.databricks.com
+client_id     = <service-principal-client-id>
+client_secret = <service-principal-secret>
+
+# personal access token
+[WEST]
+host  = west.cloud.databricks.com
+token = dapiXXXXXXXX
+
+# optional: services with no workspace
+[DEFAULT]
+host  = main.cloud.databricks.com
+token = dapiYYYYYYYY
 ```
 
-A `.databrickscfg` section with exactly the same name (case-sensitive) wins. `_HOST` marks the workspace; then set `_TOKEN` or `_CLIENT_ID` + `_CLIENT_SECRET`. (A workspace named `ACCESS`, in any capitalization, can't use this, because `DATABRICKS_ACCESS_TOKEN` is the default workspace's token.) The default workspace (no `workspace` parameter) still uses `DATABRICKS_SERVER_HOSTNAME` + `DATABRICKS_ACCESS_TOKEN`. Changes need a full ArcGIS Server restart. On Linux the provider's environment is readable only by the arcgis user and root; on Windows, machine-level variables are visible to every local account, so prefer `.databrickscfg` (or a `.env`) there. If you can mount one file instead, a multi-profile `.databrickscfg` with `DATABRICKS_CONFIG_FILE` pointing at it does the same job without code changes. `LAKEBASE_USER`/`LAKEBASE_PASSWORD` stay global (one native login for every workspace).
+When publishing, enter the section name (`DOD_FE`, `WEST`) as the workspace, exactly as written (case-sensitive). Leave it blank (`-`) to use `[DEFAULT]`. Put comments on their own lines (a `# …` after `[NAME]` is fine, but not after a value: `token = x # note` would keep `# note` in the token). Settings above the sections are single-line `KEY=value` (quote a value that contains `#`). Quotes around values are optional. Save the file as plain UTF-8; a BOM from Notepad is fine. A line starting with `[` that isn't a valid `[NAME]` header (e.g. `[WEST] - prod`) is an error naming the file and line.
+
+To add or change the `.env`, update the package in place. Don't unzip and re-zip it: re-zipping adds folders or `__MACOSX` files that ArcGIS rejects.
+- **macOS/Linux:** put `.env` next to the package and run `zip databricks-geospatial-provider.cdpk .env`.
+- **Windows:** rename the package to `.zip`, open it, drag `.env` into the top level, then rename it back.
+
+Keep the name `databricks-geospatial-provider.cdpk`, upload it as an update, and restart ArcGIS Server. Changing a credential means repeating this.
+
+A `.databrickscfg` profile with the same name, on a given machine, wins over the `.env`. The secrets then live inside the uploaded package: ArcGIS stores it and extracts it on every machine, readable by ArcGIS administrators and included in backups.
 
 </details>
 
