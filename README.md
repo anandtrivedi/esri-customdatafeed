@@ -33,6 +33,8 @@ sudo bash publish-service.sh
 
 `setup.sh`'s Register step **auto-detects a prebuilt `.cdpk`** sitting next to the scripts and registers it — so on any box (including **air-gapped** ones) you can download the release `.cdpk` (or build it on a connected machine), drop it in, and the wizard registers it with no npm/build. Only if no prebuilt is found *and* the box has npm + registry access does it build one for you instead — see [Manual Setup](#manual-setup). On a **federated** ArcGIS Enterprise it offers Portal-specific guidance under **menu option `F`** (which appears only when a federated Enterprise is detected). For **fully disconnected** environments (no Internet, artifact moved in via an approved path or an internal repo), see **[AIRGAP-INSTALL.md](AIRGAP-INSTALL.md)**.
 
+> **Credentials:** the recommended way is a `.env` added to the `.cdpk` ([Step 3](#3-configure-the-databricks-connection)), and one package carries it to every machine in the site, Linux or Windows. Add it **before** running `setup.sh`, which registers the `.cdpk` it finds next to the scripts. Re-add it to each new package when you upgrade. The wizard's configure step writes a per-machine `.databrickscfg` instead, which you can skip when using a `.env`.
+
 > You need three things first (details in **[Prerequisites](#prerequisites)**): an **ArcGIS Server 11.4+** (12.0+ for editing), a **Databricks SQL Warehouse**, and **credentials** (a service principal or a PAT) that can read your tables. Full env-var list, the raw REST API, performance, and geometry details all live under **[Reference](#reference)** at the bottom — you won't need them to get running.
 
 > **Running ArcGIS Server on Windows?** These scripts are bash (Linux). Pure-PowerShell ports of the register + configure steps — no Git Bash or WSL needed — live in **[`windows/`](windows/README.md)**. Build the `.cdpk` on Linux or a build box and copy it over; one package runs on any platform.
@@ -113,7 +115,7 @@ A **one-time** action telling ArcGIS Server the provider exists. Do it in **ArcG
 
 The **Name** shown — `databricks-geospatial-provider` — is what Feature Services point at. Then **restart ArcGIS Server** so the code loads.
 
-> ⚠️ **Registering installs the provider *code* only — NOT your Databricks credentials.** They're a separate, one-time per-box step ([Step 3](#3-configure-the-databricks-connection)): a `.databrickscfg` file owned by `arcgis`, mode `600`. The publish form only asks for a profile *name*; the secret never goes into ArcGIS (so it can't leak via the admin API or backups). Do Step 3 **before** publishing, and the provider only picks up new credentials **after a server restart** (it caches the file at startup). If you skip this, a published service fails to start with `"Service not found"` and a `SEVERE … workspace profile … not found` line in the server log.
+> ⚠️ **The released package carries no credentials.** Add your `.env` to the `.cdpk` **before** uploading it ([Step 3](#3-configure-the-databricks-connection)), and **restart ArcGIS Server** after every upload, because credentials are read at startup. The publish form only asks for a profile *name*. Without credentials, the service's requests fail with `workspace profile "…" not found` (also in the server log), and ArcGIS may show only `"Service not found"`.
 
 > **Prefer a script?** `sudo bash register-provider.sh` does Build + Register in one wizard (build via option 1, or register an existing `.cdpk` via option 2), auto-detects the install root, updates-vs-registers safely (snapshotting the live provider dir so a failed update can be rolled back), and restarts the server.
 >
@@ -155,92 +157,170 @@ Registration extracts the `.cdpk` into `<install>/server/framework/runtime/custo
 
 ### 3. Configure the Databricks connection
 
-The provider reads a standard **`.databrickscfg`** credential file. `sudo bash configure-databricks.sh` writes it atomically, owned by `arcgis`, mode `600` (preserving existing profiles) — or do it with the CLI:
+**How credentials work.** The provider reads credentials **once, at startup**, from:
 
-```bash
-databricks configure --token          # asks for Host + PAT; writes ~/.databrickscfg [DEFAULT]
-databricks current-user me            # confirm it works
-# ArcGIS runs as the arcgis user, which reads the file from its own home:
-sudo cp ~/.databrickscfg /home/arcgis/.databrickscfg
-sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
-sudo chmod 600 /home/arcgis/.databrickscfg
-```
+1. **A `.env` file inside the `.cdpk`** (recommended). ArcGIS copies the registered package to every machine in the site, so one `.env` reaches all of them.
+2. **A `.databrickscfg` on a machine** (optional). A profile with the same name there **overrides** the `.env` on that machine.
+3. **Environment variables**, for one default workspace only.
 
-The provider auto-finds the credential file at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows), so a standard install needs **no `DATABRICKS_CONFIG_FILE`** — drop the file there and restart ArcGIS Server. (Set `DATABRICKS_CONFIG_FILE` only if it lives elsewhere.)
+The released `.cdpk` is a public download and ships **without** a `.env`: you add your own.
 
-A hand-written PAT profile is just:
+#### 3.1 Create the `.env`
 
-```ini
-[DEFAULT]
-host  = your-workspace.cloud.databricks.com
-token = dapi_your_pat_here
-```
-
-> **Multi-machine sites:** registering the `.cdpk` is site-level (auto-propagates to every node), but `.databrickscfg` is **per-machine** — put the creds on **each** node, or point `DATABRICKS_CONFIG_FILE` (in `init_user_param.sh`) at a shared path. A one-node-only creds install makes the other nodes 404 intermittently.
-
-<details>
-<summary><b>Credentials inside the .cdpk (no file to copy to each machine)</b></summary>
-
-The provider also reads a `.env` at the top level of the `.cdpk`. ArcGIS extracts the package on every machine in the site, so this suits large sites and Kubernetes. Workspaces go in `[NAME]` sections, written exactly like `.databrickscfg`. Optional settings go above the first section:
+A plain-text file named `.env` with one `[NAME]` section per Databricks workspace, in the same format as `.databrickscfg`:
+- each section has `host`;
+- plus **either** `token` (personal access token) **or** `client_id` + `client_secret` (service principal, OAuth M2M; recommended for production);
+- an optional `[DEFAULT]` section serves services published without a workspace name.
 
 ```ini
-# settings (optional), one per line, above the first section
+# Optional single-line KEY=value settings go above the first section
 DATABRICKS_POOL_MAX=10
 
-# service principal
+# Service principal (OAuth M2M), recommended for production
 [DOD_FE]
 host          = dod-fe.cloud.databricks.com
 client_id     = <service-principal-client-id>
 client_secret = <service-principal-secret>
 
-# personal access token
+# Personal access token
 [WEST]
 host  = west.cloud.databricks.com
 token = dapiXXXXXXXX
 
-# optional: services with no workspace
+# Used by services published with "-" as the workspace
 [DEFAULT]
 host  = main.cloud.databricks.com
 token = dapiYYYYYYYY
 ```
 
-When publishing, enter the section name (`DOD_FE`, `WEST`) as the workspace, exactly as written (case-sensitive). Leave it blank (`-`) to use `[DEFAULT]`. Put comments on their own lines (a `# …` after `[NAME]` is fine, but not after a value: `token = x # note` would keep `# note` in the token). Settings above the sections are single-line `KEY=value` (quote a value that contains `#`). Quotes around values are optional. Save the file as plain UTF-8; a BOM from Notepad is fine. A line starting with `[` that isn't a valid `[NAME]` header (e.g. `[WEST] - prod`) is an error naming the file and line.
+- Put comments on **their own lines**. A `# note` after `[NAME]` is fine, but `token = x # note` makes `# note` part of the token.
+- Quotes around values are optional. Quote a setting whose value contains `#`.
+- Save as **UTF-8**; a BOM is fine. In Notepad, pick *Save as type: All files* and name it `.env`, or it becomes `.env.txt`.
+- A mistyped header such as `[WEST] - prod`, or a stray line inside a section, is an error naming the file and line.
 
-To add or change the `.env`, update the package in place. Don't unzip and re-zip it: re-zipping adds folders or `__MACOSX` files that ArcGIS rejects.
-- **macOS/Linux:** put `.env` next to the package and run `zip databricks-geospatial-provider.cdpk .env`.
-- **Windows:** rename the package to `.zip`, open it, drag `.env` into the top level, then rename it back.
+#### 3.2 Add the `.env` to the package
 
-Keep the name `databricks-geospatial-provider.cdpk`, upload it as an update, and restart ArcGIS Server. Changing a credential means repeating this.
+A `.env` at the **top level** of the `.cdpk` (next to `cdconfig.json`) is loaded when the provider starts.
+- **Update the archive in place.** Don't unzip and re-zip: that adds a parent folder or `__MACOSX` entries, and ArcGIS rejects the package.
+- **Keep the file name** `databricks-geospatial-provider.cdpk`; ArcGIS checks it.
 
-A `.databrickscfg` profile with the same name, on a given machine, wins over the `.env`. The secrets then live inside the uploaded package. ArcGIS keeps a copy of the registered package in its config store (`config-store/customdataproviders` or `customdataresources`) and extracts it on every machine, readable by ArcGIS administrators and included in backups. Each upload also stays under `arcgisuploads/` until deleted, so after an update delete the upload (Server Admin → uploads → item → delete). Backups of the provider folder taken before an update contain the old `.env` too.
+**Linux / macOS**: put `.env` next to the package, then:
+
+```bash
+ls databricks-geospatial-provider.cdpk                               # the package must exist first
+zip databricks-geospatial-provider.cdpk .env                         # adds, or replaces an existing .env
+unzip -l databricks-geospatial-provider.cdpk | grep -E ' (cdconfig\.json|\.env)$'   # check: both listed
+```
+
+No `zip` on the server? Install it (`sudo apt install zip` or `sudo dnf install zip`), or do this step on your workstation.
+
+**Windows (PowerShell 5.1+)**, in the folder holding both files:
+
+```powershell
+Rename-Item databricks-geospatial-provider.cdpk databricks-geospatial-provider.zip
+Compress-Archive -Path .env -DestinationPath databricks-geospatial-provider.zip -Update
+Rename-Item databricks-geospatial-provider.zip databricks-geospatial-provider.cdpk
+# check: both cdconfig.json and .env are listed
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::OpenRead("$PWD\databricks-geospatial-provider.cdpk").Entries.FullName -match '^(cdconfig\.json|\.env)$'
+```
+
+**Windows (File Explorer)**:
+1. Turn on *View → Show → File name extensions*, so you see the real names (otherwise a rename can produce `….cdpk.zip`).
+2. Rename the package to `.zip`.
+3. Open it and drag `.env` into the top level (next to `cdconfig.json`). When upgrading, accept the prompt to replace the existing `.env`.
+4. Rename it back to `.cdpk`.
+
+#### 3.3 Upload and restart
+
+1. Upload the package:
+   - **First install:** Server Manager → Site → Custom Data Feeds → **Add Custom Data Provider** → pick the `.cdpk` ([Step 2](#2-register-the-provider)).
+   - **Upgrade, or a changed `.env`:** use the provider's update in the same place, or `sudo bash register-provider.sh` (Linux) / `windows\register-provider.ps1`. The scripts detect register vs update.
+2. **Restart ArcGIS Server.** Credentials are read at startup.
+
+Server Manager's file picker only sees the machine the browser runs on.
+
+#### 3.4 Check it
+
+Publish a service ([Step 4](#4-publish-your-feature-services)) with a profile name from your `.env`, e.g. `DOD_FE`, and query it. If the name doesn't resolve, the service's requests fail with `workspace profile "…" not found` plus the list of profiles the provider found; the same line is in the ArcGIS Server log. An empty list means the `.env` isn't in the uploaded package. Old names after an update mean ArcGIS Server wasn't restarted.
+
+#### 3.5 Upgrading later
+
+Every provider **update replaces the provider folder** with the uploaded package, so the `.env` must be in **every** package you upload:
+1. Keep your `.env` somewhere safe.
+2. Add it to each new `.cdpk` before uploading (3.2).
+3. Upload and restart (3.3).
+
+Changing a credential means updating the package again.
+
+#### 3.6 Security
+
+With a `.env`, the secrets travel **inside the package**:
+- ArcGIS keeps a copy of the registered package in its config store (`config-store/customdataproviders` or `customdataresources`) and extracts it on every machine. ArcGIS administrators can read it, and it's included in backups.
+- Each upload stays under `arcgisuploads/` until deleted. **Delete each upload once the register or update succeeds** (Server Admin → uploads → item → delete).
+- Provider-folder backups taken before an update still hold the old `.env`.
+
+Use a service principal with only the grants it needs ([Prerequisites](#prerequisites)). To rotate a secret:
+1. Create the new secret.
+2. Upload a package with the new `.env`, restart ArcGIS Server, and check that a service still answers.
+3. Only then **revoke the old secret in Databricks**; old copies may still sit in uploads and backups.
+
+To keep secrets out of the package and ArcGIS's config store, use a per-machine `.databrickscfg` instead (below).
+
+<details>
+<summary><b>Alternative: a <code>.databrickscfg</code> on each machine (keeps secrets out of the package)</b></summary>
+
+The provider also reads a standard `.databrickscfg`, auto-found at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows). Set `DATABRICKS_CONFIG_FILE` only if it lives elsewhere. It has the same `[NAME]` sections as the `.env`. A profile with the same name as a `.env` section **wins on that machine**, which can make machines behave differently.
+
+- **Linux:** `sudo bash configure-databricks.sh` writes it atomically, owned by `arcgis`, mode `600`, keeping existing profiles. The setup wizard's configure step (`sudo bash setup.sh`) writes this file too, so skip that step if you use a `.env` with the same profile names. Or by hand:
+
+  ```bash
+  databricks configure --token          # asks for Host + PAT; writes ~/.databrickscfg [DEFAULT]
+  databricks current-user me            # confirm it works
+  sudo cp ~/.databrickscfg /home/arcgis/.databrickscfg
+  sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
+  sudo chmod 600 /home/arcgis/.databrickscfg
+  ```
+
+- **Windows:** `windows\configure-databricks.ps1` writes `C:\ProgramData\ArcGIS\cdf\.databrickscfg`, locked with an `icacls` ACL.
+
+Unlike the `.env`, this file is **per machine**: put it on **every** machine in the site. If only one node has it, the other nodes return intermittent 404s. Restart ArcGIS Server after changes.
 
 </details>
 
 <details>
-<summary><b>Service principal (OAuth M2M, recommended for production) & multiple workspaces</b></summary>
+<summary><b>Alternative: environment variables (one default workspace)</b></summary>
 
-Same file, same location/permissions — only the profile contents differ. Add one section per workspace; each profile uses **one** auth mode.
+Set `DATABRICKS_SERVER_HOSTNAME` plus either `DATABRICKS_ACCESS_TOKEN`, or `DATABRICKS_CLIENT_ID` + `DATABRICKS_CLIENT_SECRET`:
+- **Linux:** in `init_user_param.sh`.
+- **Windows:** as machine environment variables. These are readable by **every local account**.
 
-```ini
-[WORKSPACE_A]                                   # PAT
-host  = workspace-a.cloud.databricks.com
-token = dapiXXXXXXXX
+They serve only services published without a workspace name, and only when no `[DEFAULT]` section exists. Restart ArcGIS Server after changes.
 
-[WORKSPACE_B]                                   # OAuth M2M service principal
-host          = workspace-b.cloud.databricks.com
-client_id     = <service-principal-client-id>
-client_secret = <service-principal-secret>
-```
+</details>
 
-A service created **without** a `workspace` parameter resolves in order: `[DEFAULT]` profile → `DATABRICKS_SERVER_HOSTNAME`+`DATABRICKS_ACCESS_TOKEN` env vars → error. A service with `workspace: "WORKSPACE_B"` uses that profile (isolated connection pool per workspace). For OAuth M2M Lakebase, the provider exchanges `client_id`/`client_secret` at `/oidc/v1/token`, then mints Lakebase tokens via `/api/2.0/database/credentials`, auto-refreshing ~5 min before expiry.
+<details>
+<summary><b>Service principal setup, lookup order and troubleshooting</b></summary>
 
-**SP setup** (Databricks account console): create the SP → assign to the workspace → generate an OAuth secret (`client_id`/`client_secret`) → grant `CAN USE` on the warehouse (and Lakebase DB access if used). Ref: [OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
+**Service principal setup** (Databricks account console):
+1. Create the SP and assign it to the workspace.
+2. Generate an OAuth secret (`client_id` / `client_secret`).
+3. Grant `CAN USE` on the warehouse, plus Lakebase access if used.
+
+Each profile uses **one** auth mode and gets its own connection pool. For Lakebase over OAuth M2M, the provider exchanges `client_id`/`client_secret` at `/oidc/v1/token`, then mints Lakebase tokens and refreshes them about 5 minutes before they expire. Ref: [OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
+
+**Lookup order:**
+- A service with a workspace name uses that name from the machine's `.databrickscfg`, else from the `.env`. If neither has it, its requests fail with `workspace profile "…" not found` and the list of available profiles.
+- A service without one (`-`) uses `[DEFAULT]` (`.databrickscfg` first, then `.env`), then the environment variables.
 
 | Symptom | Likely cause |
 |---|---|
-| `workspace profile "X" not found` | Profile typo (case-sensitive), wrong `DATABRICKS_CONFIG_FILE`, or file not readable by `arcgis` |
-| `Profile [X] is ambiguous` | Both PAT and OAuth M2M in one profile — pick one |
-| `OAuth M2M token endpoint returned 401` | SP secret wrong/revoked, or SP not assigned to the workspace |
+| `workspace profile "X" not found` (lists the available profiles) | Name typo (case-sensitive); `.env` missing from the uploaded package; ArcGIS Server not restarted; wrong `DATABRICKS_CONFIG_FILE` |
+| Error naming the `.env` and a line number | A mistyped `[NAME]` header, or a stray line inside a section |
+| `Profile [X] … is ambiguous` | Both a token and a client id/secret in one profile; pick one |
+| `OAuth M2M token endpoint returned 401` | SP secret wrong or revoked, or SP not assigned to the workspace |
+| Authentication fails though the secret looks right | A `# comment` at the end of the value line became part of the value |
+| Works on some machines, fails on others | A `.databrickscfg` on some machines overrides the `.env` profile, or `.databrickscfg` exists on only some machines |
 | `Source IP … blocked by Databricks IP ACL` | ArcGIS Server's outbound IP isn't on the workspace allowlist |
 
 </details>
@@ -248,22 +328,66 @@ A service created **without** a `workspace` parameter resolves in order: `[DEFAU
 <details>
 <summary><b>Lakebase backend setup</b> (skip if you only use Lakehouse)</summary>
 
-Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time. Auth is automatic: the provider mints short-lived Lakebase OAuth tokens for both **Autoscaling** endpoints and Provisioned instances, and signs in as the workspace identity (the service principal's client id for an OAuth M2M profile, the token owner for a PAT profile). In a workspace with many Lakebase projects, set `LAKEBASE_ENDPOINT_NAME=projects/<p>/branches/<b>/endpoints/<e>` to skip the endpoint lookup. To use a fixed credential instead, set `LAKEBASE_PASSWORD` (+ `LAKEBASE_USER`) in `init_user_param.sh` — note it then applies to **every** Lakebase service on that server.
+Enable PostGIS on each database: `CREATE EXTENSION IF NOT EXISTS postgis;` (without it the first query fails with `function st_intersects does not exist`). Per-table connection details go on each service at publish time.
 
-> **Synced Tables caveat:** Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns. Store geometry as WKT in a STRING column, sync that, and convert on the Lakebase side — see [Known Limitations](#known-limitations).
+Auth is automatic. The provider mints short-lived Lakebase OAuth tokens for both **Autoscaling** endpoints and Provisioned instances. It signs in as the workspace identity: the service principal's client id for an OAuth M2M profile, or the token owner for a PAT profile.
+- In a workspace with many Lakebase projects, set `LAKEBASE_ENDPOINT_NAME=projects/<p>/branches/<b>/endpoints/<e>` to skip the endpoint lookup.
+- To use a fixed credential instead, set `LAKEBASE_PASSWORD` (+ `LAKEBASE_USER`) as `.env` settings above the first section (applies to **every** Lakebase service on **every** machine in the site), or in `init_user_param.sh` (that machine only).
+
+> **Synced Tables caveat:** Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns. Store geometry as WKT in a STRING column, sync that, and convert on the Lakebase side; see [Known Limitations](#known-limitations).
 
 </details>
 
 ### 4. Publish your feature services
 
-One `publish-service.sh` run per table. It builds the `createService` payload for you — no JSON, no admin token to mint.
+**Option A: guided script (Linux).** One `publish-service.sh` run per session; it builds the `createService` payload for you, with no JSON to write and no admin token to mint.
 
 ```bash
 cd ~/esri-customdatafeed        # the repo root (not nodejs-provider/)
 sudo bash publish-service.sh
 ```
 
-It preflights (provider registered? config present?), auto-detects the provider, lists `.databrickscfg` profiles, lets you pick the **backend**, asks for the connection/warehouse **once** then **loops per table**, prompts for **instance sizing** (`min=1`/`max=2` by default — a warm instance per node to avoid the intermittent-404 cold start) and optional **Advanced** visibility/idle settings, then **creates → starts → verifies** each service and prints its FeatureServer URL plus an anonymous-access probe.
+It runs these steps:
+1. Preflights: is the provider registered, and are credentials in place?
+2. Offers the workspace profiles from the provider's `.env` and the machine's `.databrickscfg`.
+3. Lets you pick the **backend**.
+4. Asks for the warehouse or Lakebase connection **once**, then **loops per table**.
+5. Prompts for **instance sizing** (`min=1`/`max=2` by default, a warm instance per node to avoid the intermittent-404 cold start) and optional **Advanced** visibility/idle settings.
+6. **Creates → starts → verifies** each service, then prints its FeatureServer URL and an anonymous-access probe.
+
+**Option B: by hand in Server Manager (Linux and Windows).**
+
+1. Server Manager → **Services** → **Publish Service** → **From a registered custom data provider** → **Next**.
+2. Pick **databricks-geospatial-provider**.
+3. Fill the 16 fields. **Every field is required**: enter `-` for "not applicable" or "use the default".
+4. **Next** → service name and folder → **Publish**.
+
+The **Workspace Profile** field takes a `[NAME]` from your `.env` (or `.databrickscfg`) exactly as written, case-sensitive. Enter `-` to use `[DEFAULT]`.
+
+| Lakehouse (SQL Warehouse) | Lakebase (PostgreSQL, editable) |
+|---|---|
+| ![Publish form filled in for a Lakehouse service](screenshots/10-publish-form-lakehouse.png) | ![Publish form filled in for a Lakebase service](screenshots/11-publish-form-lakebase.png) |
+
+| # | Field | Lakehouse service | Lakebase service |
+|---|---|---|---|
+| 1 | Databricks Workspace Profile | `DOD_FE` | `DOD_FE` |
+| 2 | Geometry Column | `geom` | `geom` |
+| 3 | ID Field (unique integer) | `objectid` | `objectid` |
+| 4 | SRID | `4326` | `4326` |
+| 5 | Max Record Count | `2000` | `2000` |
+| 6 | SQL Warehouse HTTP Path | `/sql/1.0/warehouses/a1b2c3d4e5f6a7b8` | `-` |
+| 7 | Table (catalog.schema.table) | `main.geo.cell_towers` | `-` |
+| 8 | Geometry Format | `-` (auto-detect) | `-` |
+| 9 | Time Column | `event_time` | `-` |
+| 10 | Lakebase Host | `-` | `ep-demo.database.us-east-1.cloud.databricks.com` |
+| 11 | Lakebase Port | `-` | `5432` |
+| 12 | Lakebase Database | `-` | `databricks_postgres` |
+| 13 | Lakebase Schema | `-` | `geo_demo` |
+| 14 | Lakebase Table | `-` | `cases_editable` |
+| 15 | Enable Editing | `-` | `true` |
+| 16 | Minimum Scale | `-` | `-` |
+
+For SRID and Max Record Count, `-` gives the defaults (4326, 2000). A Lakehouse Time Column is strongly recommended for any table with history: without it, clients request every date in each map tile.
 
 > To script the raw REST call yourself, see [Manual service creation](#reference) under Reference. To publish from a Databricks agent, see [Agent-Driven Publishing](#agent-driven-publishing-mcp).
 
@@ -273,7 +397,7 @@ It preflights (provider registered? config present?), auto-detects the provider,
 
 > **⚠️ Anonymous access:** by default a published CDF Feature Service is **readable by anyone who can reach the server** — no token required. If that's not what you want, mark the service **private** (the `publish-service.sh` Advanced option denies anonymous `esriEveryone` access), and confirm with the anonymous-access probe the wizard prints. On **federated** ArcGIS Enterprise, access is governed by **Portal item sharing**, not the server's `esriEveryone` lever — set the item's sharing there.
 
-**A standard install needs nothing here** — the provider auto-finds `/home/arcgis/.databrickscfg`. `init_user_param.sh` (typically `/opt/arcgis/server/usr/init_user_param.sh`) is only for **overrides**: a credential file in a non-standard location, or optional tuning.
+**A standard install needs nothing here**: credentials come from the `.env` in the package, or a `.databrickscfg` the provider auto-finds. `init_user_param.sh` (typically `/opt/arcgis/server/usr/init_user_param.sh`) is only for **overrides**: a credential file in a non-standard location, or optional tuning.
 
 ```bash
 # Only if your .databrickscfg is NOT at ~/.databrickscfg or /home/arcgis/.databrickscfg:
@@ -282,7 +406,7 @@ export DATABRICKS_CONFIG_FILE=/shared/path/.databrickscfg
 export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
 ```
 
-Restart ArcGIS Server after editing it. Credentials stay in `.databrickscfg`, not here.
+Restart ArcGIS Server after editing it. Keep credentials in the `.env` or `.databrickscfg`, not here.
 
 <details>
 <summary><b>Optional tuning knobs & admin-token binding (requestip vs referer)</b></summary>
@@ -550,9 +674,10 @@ Set in `init_user_param.sh`. Per-table settings are NOT here (they're per-servic
 </details>
 
 <details>
-<summary><b>Where configuration lives (.databrickscfg; init_user_param.sh = overrides only)</b></summary>
+<summary><b>Where configuration lives (.env in the package; .databrickscfg per machine; init_user_param.sh = overrides)</b></summary>
 
-One file: **`.databrickscfg`**, auto-found at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows) — its INI sections are your workspace profiles, and the publish form only names a profile. `init_user_param.sh` (Linux) or a Machine env var (Windows) is optional, for overrides: a non-standard config path, or pool/timeout tuning.
+- **Credentials:** `[NAME]` workspace profiles in the `.env` inside the `.cdpk` (reaches every machine), and/or a `.databrickscfg` on each machine (`/home/arcgis/.databrickscfg` or `%ProgramData%\ArcGIS\cdf\.databrickscfg`; same-name profiles win). The publish form only names a profile.
+- **Overrides:** `init_user_param.sh` (Linux) or a Machine env var (Windows) is optional: a non-standard config path, or pool/timeout tuning. Single-line `KEY=value` settings can also go at the top of the `.env`.
 
 </details>
 

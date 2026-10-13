@@ -43,8 +43,8 @@ case "${1:-}" in
     echo "  creates -> starts -> verifies the service, printing its FeatureServer URL."
     echo "  No JSON to hand-edit, no admin token to mint yourself. Works air-gapped."
     echo
-    echo "  Requires: bash, curl, python3 (all present on ArcGIS Server) and a"
-    echo "  .databrickscfg readable by the arcgis user (see the repo README, Step 3)."
+    echo "  Requires: bash, curl, python3 (all present on ArcGIS Server) and credentials:"
+    echo "  a .env in the provider package or a .databrickscfg (see the repo README, Step 3)."
     exit 0
     ;;
 esac
@@ -238,7 +238,18 @@ else
   echo "         '$PROVIDER_NAME'. If publishing fails with 'provider not found', register it."
 fi
 
+# The installed provider's .env (carried inside the .cdpk) can hold [NAME] workspace profiles too.
+PROV_ENV=""
+for r in /opt/arcgis/server /home/arcgis/server /app/arcgis/server /arcgis/server; do
+  f="$r/framework/runtime/customdata/providers/$PROVIDER_NAME/.env"
+  [ -r "$f" ] && { PROV_ENV="$f"; break; }
+done
+env_profiles() { [ -n "$PROV_ENV" ] && grep -oE '^[[:space:]]*\[[^]]+\]' "$PROV_ENV" 2>/dev/null | tr -d '[] \t\r'; }
+
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
+if [ -n "$(env_profiles)" ]; then
+  echo "  [ok]   workspace profiles in the provider's .env: $(env_profiles | tr '\n' ' ')"
+fi
 if [ -f "$CFG" ]; then
   echo "  [ok]   Databricks config found: $CFG"
   # Ownership check — must be arcgis so the provider process can read it.
@@ -259,11 +270,12 @@ if [ -f "$CFG" ]; then
   if [ ! -s "$CFG" ]; then
     echo "  [WARN] $CFG is empty — add a [DEFAULT] profile before publishing."
   fi
+elif [ -n "$(env_profiles)" ]; then
+  echo "  [ok]   no $CFG on this machine (credentials come from the provider's .env)"
 else
-  echo "  [FAIL] $CFG not found."
-  echo "         The provider runs as 'arcgis' and must read this file at query time."
-  echo "         Create it:  sudo -u arcgis databricks configure --token"
-  echo "         Or copy:    sudo cp ~/.databrickscfg $CFG && sudo chown arcgis:arcgis $CFG && sudo chmod 600 $CFG"
+  echo "  [FAIL] no credentials: neither a .env in the provider package nor $CFG."
+  echo "         Add a .env with [NAME] sections to the .cdpk and re-upload it (README Step 3), or"
+  echo "         create $CFG:  sudo -u arcgis databricks configure --token"
 fi
 echo
 
@@ -380,8 +392,9 @@ echo "-- Data source (used for every table you publish this session) --"
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
 PROFILES=""
 [ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]' | tr -d '\r')
+PROFILES=$(printf '%s\n%s\n' "$PROFILES" "$(env_profiles)" | grep -v '^$' | awk '!seen[$0]++')
 if [ -n "$PROFILES" ]; then
-  echo "  Workspace profiles found in $CFG:"
+  echo "  Workspace profiles found (.databrickscfg and the provider's .env):"
   declare -a PROFARR=(); n=1
   while IFS= read -r p; do
     [ -n "$p" ] || continue

@@ -10,7 +10,7 @@
       {
         "key": "workspace",
         "label": "1. Common - Databricks Workspace Profile",
-        "description": "Profile name in the server's .databrickscfg. Enter - for DEFAULT."
+        "description": "[NAME] in the .env or .databrickscfg, e.g. DOD_FE. Enter - for DEFAULT."
       },
       {
         "key": "geometryColumn",
