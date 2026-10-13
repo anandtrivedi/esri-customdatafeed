@@ -68,7 +68,7 @@ FeatureServer URL.
   (mode 0600) on the machine running the server, and validates it against the admin API
   before saving. It never passes through the model or chat transcript. For shared/hosted
   deployments, use a secret-scope-backed registry instead (below).
-- **Full tool reference and security model:** [main README, section 7](../README.md#7-agent-driven-publishing-mcp-server).
+- **Full tool reference and security model:** [main README, Agent-Driven Publishing](../README.md#agent-driven-publishing-mcp).
 - **Databricks auth:** the server uses your `.databrickscfg` profiles. In hosted mode the
   config file must be readable by the service user (a root-owned `.databrickscfg` yields a
   confusing "profile not found: available (none)").

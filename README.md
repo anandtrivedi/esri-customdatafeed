@@ -27,7 +27,7 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
    | `<workspace>.cloud.databricks.com` | 443 | SQL Warehouse queries + Databricks API |
    | `<instance>.database.cloud.databricks.com` | 5432 | Lakebase queries/edits (only if you use Lakebase) |
 
-   If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add **each** ArcGIS Server node's outbound IP (create your own ALLOW list — don't edit a fevm/`*-DoNotModify` managed one). Otherwise the connection fails with `HTTP 403`, which surfaces to the publisher as a **misleading `"Service not found"`** — the real `403` appears only in the `Custom_data_feeds` server log. Allow-list changes take a few minutes to propagate.
+   If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add **each** ArcGIS Server node's outbound IP (create your own ALLOW list, and follow your organization's policy for lists managed by someone else, e.g. a platform or security team). Otherwise the connection fails with `HTTP 403`, which surfaces to the publisher as a **misleading `"Service not found"`** — the real `403` appears only in the `Custom_data_feeds` server log. Allow-list changes take a few minutes to propagate.
 
 ---
 
@@ -44,7 +44,7 @@ No command line needed, except on macOS/Linux to add the file to the package (on
 
 ### 1. Download the provider package
 
-Download the `.cdpk` for your ArcGIS Server from the [latest release](../../releases/latest), then **rename it to `databricks-geospatial-provider.cdpk`** (ArcGIS only accepts that name).
+Download the `.cdpk` for your ArcGIS Server from the [latest release](https://github.com/anandtrivedi/esri-customdatafeed/releases/latest), then **rename it to `databricks-geospatial-provider.cdpk`** (ArcGIS only accepts that name).
 
 | ArcGIS Server | Package |
 |---|---|
