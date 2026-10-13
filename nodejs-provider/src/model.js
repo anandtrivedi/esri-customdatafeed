@@ -233,8 +233,10 @@ const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: 
 const extentInFlight = new Map(); // key -> Promise<{ extent, unknown }> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
 const warnedWorldExtent = new Set(); // tables already warned about advertising the world-extent fallback
-// Request parameters that say nothing about which features to return (output format, auth, JSONP, cache-busters)
-const NON_QUERY_PARAMS = new Set(["f", "token", "callback", "_"]);
+// Request parameters that say nothing about which features to return: output format, auth, JSONP, cache-busters, and
+// the layer-info-only returnUpdates (refresh extent/time) and returnAdvancedSymbols. The runtime gives getData the same
+// params for layer info and /query, so a /query carrying only these is answered as metadata (as bare ?f=json always was).
+const NON_QUERY_PARAMS = new Set(["f", "token", "callback", "_", "_ts", "returnUpdates", "returnAdvancedSymbols"]);
 
 // [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / the column is all-NULL /
 // values are non-finite. Guard against SQL NULL first: an empty table or all-NULL column makes min/max return NULL,
