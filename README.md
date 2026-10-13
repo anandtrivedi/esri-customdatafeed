@@ -9,42 +9,14 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
 
 ![CDF Overview — direct integration with ArcGIS Enterprise](cdf-overview.png)
 
-> **Install is a lot simpler now.** No build step and no hand-edited JSON: download the prebuilt provider package (`.cdpk`) from the [latest release](../../releases/latest), drop it next to the scripts, and run `sudo bash setup.sh` — it auto-detects the package, registers it, and walks you through publishing your first table. (Building from source is still there for air-gapped boxes and developers.)
-
----
-
-## Quick Start
-
-Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install: it prechecks the environment, then opens a menu — for a fresh box choose **option 5 (Full first-time setup)**, which chains **configure → register → publish** (configure first, so the provider reads your credentials when the register step restarts it) using an ArcGIS admin login it collects once.
-
-```bash
-# 0. Get the code onto the ArcGIS Server host (it carries the wizard + the provider source).
-git clone <this-repo-url> && cd esri-customdatafeed
-
-# 1. Run the guided wizard — as ROOT (recommended) or the arcgis user (NOT a plain user).
-sudo bash setup.sh          # opens a menu -> pick 5 (Full first-time setup): configure -> register -> publish
-
-# 2. If a step ever misbehaves, the read-only health check tells you why:
-sudo bash diagnose-service.sh
-
-# 3. Publish more tables later, one wizard per table:
-sudo bash publish-service.sh
-```
-
-`setup.sh`'s Register step **auto-detects a prebuilt `.cdpk`** sitting next to the scripts and registers it — so on any box (including **air-gapped** ones) you can download the release `.cdpk` (or build it on a connected machine), drop it in, and the wizard registers it with no npm/build. Only if no prebuilt is found *and* the box has npm + registry access does it build one for you instead — see [Manual Setup](#manual-setup). On a **federated** ArcGIS Enterprise it offers Portal-specific guidance under **menu option `F`** (which appears only when a federated Enterprise is detected). For **fully disconnected** environments (no Internet, artifact moved in via an approved path or an internal repo), see **[AIRGAP-INSTALL.md](AIRGAP-INSTALL.md)**.
-
-> **Credentials:** the recommended way is a `.env` added to the `.cdpk` ([Step 3](#3-configure-the-databricks-connection)), and one package carries it to every machine in the site, Linux or Windows. Add it **before** running `setup.sh`, which registers the `.cdpk` it finds next to the scripts. Re-add it to each new package when you upgrade. The wizard's configure step writes a per-machine `.databrickscfg` instead, which you can skip when using a `.env`.
-
-> You need three things first (details in **[Prerequisites](#prerequisites)**): an **ArcGIS Server 11.4+** (12.0+ for editing), a **Databricks SQL Warehouse**, and **credentials** (a service principal or a PAT) that can read your tables. Full env-var list, the raw REST API, performance, and geometry details all live under **[Reference](#reference)** at the bottom — you won't need them to get running.
-
-> **Running ArcGIS Server on Windows?** These scripts are bash (Linux). Pure-PowerShell ports of the register + configure steps — no Git Bash or WSL needed — live in **[`windows/`](windows/README.md)**. Build the `.cdpk` on Linux or a build box and copy it over; one package runs on any platform.
+> **Getting started:** download the prebuilt package (`.cdpk`), add a `.env` with your Databricks credentials, register it in ArcGIS Server Manager, and create a feature service in Server Manager or your portal. No build step and no JSON: see [Set up in the browser](#set-up-in-the-browser-recommended). Scripts for the same steps are under [Set up from the command line](#set-up-from-the-command-line).
 
 ---
 
 ## Prerequisites
 
 1. **An ArcGIS Server, 11.4 or later, with the Custom Data Feed runtime installed.** The CDF runtime is a **separate** component (not bundled with ArcGIS Server) — install `ArcGIS Custom Data Feeds` for your exact server version from My Esri on every machine (Windows/Linux) and restart, or registration fails. It bundles Node.js (don't install Node separately). Use **12.0+** for feature *editing* (not just read-only maps).
-2. **A Databricks SQL Warehouse** (left sidebar → SQL Warehouses). This is what the provider queries. *(A Lakebase instance is optional — only needed for very low-latency maps or editing.)*
+2. **A Databricks SQL Warehouse** for Lakehouse tables (left sidebar → SQL Warehouses), and/or a **Lakebase** database for low-latency maps and editing.
 3. **Databricks credentials** — a **Service Principal (OAuth M2M)** (recommended: a machine identity that auto-refreshes, no user dependency) *or* a **Personal Access Token (PAT)** (simplest for one person). Whichever you use, it needs **both** layers of access granted to that same identity:
    - **Compute:** `CAN USE` on the SQL Warehouse.
    - **Data (Unity Catalog):** `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the specific table/view. *(Lakebase: `CONNECT`/`USAGE`/`SELECT`, plus `INSERT`/`UPDATE`/`DELETE` for editing.)* Grant table-level, not catalog-wide.
@@ -56,121 +28,72 @@ sudo bash publish-service.sh
    | `<instance>.database.cloud.databricks.com` | 5432 | Lakebase queries/edits (only if you use Lakebase) |
 
    If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add **each** ArcGIS Server node's outbound IP (create your own ALLOW list — don't edit a fevm/`*-DoNotModify` managed one). Otherwise the connection fails with `HTTP 403`, which surfaces to the publisher as a **misleading `"Service not found"`** — the real `403` appears only in the `Custom_data_feeds` server log. Allow-list changes take a few minutes to propagate.
-5. **The Databricks CLI (recommended)** — writes your credential file in Step 3 and helps look up values the publish wizard asks for. Install on the server: `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh`. *(No internet on the box? It's one static binary — download it elsewhere and copy it onto the `PATH`.)*
 
 ---
 
-## Manual Setup
+## Set up in the browser (recommended)
 
-**`setup.sh` (Quick Start) does all of this for you.** Follow these steps only if you can't use the wizard, want to do it by hand, or need to understand each piece. Each step also maps to a focused script the wizard calls, so this is the fallback for anything the wizard can't complete.
+**At a glance**
+1. Download one `.cdpk` package.
+2. Add a small `.env` file with your Databricks connection to it.
+3. Upload it in ArcGIS Server Manager and restart ArcGIS Server.
+4. Fill in a form to publish a feature service.
+5. Open the service to confirm it works.
 
-> **Which user runs what:** your SSH user (e.g. `ubuntu`) runs the **build** (`git`, `npm`, `zip`). But the **`.sh` helper scripts** — `setup.sh`, `register-provider.sh`, `configure-databricks.sh`, `publish-service.sh`, `diagnose-service.sh` — must run as **root (`sudo bash …`)** or the **`arcgis`** user: a plain user can't restart the server or read the mode-600, `arcgis`-owned `/home/arcgis/.databrickscfg`. `sudo -u arcgis` starts/stops the server (it runs as the `arcgis` OS user): `sudo -u arcgis /opt/arcgis/server/startserver.sh`. Files you create under the install tree should be `chown arcgis:arcgis`.
->
-> **Install root:** Linux defaults to `/opt/arcgis/server/`, but hardened sites often use `/app/arcgis/server/` — check `ls -d /opt/arcgis /app/arcgis 2>/dev/null` and substitute yours. (`setup.sh` and `register-provider.sh` auto-detect `/opt`, `/app`, and home-directory installs; hand-typed commands below do not.)
+No command line needed, except on macOS/Linux to add the file to the package (one command).
 
-### 1. Build the provider package (`.cdpk`)
+### 1. Download the provider package
 
-> **Most users don't build.** Grab the prebuilt package matching your ArcGIS Server major version — **`cdpk/12.x/`** (12.0 / 12.1) or **`cdpk/11.x/`** (11.2 – 11.5+) — verify the `SHA-256` against that folder's `.cdpk.sha256`, and register it (Step 2). Build from source only for a **custom version, a code change, or an air-gapped** box.
+Download the `.cdpk` for your ArcGIS Server from the [latest release](../../releases/latest), then **rename it to `databricks-geospatial-provider.cdpk`** (ArcGIS only accepts that name).
 
-The provider source lives in the **`nodejs-provider/`** subdirectory. `node_modules/` isn't shipped, so this is the one step that needs a package registry (everything after it is air-gap-friendly).
+| ArcGIS Server | Package |
+|---|---|
+| 12.0, 12.1 | `databricks-geospatial-provider-12.x.cdpk` |
+| 11.4 and later 11.x | `databricks-geospatial-provider-11.x.cdpk` |
 
-```bash
-cd esri-customdatafeed/nodejs-provider
-npm install
-# Package as a .cdpk (a zip with a different extension). Keep the excludes EXACTLY as written.
-zip -r databricks-geospatial-provider.cdpk \
-  cdconfig.json package.json package-lock.json src/ node_modules/ \
-  -x '.env' '.env.*' 'test/*' '*.md'
+### 2. Add your Databricks connection (`.env`)
+
+Create a text file named `.env` with your workspace's host and a token. The name in brackets is what you'll enter when publishing:
+
+```ini
+[DOD_FE]
+host  = dod-fe.cloud.databricks.com
+token = dapiXXXXXXXX
 ```
 
-> ⚠️ **Don't broaden the excludes to `*.env*`** — it would strip `node_modules` files whose names contain `.env` (a transitive dep of `@databricks/sql`) and the package fails to register.
+Add it to the top level of the package, next to `cdconfig.json`. Don't extract the package and zip it up again; ArcGIS rejects that. Keep this `.env`: you'll add it to every future package when you upgrade.
 
 <details>
-<summary><b>Air-gapped, GovCloud, or a broken <code>npm</code> launcher</b></summary>
+<summary><b>How to add the <code>.env</code> to the package (Windows, macOS, Linux)</b></summary>
 
-- **Build anywhere, run on the server.** The provider has **no *required* native modules** — its one native dep (`lz4`) is optional and the driver runs fine without it — so a `.cdpk` built on any OS/arch loads on the Linux server. For a fully offline box, build the `.cdpk` on any machine with registry access, copy it over, and register it via the GUI or `register-provider.sh` **option 2**.
-- **GovCloud (`.databricks.mil` / `.databricks.us`) + OAuth M2M:** the bundled `@databricks/sql` hardcodes an OAuth domain allowlist and throws `OAuth is not supported for <host>` on GovCloud. Either **use a PAT** (skips OAuth entirely, works unchanged), or let **`register-provider.sh`'s build (option 1)** widen the allowlist automatically (it re-adds `.mil`/`.us` after `npm install` and fails the build if that didn't take). The widening is outbound-only.
-- **`npm` errors with `Cannot find module '../lib/cli.js'`:** the ArcGIS-bundled npm launcher is broken on some installs. Invoke npm through the bundled Node directly (prefix with `sudo -u arcgis` if the binary is owned by `arcgis`):
-  ```bash
-  /opt/arcgis/server/framework/runtime/node/bin/node \
-    /opt/arcgis/server/framework/runtime/node/lib/node_modules/npm/bin/npm-cli.js install
-  ```
+**Windows (File Explorer):**
+1. Turn on *View → Show → File name extensions*.
+2. Rename `databricks-geospatial-provider.cdpk` to `.zip` and open it.
+3. Drag `.env` into the top level, next to `cdconfig.json`. When upgrading, accept the prompt to replace the old one.
+4. Rename it back to `databricks-geospatial-provider.cdpk`.
 
-</details>
+In Notepad, save with *Save as type: All files*, or the file becomes `.env.txt`.
 
-<details>
-<summary><b>Rebuilding an 11.x package</b></summary>
-
-The prebuilt `cdpk/11.x/` package already covers **11.2 → 11.5+**. To rebuild for a custom version, start from the 12.x manifest (`cdconfig.json`) and: set `arcgisVersion` to **`11.2.0`** (the floor — registers across the whole 11.x line), keep the top-level `editingEnabled`, add `properties.hosts: false` + `properties.disableIdParam: true`, and add a `config/default.json` = `{}` file to the zip (the 11.x CDF runtime requires all three; 12.x auto-defaults them). Windows: `windows/build-cdpk.ps1 -ArcgisVersion 11.2` (plus the config/hosts additions). Register the version-matched package on each server — the 11.x manifest is for 11.x servers, the `12.x` package for 12.x.
-
-</details>
-
-### 2. Register the provider
-
-A **one-time** action telling ArcGIS Server the provider exists. Do it in **ArcGIS Server Manager** (no command line, no tokens):
-
-1. Open **ArcGIS Server Manager** → sign in.
-2. **Site (Server Configuration) → Custom Data Feeds → Add Custom Data Provider**.
-3. Browse to `databricks-geospatial-provider.cdpk` and confirm.
-
-The **Name** shown — `databricks-geospatial-provider` — is what Feature Services point at. Then **restart ArcGIS Server** so the code loads.
-
-> ⚠️ **The released package carries no credentials.** Add your `.env` to the `.cdpk` **before** uploading it ([Step 3](#3-configure-the-databricks-connection)), and **restart ArcGIS Server** after every upload, because credentials are read at startup. The publish form only asks for a profile *name*. Without credentials, the service's requests fail with `workspace profile "…" not found` (also in the server log), and ArcGIS may show only `"Service not found"`.
-
-> **Prefer a script?** `sudo bash register-provider.sh` does Build + Register in one wizard (build via option 1, or register an existing `.cdpk` via option 2), auto-detects the install root, updates-vs-registers safely (snapshotting the live provider dir so a failed update can be rolled back), and restarts the server.
->
-> **Opening Server Manager from your laptop?** Its file picker sees only the *browser's* machine — `scp` the `.cdpk` down first, or use the CLI/REST path below.
-
-<details>
-<summary><b>Register without the GUI (CLI / Admin REST API)</b></summary>
-
-**ArcGIS Enterprise SDK `cdf` CLI** — `cdf register databricks-geospatial-provider.cdpk https://your-server:6443/arcgis/admin` (prompts for `siteadmin`; for self-signed certs set `NODE_EXTRA_CA_CERTS`).
-
-**Admin REST API** — `TOKEN` here is an *ArcGIS Server admin token* (not your Databricks token); `client=requestip` binds it to your IP so no `Referer` header is needed:
+**macOS / Linux**, in a terminal in the folder holding both files:
 
 ```bash
-# (a) Mint the admin token (run on the box).
-TOKEN=$(curl -sk -X POST 'https://localhost:6443/arcgis/admin/generateToken?f=json' \
-  --data-urlencode 'username=siteadmin' --data-urlencode 'password=...' \
-  --data-urlencode 'client=requestip' \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
-# (b) Upload the .cdpk — the response contains an itemID.
-curl -k "https://localhost:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
-  -F "itemFile=@databricks-geospatial-provider.cdpk"
-# (c) Register it (first install only; use /update to upgrade).
-curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
-  --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
+zip databricks-geospatial-provider.cdpk .env                                     # adds or replaces .env
+unzip -l databricks-geospatial-provider.cdpk | grep -E ' (cdconfig\.json|\.env)$'   # both should be listed
 ```
+
+(macOS Finder can't add a file to a zip in place. On Linux, install `zip` if it's missing, or do this on your workstation. Windows PowerShell: see [the command-line section](#add-the-env-with-powershell-windows).)
 
 </details>
 
 <details>
-<summary><b>Upgrading or removing the provider later</b></summary>
+<summary><b>Full <code>.env</code> example: several workspaces, service principal, default, settings</b></summary>
 
-Registering an existing name is refused. Rebuild the `.cdpk`, then use the provider's **edit/update** in the GUI, or via REST call `/customdataproviders/update` (same upload → `update` instead of `register`). Restart afterward.
+One `[NAME]` section per Databricks workspace:
+- each has a `host`;
+- plus **either** a `token` (personal access token) **or** a `client_id` + `client_secret` (service principal; recommended for production);
+- an optional `[DEFAULT]` section is used by services published with `-` as the workspace.
 
-**A failed `update` deletes the live provider directory** and your services 404 until a good package is registered — `register-provider.sh` snapshots the dir first so it can roll back. To retire a provider: `/customdataproviders/unregister` with `--data-urlencode "customdataFilename=old-provider-name.cdpk"`.
-
-Registration extracts the `.cdpk` into `<install>/server/framework/runtime/customdata/providers/…` — credentials in `/home/arcgis/.databrickscfg` live outside that dir and survive re-registration.
-
-</details>
-
-### 3. Configure the Databricks connection
-
-**How credentials work.** The provider reads credentials **once, at startup**, from:
-
-1. **A `.env` file inside the `.cdpk`** (recommended). ArcGIS copies the registered package to every machine in the site, so one `.env` reaches all of them.
-2. **A `.databrickscfg` on a machine** (optional). A profile with the same name there **overrides** the `.env` on that machine.
-3. **Environment variables**, for one default workspace only.
-
-The released `.cdpk` is a public download and ships **without** a `.env`: you add your own.
-
-#### 3.1 Create the `.env`
-
-A plain-text file named `.env` with one `[NAME]` section per Databricks workspace, in the same format as `.databrickscfg`:
-- each section has `host`;
-- plus **either** `token` (personal access token) **or** `client_id` + `client_secret` (service principal, OAuth M2M; recommended for production);
-- an optional `[DEFAULT]` section serves services published without a workspace name.
+Single-line `KEY=value` settings go above the first section.
 
 ```ini
 # Optional single-line KEY=value settings go above the first section
@@ -193,90 +116,104 @@ host  = main.cloud.databricks.com
 token = dapiYYYYYYYY
 ```
 
-- Put comments on **their own lines**. A `# note` after `[NAME]` is fine, but `token = x # note` makes `# note` part of the token.
-- Quotes around values are optional. Quote a setting whose value contains `#`.
-- Save as **UTF-8**; a BOM is fine. In Notepad, pick *Save as type: All files* and name it `.env`, or it becomes `.env.txt`.
+- Put comments on **their own lines**: in `token = x # note`, the `# note` becomes part of the token. A `# note` after `[NAME]` is fine.
+- Save as **UTF-8**; a BOM is fine. Quotes around values are optional. Quote a setting whose value contains `#`.
 - A mistyped header such as `[WEST] - prod`, or a stray line inside a section, is an error naming the file and line.
+- Section keys never become environment variables. Only the `KEY=value` lines above the first section do (e.g. `LAKEBASE_PASSWORD`, pool sizes, timeouts; see [Environment variables](#reference)).
 
-#### 3.2 Add the `.env` to the package
+</details>
 
-A `.env` at the **top level** of the `.cdpk` (next to `cdconfig.json`) is loaded when the provider starts.
-- **Update the archive in place.** Don't unzip and re-zip: that adds a parent folder or `__MACOSX` entries, and ArcGIS rejects the package.
-- **Keep the file name** `databricks-geospatial-provider.cdpk`; ArcGIS checks it.
+### 3. Upload it in Server Manager and restart
 
-**Linux / macOS**: put `.env` next to the package, then:
+In **ArcGIS Server Manager** (`https://<server>:6443/arcgis/manager`), go to **Site → Custom Data Feeds → Add Custom Data Provider**, upload `databricks-geospatial-provider.cdpk`, then **restart ArcGIS Server** on every machine in the site.
 
-```bash
-ls databricks-geospatial-provider.cdpk                               # the package must exist first
-zip databricks-geospatial-provider.cdpk .env                         # adds, or replaces an existing .env
-unzip -l databricks-geospatial-provider.cdpk | grep -E ' (cdconfig\.json|\.env)$'   # check: both listed
-```
+<details>
+<summary><b>How to restart, upgrading, and cleaning up the upload</b></summary>
 
-No `zip` on the server? Install it (`sudo apt install zip` or `sudo dnf install zip`), or do this step on your workstation.
+- **Restart:** on Windows, use the *Services* app → **ArcGIS Server** → *Restart*. On Linux, run `sudo systemctl restart arcgisserver` (the unit may be named `arcgis-server`), or, as the `arcgis` user, `stopserver.sh` then `startserver.sh` from the install folder. The provider reads its code and credentials at startup.
+- **Upgrading:** use the provider's **update** in the same place instead of Add.
+- **File picker:** it sees only the machine your browser runs on, so have the `.cdpk` there.
+- **Clean up:** delete the upload so no extra copy of your credentials is kept: Server Administrator (`https://<server>:6443/arcgis/admin`) → *uploads* → the item → *delete*.
 
-**Windows (PowerShell 5.1+)**, in the folder holding both files:
+</details>
 
-```powershell
-Rename-Item databricks-geospatial-provider.cdpk databricks-geospatial-provider.zip
-Compress-Archive -Path .env -DestinationPath databricks-geospatial-provider.zip -Update
-Rename-Item databricks-geospatial-provider.zip databricks-geospatial-provider.cdpk
-# check: both cdconfig.json and .env are listed
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[IO.Compression.ZipFile]::OpenRead("$PWD\databricks-geospatial-provider.cdpk").Entries.FullName -match '^(cdconfig\.json|\.env)$'
-```
+### 4. Publish a feature service
 
-**Windows (File Explorer)**:
-1. Turn on *View → Show → File name extensions*, so you see the real names (otherwise a rename can produce `….cdpk.zip`).
-2. Rename the package to `.zip`.
-3. Open it and drag `.env` into the top level (next to `cdconfig.json`). When upgrading, accept the prompt to replace the existing `.env`.
-4. Rename it back to `.cdpk`.
+> **Note:** published services are readable by anyone who can reach the server unless you restrict them; see [Hardening for Production](#hardening-for-production).
 
-#### 3.3 Upload and restart
+Fill in the form, entering `-` in any field that doesn't apply. For **Workspace Profile**, enter the name in brackets from your `.env` (e.g. `DOD_FE`).
 
-1. Upload the package:
-   - **First install:** Server Manager → Site → Custom Data Feeds → **Add Custom Data Provider** → pick the `.cdpk` ([Step 2](#2-register-the-provider)).
-   - **Upgrade, or a changed `.env`:** use the provider's update in the same place, or `sudo bash register-provider.sh` (Linux) / `windows\register-provider.ps1`. The scripts detect register vs update.
-2. **Restart ArcGIS Server.** Credentials are read at startup.
+**In ArcGIS Server Manager:** **Services → Publish Service → From a registered custom data provider** → pick **databricks-geospatial-provider** → fill the form → **Next** → name → **Publish**.
 
-Server Manager's file picker only sees the machine the browser runs on.
+**In the ArcGIS Enterprise portal** (federated servers): **Content → My content → New item → Feature layer → Use a custom data provider** (menu names can differ slightly between versions) → pick **databricks-geospatial-provider** → fill the form (each field's ⓘ shows a hint) → **Save**.
 
-#### 3.4 Check it
+| Lakehouse (SQL Warehouse) | Lakebase (PostgreSQL, editable) |
+|---|---|
+| ![Publish form filled in for a Lakehouse service](screenshots/10-publish-form-lakehouse.png) | ![Publish form filled in for a Lakebase service](screenshots/11-publish-form-lakebase.png) |
 
-Publish a service ([Step 4](#4-publish-your-feature-services)) with a profile name from your `.env`, e.g. `DOD_FE`, and query it. If the name doesn't resolve, the service's requests fail with `workspace profile "…" not found` plus the list of profiles the provider found; the same line is in the ArcGIS Server log. An empty list means the `.env` isn't in the uploaded package. Old names after an update mean ArcGIS Server wasn't restarted.
+<details>
+<summary><b>Field-by-field examples</b></summary>
 
-#### 3.5 Upgrading later
+| # | Field | Lakehouse service | Lakebase service |
+|---|---|---|---|
+| 1 | Databricks Workspace Profile | `DOD_FE` | `DOD_FE` |
+| 2 | Geometry Column | `geom` | `geom` |
+| 3 | ID Field (unique integer) | `objectid` | `objectid` |
+| 4 | SRID | `4326` | `4326` |
+| 5 | Max Record Count | `2000` | `2000` |
+| 6 | SQL Warehouse HTTP Path | `/sql/1.0/warehouses/a1b2c3d4e5f6a7b8` | `-` |
+| 7 | Table (catalog.schema.table) | `main.geo.cell_towers` | `-` |
+| 8 | Geometry Format | `-` (auto-detect) | `-` |
+| 9 | Time Column | `event_time` | `-` |
+| 10 | Lakebase Host | `-` | `ep-demo.database.us-east-1.cloud.databricks.com` |
+| 11 | Lakebase Port | `-` | `5432` |
+| 12 | Lakebase Database | `-` | `databricks_postgres` |
+| 13 | Lakebase Schema | `-` | `geo_demo` |
+| 14 | Lakebase Table | `-` | `cases_editable` |
+| 15 | Enable Editing (12.0+) | `-` | `true` |
+| 16 | Minimum Scale | `-` | `-` |
 
-Every provider **update replaces the provider folder** with the uploaded package, so the `.env` must be in **every** package you upload:
+- Every field must have a value, which is why `-` exists. For SRID and Max Record Count, `-` gives the defaults (4326, 2000).
+- **Workspace Profile** is case-sensitive; `-` uses `[DEFAULT]`.
+- Set a Lakehouse **Time Column** for any table with history: without one, clients request every date in each map tile.
+- In the portal, you need privileges to create content and publish server-based layers, and item sharing controls who sees the layer.
+
+</details>
+
+### 5. Check it works
+
+Open the service's FeatureServer URL and add `/0/query?where=1=1&returnCountOnly=true&f=json`. A count means it works. Then add the layer to a map in Map Viewer. Errors? See [Troubleshooting](#troubleshooting).
+
+### Upgrading, security and other credential options
+
+**Upgrading.** Every provider update replaces the provider folder with the uploaded package, so the `.env` must be in **every** package you upload:
 1. Keep your `.env` somewhere safe.
-2. Add it to each new `.cdpk` before uploading (3.2).
-3. Upload and restart (3.3).
+2. Add it to each new `.cdpk` (step 2).
+3. Upload it as an **update** and restart (step 3).
 
-Changing a credential means updating the package again.
+**Verifying the download.** Each release file has a `.sha256` next to it. The same packages are also in [`cdpk/12.x`](cdpk/12.x) and [`cdpk/11.x`](cdpk/11.x).
 
-#### 3.6 Security
+Changing a credential works the same way.
 
-With a `.env`, the secrets travel **inside the package**:
-- ArcGIS keeps a copy of the registered package in its config store (`config-store/customdataproviders` or `customdataresources`) and extracts it on every machine. ArcGIS administrators can read it, and it's included in backups.
-- Each upload stays under `arcgisuploads/` until deleted. **Delete each upload once the register or update succeeds** (Server Admin → uploads → item → delete).
+**Security.** With a `.env`, the secrets travel inside the package:
+- ArcGIS keeps a copy of the registered package in its config store and extracts it on every machine. ArcGIS administrators can read it, and it's included in backups.
+- Each upload stays under `arcgisuploads/` until you delete it (step 3, *Clean up*).
 - Provider-folder backups taken before an update still hold the old `.env`.
 
 Use a service principal with only the grants it needs ([Prerequisites](#prerequisites)). To rotate a secret:
 1. Create the new secret.
-2. Upload a package with the new `.env`, restart ArcGIS Server, and check that a service still answers.
-3. Only then **revoke the old secret in Databricks**; old copies may still sit in uploads and backups.
-
-To keep secrets out of the package and ArcGIS's config store, use a per-machine `.databrickscfg` instead (below).
+2. Upload a package with the new `.env`, restart, and check that a service still answers.
+3. Only then **revoke the old secret in Databricks**.
 
 <details>
 <summary><b>Alternative: a <code>.databrickscfg</code> on each machine (keeps secrets out of the package)</b></summary>
 
 The provider also reads a standard `.databrickscfg`, auto-found at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows). Set `DATABRICKS_CONFIG_FILE` only if it lives elsewhere. It has the same `[NAME]` sections as the `.env`. A profile with the same name as a `.env` section **wins on that machine**, which can make machines behave differently.
 
-- **Linux:** `sudo bash configure-databricks.sh` writes it atomically, owned by `arcgis`, mode `600`, keeping existing profiles. The setup wizard's configure step (`sudo bash setup.sh`) writes this file too, so skip that step if you use a `.env` with the same profile names. Or by hand:
+- **Linux:** `sudo bash configure-databricks.sh` writes it owned by `arcgis`, mode `600`, keeping existing profiles. Or by hand:
 
   ```bash
   databricks configure --token          # asks for Host + PAT; writes ~/.databrickscfg [DEFAULT]
-  databricks current-user me            # confirm it works
   sudo cp ~/.databrickscfg /home/arcgis/.databrickscfg
   sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
   sudo chmod 600 /home/arcgis/.databrickscfg
@@ -284,7 +221,7 @@ The provider also reads a standard `.databrickscfg`, auto-found at `/home/arcgis
 
 - **Windows:** `windows\configure-databricks.ps1` writes `C:\ProgramData\ArcGIS\cdf\.databrickscfg`, locked with an `icacls` ACL.
 
-Unlike the `.env`, this file is **per machine**: put it on **every** machine in the site. If only one node has it, the other nodes return intermittent 404s. Restart ArcGIS Server after changes.
+This file is **per machine**: put it on **every** machine in the site, or the others return intermittent 404s. Restart ArcGIS Server after changes.
 
 </details>
 
@@ -338,9 +275,130 @@ Auth is automatic. The provider mints short-lived Lakebase OAuth tokens for both
 
 </details>
 
-### 4. Publish your feature services
+---
 
-**Option A: guided script (Linux).** One `publish-service.sh` run per session; it builds the `createService` payload for you, with no JSON to write and no admin token to mint.
+## Set up from the command line
+
+Everything in [Set up in the browser](#set-up-in-the-browser-recommended) can also be scripted. Credentials work the same way (a `.env` in the package, or a `.databrickscfg` per machine).
+
+### Guided wizard (Linux)
+
+Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install: it prechecks the environment, then opens a menu — for a fresh box choose **option 5 (Full first-time setup)**, which chains **configure → register → publish** (configure first, so the provider reads your credentials when the register step restarts it) using an ArcGIS admin login it collects once.
+
+```bash
+# 0. Get the code onto the ArcGIS Server host (it carries the wizard + the provider source).
+git clone <this-repo-url> && cd esri-customdatafeed
+
+# 1. Run the guided wizard — as ROOT (recommended) or the arcgis user (NOT a plain user).
+sudo bash setup.sh          # opens a menu -> pick 5 (Full first-time setup): configure -> register -> publish
+
+# 2. If a step ever misbehaves, the read-only health check tells you why:
+sudo bash diagnose-service.sh
+
+# 3. Publish more tables later, one wizard per table:
+sudo bash publish-service.sh
+```
+
+`setup.sh`'s Register step **auto-detects a prebuilt `.cdpk`** sitting next to the scripts and registers it — so on any box (including **air-gapped** ones) you can download the release `.cdpk` (or build it on a connected machine), drop it in, and the wizard registers it with no npm/build. Only if no prebuilt is found *and* the box has npm + registry access does it build one for you instead — see [Manual Setup](#build-the-package-from-source). On a **federated** ArcGIS Enterprise it offers Portal-specific guidance under **menu option `F`** (which appears only when a federated Enterprise is detected). For **fully disconnected** environments (no Internet, artifact moved in via an approved path or an internal repo), see **[AIRGAP-INSTALL.md](AIRGAP-INSTALL.md)**.
+
+> **The Databricks CLI** (optional) can write a `.databrickscfg` and helps look up values the publish wizard asks for. Install on the server: `curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh`. *(No internet on the box? It's one static binary — download it elsewhere and copy it onto the `PATH`.)*
+
+> **Running ArcGIS Server on Windows?** These scripts are bash (Linux). Pure-PowerShell ports of the register + configure steps — no Git Bash or WSL needed — live in **[`windows/`](windows/README.md)**. Build the `.cdpk` on Linux or a build box and copy it over; one package runs on any platform.
+
+> **Which user runs what:** your SSH user (e.g. `ubuntu`) runs the **build** (`git`, `npm`, `zip`). But the **`.sh` helper scripts** — `setup.sh`, `register-provider.sh`, `configure-databricks.sh`, `publish-service.sh`, `diagnose-service.sh` — must run as **root (`sudo bash …`)** or the **`arcgis`** user: a plain user can't restart the server or read the mode-600, `arcgis`-owned `/home/arcgis/.databrickscfg`. `sudo -u arcgis` starts/stops the server (it runs as the `arcgis` OS user): `sudo -u arcgis /opt/arcgis/server/startserver.sh`. Files you create under the install tree should be `chown arcgis:arcgis`.
+>
+> **Install root:** Linux defaults to `/opt/arcgis/server/`, but hardened sites often use `/app/arcgis/server/` — check `ls -d /opt/arcgis /app/arcgis 2>/dev/null` and substitute yours. (`setup.sh` and `register-provider.sh` auto-detect `/opt`, `/app`, and home-directory installs; hand-typed commands below do not.)
+
+### Add the `.env` with PowerShell (Windows)
+
+```powershell
+Rename-Item databricks-geospatial-provider.cdpk databricks-geospatial-provider.zip
+Compress-Archive -Path .env -DestinationPath databricks-geospatial-provider.zip -Update
+Rename-Item databricks-geospatial-provider.zip databricks-geospatial-provider.cdpk
+# check: both cdconfig.json and .env are listed
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::OpenRead("$PWD\databricks-geospatial-provider.cdpk").Entries.FullName -match '^(cdconfig\.json|\.env)$'
+```
+
+
+### Build the package from source
+
+Only for a custom version, a code change, or a box that can't download the release.
+
+The provider source lives in the **`nodejs-provider/`** subdirectory. `node_modules/` isn't shipped, so this is the one step that needs a package registry (everything after it is air-gap-friendly).
+
+```bash
+cd esri-customdatafeed/nodejs-provider
+npm install
+# Package as a .cdpk (a zip with a different extension). Keep the excludes EXACTLY as written.
+zip -r databricks-geospatial-provider.cdpk \
+  cdconfig.json package.json package-lock.json src/ node_modules/ \
+  -x '.env' '.env.*' 'test/*' '*.md'
+```
+
+> ⚠️ **Don't broaden the excludes to `*.env*`** — it would strip `node_modules` files whose names contain `.env` (a transitive dep of `@databricks/sql`) and the package fails to register.
+
+<details>
+<summary><b>Air-gapped, GovCloud, or a broken <code>npm</code> launcher</b></summary>
+
+- **Build anywhere, run on the server.** The provider has **no *required* native modules** — its one native dep (`lz4`) is optional and the driver runs fine without it — so a `.cdpk` built on any OS/arch loads on the Linux server. For a fully offline box, build the `.cdpk` on any machine with registry access, copy it over, and register it via the GUI or `register-provider.sh` **option 2**.
+- **GovCloud (`.databricks.mil` / `.databricks.us`) + OAuth M2M:** the bundled `@databricks/sql` hardcodes an OAuth domain allowlist and throws `OAuth is not supported for <host>` on GovCloud. Either **use a PAT** (skips OAuth entirely, works unchanged), or let **`register-provider.sh`'s build (option 1)** widen the allowlist automatically (it re-adds `.mil`/`.us` after `npm install` and fails the build if that didn't take). The widening is outbound-only.
+- **`npm` errors with `Cannot find module '../lib/cli.js'`:** the ArcGIS-bundled npm launcher is broken on some installs. Invoke npm through the bundled Node directly (prefix with `sudo -u arcgis` if the binary is owned by `arcgis`):
+  ```bash
+  /opt/arcgis/server/framework/runtime/node/bin/node \
+    /opt/arcgis/server/framework/runtime/node/lib/node_modules/npm/bin/npm-cli.js install
+  ```
+
+</details>
+
+<details>
+<summary><b>Rebuilding an 11.x package</b></summary>
+
+The prebuilt `cdpk/11.x/` package already covers **11.2 → 11.5+**. To rebuild for a custom version, start from the 12.x manifest (`cdconfig.json`) and: set `arcgisVersion` to **`11.2.0`** (the floor — registers across the whole 11.x line), keep the top-level `editingEnabled`, add `properties.hosts: false` + `properties.disableIdParam: true`, and add a `config/default.json` = `{}` file to the zip (the 11.x CDF runtime requires all three; 12.x auto-defaults them). Windows: `windows/build-cdpk.ps1 -ArcgisVersion 11.2` (plus the config/hosts additions). Register the version-matched package on each server — the 11.x manifest is for 11.x servers, the `12.x` package for 12.x.
+
+</details>
+
+### Register by script or REST
+
+`sudo bash register-provider.sh` does Build + Register in one wizard (build via option 1, or register an existing `.cdpk` via option 2), auto-detects the install root, updates-vs-registers safely (snapshotting the live provider dir so a failed update can be rolled back), and restarts the server.
+
+<details>
+<summary><b>Register without the GUI (CLI / Admin REST API)</b></summary>
+
+**ArcGIS Enterprise SDK `cdf` CLI** — `cdf register databricks-geospatial-provider.cdpk https://your-server:6443/arcgis/admin` (prompts for `siteadmin`; for self-signed certs set `NODE_EXTRA_CA_CERTS`).
+
+**Admin REST API** — `TOKEN` here is an *ArcGIS Server admin token* (not your Databricks token); `client=requestip` binds it to your IP so no `Referer` header is needed:
+
+```bash
+# (a) Mint the admin token (run on the box).
+TOKEN=$(curl -sk -X POST 'https://localhost:6443/arcgis/admin/generateToken?f=json' \
+  --data-urlencode 'username=siteadmin' --data-urlencode 'password=...' \
+  --data-urlencode 'client=requestip' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+# (b) Upload the .cdpk — the response contains an itemID.
+curl -k "https://localhost:6443/arcgis/admin/uploads/upload?token=$TOKEN&f=json" \
+  -F "itemFile=@databricks-geospatial-provider.cdpk"
+# (c) Register it (first install only; use /update to upgrade).
+curl -k "https://localhost:6443/arcgis/admin/services/types/customdataproviders/register?token=$TOKEN&f=json" \
+  --data-urlencode "id=ITEM_ID_FROM_UPLOAD_RESPONSE"
+```
+
+</details>
+
+<details>
+<summary><b>Upgrading or removing the provider later</b></summary>
+
+Registering an existing name is refused. Rebuild the `.cdpk`, then use the provider's **edit/update** in the GUI, or via REST call `/customdataproviders/update` (same upload → `update` instead of `register`). Restart afterward.
+
+**A failed `update` deletes the live provider directory** and your services 404 until a good package is registered — `register-provider.sh` snapshots the dir first so it can roll back. To retire a provider: `/customdataproviders/unregister` with `--data-urlencode "customdataFilename=old-provider-name.cdpk"`.
+
+Registration extracts the `.cdpk` into `<install>/server/framework/runtime/customdata/providers/…` — credentials in `/home/arcgis/.databrickscfg` live outside that dir and survive re-registration.
+
+</details>
+
+### Publish with `publish-service.sh`
+
+One `publish-service.sh` run per session; it builds the `createService` payload for you, with no JSON to write and no admin token to mint.
 
 ```bash
 cd ~/esri-customdatafeed        # the repo root (not nodejs-provider/)
@@ -354,40 +412,6 @@ It runs these steps:
 4. Asks for the warehouse or Lakebase connection **once**, then **loops per table**.
 5. Prompts for **instance sizing** (`min=1`/`max=2` by default, a warm instance per node to avoid the intermittent-404 cold start) and optional **Advanced** visibility/idle settings.
 6. **Creates → starts → verifies** each service, then prints its FeatureServer URL and an anonymous-access probe.
-
-**Option B: by hand in Server Manager (Linux and Windows).**
-
-1. Server Manager → **Services** → **Publish Service** → **From a registered custom data provider** → **Next**.
-2. Pick **databricks-geospatial-provider**.
-3. Fill the 16 fields. **Every field is required**: enter `-` for "not applicable" or "use the default".
-4. **Next** → service name and folder → **Publish**.
-
-The **Workspace Profile** field takes a `[NAME]` from your `.env` (or `.databrickscfg`) exactly as written, case-sensitive. Enter `-` to use `[DEFAULT]`.
-
-| Lakehouse (SQL Warehouse) | Lakebase (PostgreSQL, editable) |
-|---|---|
-| ![Publish form filled in for a Lakehouse service](screenshots/10-publish-form-lakehouse.png) | ![Publish form filled in for a Lakebase service](screenshots/11-publish-form-lakebase.png) |
-
-| # | Field | Lakehouse service | Lakebase service |
-|---|---|---|---|
-| 1 | Databricks Workspace Profile | `DOD_FE` | `DOD_FE` |
-| 2 | Geometry Column | `geom` | `geom` |
-| 3 | ID Field (unique integer) | `objectid` | `objectid` |
-| 4 | SRID | `4326` | `4326` |
-| 5 | Max Record Count | `2000` | `2000` |
-| 6 | SQL Warehouse HTTP Path | `/sql/1.0/warehouses/a1b2c3d4e5f6a7b8` | `-` |
-| 7 | Table (catalog.schema.table) | `main.geo.cell_towers` | `-` |
-| 8 | Geometry Format | `-` (auto-detect) | `-` |
-| 9 | Time Column | `event_time` | `-` |
-| 10 | Lakebase Host | `-` | `ep-demo.database.us-east-1.cloud.databricks.com` |
-| 11 | Lakebase Port | `-` | `5432` |
-| 12 | Lakebase Database | `-` | `databricks_postgres` |
-| 13 | Lakebase Schema | `-` | `geo_demo` |
-| 14 | Lakebase Table | `-` | `cases_editable` |
-| 15 | Enable Editing | `-` | `true` |
-| 16 | Minimum Scale | `-` | `-` |
-
-For SRID and Max Record Count, `-` gives the defaults (4326, 2000). A Lakehouse Time Column is strongly recommended for any table with history: without it, clients request every date in each map tile.
 
 > To script the raw REST call yourself, see [Manual service creation](#reference) under Reference. To publish from a Databricks agent, see [Agent-Driven Publishing](#agent-driven-publishing-mcp).
 
@@ -468,12 +492,14 @@ FROM public.my_table WHERE latitude IS NOT NULL;
 
 ## Troubleshooting
 
+**`workspace profile "…" not found`**, followed by the profiles the provider found: an empty list means the `.env` isn't in the uploaded package; old names after an update mean ArcGIS Server wasn't restarted. Other credential errors are in the table under [Service principal setup, lookup order and troubleshooting](#upgrading-security-and-other-credential-options).
+
 > **Fastest first step: `sudo bash diagnose-service.sh`.** A read-only health check — give it a service name and it reports the provider, service state, `min/max` instances, `tableName`/`idField`/geometry, per-machine instance stats, a live query smoke test, and a plain-English assessment. It flags the common failures automatically (stopped service, `minInstancesPerNode=0` intermittent-404, federated token contract). On a federated server it can mint a Portal token for a definitive query if you give it a Portal login.
 
 <details>
 <summary><b>Register/update fails, or "Cannot find module '../adapters/process.env'"</b></summary>
 
-Your `.cdpk` was built with an overbroad exclude (e.g. `-x '*.env*'`) that stripped `node_modules` files. Rebuild with the exact excludes from [Step 1](#1-build-the-provider-package-cdpk). A failed `update` deletes the live provider dir — upload a good `.cdpk`, run `update` again, restart.
+Your `.cdpk` was built with an overbroad exclude (e.g. `-x '*.env*'`) that stripped `node_modules` files. Rebuild with the exact excludes from [Build the package from source](#build-the-package-from-source). A failed `update` deletes the live provider dir — upload a good `.cdpk`, run `update` again, restart.
 
 </details>
 

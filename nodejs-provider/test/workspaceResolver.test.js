@@ -365,7 +365,7 @@ host = a.example.com
 
     it('parses the README example verbatim (comments after a section header)', () => {
       const readme = fs.readFileSync(path.join(__dirname, '..', '..', 'README.md'), 'utf8');
-      const block = readme.split('#### 3.1 Create the `.env`')[1].split('```ini')[1].split('```')[0];
+      const block = readme.split('Full <code>.env</code> example')[1].split('```ini')[1].split('```')[0];
       writeEnv(block);
       expect(resolver.resolveWorkspace('DOD_FE')).to.include({ authType: 'oauth-m2m' });
       expect(resolver.resolveWorkspace('WEST')).to.include({ authType: 'pat' });
