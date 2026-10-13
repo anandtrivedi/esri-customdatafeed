@@ -233,6 +233,8 @@ const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: 
 const extentInFlight = new Map(); // key -> Promise<{ extent, unknown }> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
 const warnedWorldExtent = new Set(); // tables already warned about advertising the world-extent fallback
+// Request parameters that say nothing about which features to return (output format, auth, JSONP, cache-busters)
+const NON_QUERY_PARAMS = new Set(["f", "token", "callback", "_"]);
 
 // [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / the column is all-NULL /
 // values are non-finite. Guard against SQL NULL first: an empty table or all-NULL column makes min/max return NULL,
@@ -666,11 +668,10 @@ class Model {
       return callback(new Error(`Invalid table name format: expected catalog.schema.table`));
     }
 
-    // Check if this is a metadata-only request
-    const isMetadataRequest =
-      (Object.keys(geoserviceParams).length === 1 &&
-        geoserviceParams.hasOwnProperty("f")) ||
-      Object.keys(geoserviceParams).length === 0;
+    // Check if this is a metadata-only request. Transport parameters don't count: on a secured or federated server
+    // Map Viewer and the JS SDK send layer info as ?f=json&token=..., which used to be treated as a data request
+    // (a full page fetched, no extent computed, the runtime deriving the extent from those rows).
+    const isMetadataRequest = Object.keys(geoserviceParams).every((k) => NON_QUERY_PARAMS.has(k));
 
     // Set fetch size (1 for metadata, capped to configured max for data)
     const fetchSize = isMetadataRequest

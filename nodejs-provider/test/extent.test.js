@@ -128,6 +128,22 @@ describe("Lakehouse metadata extent", function () {
     expect(a.metadata.extent).to.include({ xmin: -80, xmax: -70 });
   });
 
+  it("treats a layer-info request carrying a token as metadata (secured/federated servers)", async () => {
+    // Map Viewer and the JS SDK send ?f=json&token=... for layer info. Counting `token` as a query parameter made it
+    // a data request: a full page fetched, no extent computed, and the runtime derived the extent from those rows.
+    const model = new Model();
+    const res = await getData(model, req("catalog.schema.t1", {}, { token: "abc", callback: "cb", _: "1760000000" }));
+    expect(extentCalls).to.equal(1);
+    expect(res.metadata.extent).to.include({ xmin: -80, xmax: -70 });
+    expect(res.features).to.have.lengthOf(1);
+  });
+
+  it("still treats a query with a token as a data request", async () => {
+    const model = new Model();
+    await getData(model, req("catalog.schema.t1", {}, { token: "abc", where: "1=1" }));
+    expect(extentCalls).to.equal(0);
+  });
+
   it("keeps separate cache entries per table", async () => {
     const model = new Model();
     await getData(model, req("catalog.schema.t1"));

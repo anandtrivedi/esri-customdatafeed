@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (582 tests, ~11s)
+# Run all tests (584 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -132,7 +132,7 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**582 tests across 21 files:**
+**584 tests across 21 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 107 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
@@ -145,7 +145,7 @@ Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `la
 | `workspaceResolver.test.js` | 40 | `.databrickscfg` and `.env` [PROFILE] resolution → workspace + auth config |
 | `translate.test.js` | 18 | Row→GeoJSON, invalid geometry handling, ID casting, antimeridian |
 | `cloudFetch.test.js` | 13 | CloudFetch-off statement options, crash repro regression |
-| `extent.test.js` | 19 | Spatial extent cache/TTLs, de-dupe, own-connection, budget-bounded borrow, detached cleanup, world-extent fallback |
+| `extent.test.js` | 21 | Spatial extent cache/TTLs, de-dupe, own-connection, budget-bounded borrow, detached cleanup, world-extent fallback, token on layer info |
 | `filters.test.js` | 15 | filtersApplied flags, distinct bypass, combined filters |
 | `clientGone.test.js` | 8 | Client-abort cancel, tile timeout, single-response guarantee |
 | `esriGeometry.test.js` | 9 | Esri geometry → GeoJSON conversion |
@@ -259,6 +259,7 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 - **Client WHERE is parenthesized** before the time/geometry/objectId filters are ANDed on (both backends). Unwrapped, `a OR b` let those filters apply to `b` only — on a 28B-row table that was a near-full scan per request, which filled the connection pool and made every service on the box hang.
 - **Metadata extents run in PARALLEL on borrowed connections (v1.1.7)** (`model.js` `getLayerExtent`/`getLayerTimeExtent`): the spatial (`ST_Envelope_Agg`) and time extents used to run sequentially on the request's own connection — two stacked 10 s budgets plus awaited cancel/close round-trips made cold-cache metadata take 15–21 s live. Now each extent borrows its own pooled connection and both run via `Promise.all`, and the ENTIRE path (borrow → statement open → fetch) races `CDF_EXTENT_WAIT_MS` — a queued borrow can't stall the response past the budget (pool-saturation hold-and-wait was the round-1 review's main catch). Cleanup (cancel/close/release) is fire-and-forget (`_releaseExtentConnection`); a failed `close()` releases with `{destroy: true}` so a session in unknown state is never recycled. A spatial-extent timeout negatively caches for `CDF_EXTENT_RETRY_MS` (1 h) and, if the borrow was still queued, the late-granted connection skips opening the statement (`abandoned` flag) and just returns to the pool. Success caches 24 h (`CDF_EXTENT_CACHE_MS`); non-timeout errors 1 min (`CDF_EXTENT_ERROR_RETRY_MS`). Concurrent cold-cache requests share one in-flight query per cache key (so a burst costs at most one extra connection per extent per table). Cache keys include the pool identity (workspace|warehouse). Cancelled ops' `fetchAll()` rejections are sunk (`.catch`) to avoid unhandled rejections.
 - **World-extent fallback** (v1.1.8): when the spatial extent timed out or failed (cache entry `unknown: true`), metadata advertises the whole world in the table's WKID (4326: ±180/±90; 3857/102100/102113/900913: ±20037508.34) instead of omitting `extent`. Omitted, the runtime derives the extent from the response's few rows (seen live: a global 28B-row table advertised one point in Hawaii, so "Zoom to layer" landed there). Applied only at metadata assembly, never cached, so the hourly retry still replaces it with the real extent. Not used for other WKIDs (no meaningful world box), for a table whose aggregate answered NULL (known-empty), or on query responses.
+- **Metadata vs data requests** (v1.2.0, `NON_QUERY_PARAMS` in `model.js`): a request is metadata when every query parameter is `f`, `token`, `callback` or `_`. Before 1.2.0 any second parameter made it a data request, so on a secured or federated server (`?f=json&token=...` from Map Viewer/JS SDK) layer info fetched a full page (15,000 rows from the 28B-row table), computed no extent, and the runtime advertised a box derived from those rows. Seen live on 34.x; anonymous clients and header tokens (`X-Esri-Authorization`) were unaffected, which is why earlier checks passed.
 - **PBF always on** (v1.1.5): `supportedQueryFormats` is never set, so the runtime advertises `JSON,geojson,PBF`. Verified on 12.1.0 (correct quantization transform, same features as JSON). The old `enablePbf` parameter was removed from `cdconfig.json` — verified live that services which had it stored still load (ArcGIS ignores the now-undeclared value), so nothing in `model.js` reads it.
 - **Time extent** (v1.1.5, reworked v1.1.7): `timeInfo.timeExtent` = min/max of `timeColumn`, cached/de-duped/time-boxed. When it exceeds `CDF_EXTENT_WAIT_MS` the SAME query keeps running in the background on its dedicated borrowed connection (up to `CDF_TIME_EXTENT_BG_MS` = 120 s) — it is NOT cancelled and re-run; only a query that also blows the background cap is cancelled and negatively cached for 1 h. Without a `timeColumn`, Map Viewer requests all dates per tile — the wizard pushes publishers to set one; the provider logs a one-time warning.
 - **CloudFetch off** (`statementOptions()` in `model.js`): every `executeStatement` passes `useCloudFetch: false` unless `DATABRICKS_USE_CLOUDFETCH=true`. With it on, a host that can't reach the workspace's storage gets a 403 per download, and @databricks/sql 1.12.0's `CloudFetchResultHandler.fetchNext()` awaits only the first of up to 10 concurrent downloads; the rest reject unhandled and Node exits the whole CDF process (seen 2026-10-07; `testing/repro-cloudfetch-unhandled.js`). Per statement on purpose: the 1.12.0 `DBSQLClient` constructor ignores a config argument. Driver pinned to exactly 1.12.0. Measured from a laptop: CDF-sized pages (≤50K rows) never used CloudFetch; inline was as fast at 300K–1M rows (`testing/live-cloudfetch-check.js`).
