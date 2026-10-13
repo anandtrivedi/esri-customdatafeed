@@ -20,7 +20,7 @@ case "${1:-}" in
   -h|--help)
     echo "setup.sh — guided front door for the Databricks CDF provider on ArcGIS Server."
     echo "  Run on the box: sudo bash setup.sh"
-    echo "  Detects state (provider / .databrickscfg / services / federation / install root), guides"
+    echo "  Detects state (provider / credentials / services / federation / install root), guides"
     echo "  fixes, then routes to register-provider.sh / configure-databricks.sh / publish-service.sh /"
     echo "  diagnose-service.sh — collecting the ArcGIS admin login once. Read-only until you pick an action."
     exit 0 ;;
@@ -42,18 +42,28 @@ fi
 PASSFILE=""; _INT=0
 _cleanup() { [ -n "$PASSFILE" ] && rm -f "$PASSFILE"; }
 trap _cleanup EXIT
-trap 'exit 143' TERM
+trap 'stty echo 2>/dev/null; exit 143' TERM
 # Ctrl-C sets a flag (checked at the menu) so it returns to the menu rather than killing setup;
 # a child script's own INT trap exits the child. stty echo guards a Ctrl-C during a hidden read.
 trap 'stty echo 2>/dev/null; _INT=1; echo; echo "(interrupted)"' INT
 
+# A failed read is Ctrl-C (the INT trap set _INT) or a closed stdin. Inside a menu action, Ctrl-C returns
+# an empty answer and status 1 so the action stops and setup goes back to the menu; anywhere else it exits.
+_read_failed() {
+  if [ "$_INT" = "1" ]; then
+    _INT=0
+    [ "${IN_MENU:-0}" = "1" ] && return 1
+    echo "!! Interrupted — exiting." >&2; exit 130
+  fi
+  echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130
+}
 ask() {
   local prompt="$1" def="$2" __var="$3" ans=""
   if [ -n "$def" ]; then
-    if ! read -r -p "  $prompt [$def]: " ans; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+    if ! read -r -p "  $prompt [$def]: " ans; then printf -v "$__var" '%s' ""; _read_failed; return 1; fi
     ans="${ans:-$def}"
   else
-    if ! read -r -p "  $prompt: " ans; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi
+    if ! read -r -p "  $prompt: " ans; then printf -v "$__var" '%s' ""; _read_failed; return 1; fi
   fi
   printf -v "$__var" '%s' "$ans"
 }
@@ -64,7 +74,7 @@ print($2)" 2>/dev/null || true; }
 ask_int() {   # prompt default varname lo hi
   local _p="$1" _d="$2" _v="$3" _lo="$4" _hi="$5" _x=""
   while :; do
-    ask "$_p" "$_d" _x
+    ask "$_p" "$_d" _x || return 1
     if printf '%s' "$_x" | grep -qE '^[0-9]+$' && [ "$_x" -ge "$_lo" ] && [ "$_x" -le "$_hi" ]; then printf -v "$_v" '%s' "$_x"; return; fi
     echo "   !! enter a whole number between $_lo and $_hi."
   done
@@ -92,7 +102,7 @@ _ahome=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
 [ -n "${HOME:-}" ] && _cands+=("$HOME" "$HOME/arcgis")
 for _c in "${_cands[@]}"; do
   { [ -e "$_c/server/startserver.sh" ] || [ -d "$_c/server/framework/runtime/node" ]; } || continue
-  case " ${_found[*]} " in *" $_c "*) ;; *) _found+=("$_c") ;; esac   # dedupe
+  case " ${_found[*]:-} " in *" $_c "*) ;; *) _found+=("$_c") ;; esac   # dedupe
 done
 if [ "${#_found[@]}" -eq 1 ]; then ARCGIS_ROOT="${_found[0]}"
 elif [ "${#_found[@]}" -gt 1 ]; then ARCGIS_ROOT="${_found[0]}"; ROOT_AMBIGUOUS=1; fi
@@ -104,8 +114,11 @@ if [ "$PRIV" = "limited" ]; then
   echo "     [warn] not root and can't sudo to arcgis — Register / Full install (which restart the"
   echo "            server) will fail. Re-run with: sudo bash setup.sh"
 fi
-if [ -n "$ARCGIS_ROOT" ]; then
-  echo "  ArcGIS install    : $ARCGIS_ROOT${ROOT_AMBIGUOUS:+  [warn] both /opt and /app exist — using $ARCGIS_ROOT; override below if wrong]}"
+if [ -n "${ROOT_AMBIGUOUS:-}" ]; then
+  echo "  ArcGIS install    : [warn] several installs found: ${_found[*]}"
+  ask "ArcGIS install root to use (dir containing server/)" "$ARCGIS_ROOT" ARCGIS_ROOT
+elif [ -n "$ARCGIS_ROOT" ]; then
+  echo "  ArcGIS install    : $ARCGIS_ROOT"
 else
   echo "  ArcGIS install    : [warn] not found under /opt/arcgis, /app/arcgis, or the arcgis user's home"
   ask "ArcGIS install root (dir containing server/)" "/opt/arcgis" ARCGIS_ROOT
@@ -122,26 +135,44 @@ echo "  build/CLI tools   : $_tool_report"
 command -v databricks >/dev/null 2>&1 || echo "     [info] Databricks CLI absent — optional; it enables warehouse/column auto-detect and grant help."
 command -v npm >/dev/null 2>&1 || echo "     [info] npm absent — you can't BUILD a .cdpk here; register a prebuilt one (register-provider.sh option 2)."
 
-# .databrickscfg local checks (existence / owner / perms) — no login needed. In a function so
-# re-detection after 'Configure' reflects the new state (existence AND owner/perms, not just presence).
+# Credentials — local checks, no login needed. The recommended source is a .env with [NAME] sections inside
+# the .cdpk (installed into the provider folder); a per-machine .databrickscfg is the alternative and wins on
+# a name clash. In a function so re-detection after Configure/Register reflects the new state.
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
-CFG_STATE="absent"
+CFG_STATE="absent"; ENV_PROFILES=""
+# Profile NAMES (never values) from the installed provider .env files, matching the provider's own header rule.
+env_profile_names() {
+  python3 - "$SERVER_DIR/framework/runtime/customdata/providers/$EXPECTED_PROVIDER/.env" <<'PY' 2>/dev/null
+import re, sys
+for f in sys.argv[1:]:
+    try: text = open(f, encoding="utf-8-sig").read()
+    except OSError: continue
+    for line in text.splitlines():
+        m = re.match(r"^\[([^\]]+)\]\s*(?:[#;].*)?$", line.strip())
+        if m: print(m.group(1).strip())
+PY
+}
 check_config() {
+  ENV_PROFILES=$(env_profile_names | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
   if [ -f "$CFG" ]; then
     local o p; o=$(stat -c '%U' "$CFG" 2>/dev/null || stat -f '%Su' "$CFG" 2>/dev/null); p=$(stat -c '%a' "$CFG" 2>/dev/null || stat -f '%Lp' "$CFG" 2>/dev/null)
     if [ "$o" = "arcgis" ] && { [ "$p" = "600" ] || [ "$p" = "400" ]; }; then CFG_STATE="ok"; CFG_DETAIL="$CFG (owner $o, mode $p)"
     else CFG_STATE="badperms"; CFG_DETAIL="$CFG (owner ${o:-?}, mode ${p:-?})"; CFG_OWNER="$o"; CFG_PERMS="$p"; fi
+  elif [ -n "$ENV_PROFILES" ]; then CFG_STATE="env"; CFG_DETAIL="from the provider's .env: $ENV_PROFILES"
   else CFG_STATE="absent"; CFG_DETAIL="not found at $CFG"; fi
 }
 check_config
+[ -n "$ENV_PROFILES" ] && echo "  credentials       : provider .env profiles: $ENV_PROFILES [ok]"
 if [ "$CFG_STATE" = "ok" ]; then echo "  .databrickscfg    : $CFG_DETAIL [ok]"
+elif [ "$CFG_STATE" = "env" ]; then echo "  .databrickscfg    : none on this machine (not needed: credentials come from the provider's .env)"
 elif [ "$CFG_STATE" = "badperms" ]; then
   echo "  .databrickscfg    : $CFG_DETAIL [WARN]"
   [ "${CFG_OWNER:-}" != "arcgis" ] && echo "     -> the provider runs as arcgis and can't read this. Fix: sudo chown arcgis:arcgis $CFG"
   { [ "${CFG_PERMS:-}" != "600" ] && [ "${CFG_PERMS:-}" != "400" ]; } && echo "     -> tighten perms: sudo chmod 600 $CFG"
 else
-  echo "  .databrickscfg    : not found at $CFG  [needs setup]"
-  echo "     -> choose 'Configure the Databricks connection' below."
+  echo "  credentials       : none found  [needs setup]"
+  echo "     -> choose 'Create the Databricks credentials' below (it writes a .env for the package),"
+  echo "        then Register; or add a .env to the .cdpk by hand (README step 2)."
 fi
 
 # --- collect the ArcGIS admin login ONCE (needed for the server-side checks) -----
@@ -158,6 +189,7 @@ ask "URL context (arcgis for :6443; the web-adaptor name otherwise)" "arcgis" AD
 ask "Admin username" "siteadmin" ADMIN_USER
 trap 'stty echo 2>/dev/null; _INT=1' INT
 if ! read -r -s -p "  Admin password: " _pw; then stty echo 2>/dev/null; echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi; echo
+trap 'stty echo 2>/dev/null; _INT=1; echo; echo "(interrupted)"' INT   # back to the menu-level handler
 PASSFILE=$(mktemp); chmod 600 "$PASSFILE"; printf '%s' "$_pw" > "$PASSFILE"; unset _pw
 # Export the handoff so child scripts skip their own connection prompts.
 export CDF_ADMIN_URL="$ADMIN_URL" CDF_ADMIN_CTX="$ADMIN_CTX" CDF_ADMIN_USER="$ADMIN_USER" CDF_ADMIN_PASSFILE="$PASSFILE"
@@ -208,7 +240,7 @@ print('ok:'+' '.join(n))" 2>/dev/null)
   sresp=$("${CURL[@]}" --max-time 20 "$ADMIN_URL/$ADMIN_CTX/admin/services" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
   local cnt
   cnt=$(RESP="$sresp" ADMIN_URL="$ADMIN_URL" ADMIN_CTX="$ADMIN_CTX" TOKEN="$TOKEN" python3 <<'PY' 2>/dev/null
-import os,json,urllib.request,ssl
+import os,json,urllib.request,urllib.parse,ssl
 base=os.environ['ADMIN_URL']+'/'+os.environ['ADMIN_CTX']+'/admin/services'; tok=os.environ['TOKEN']
 ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
 def count(js):
@@ -222,7 +254,7 @@ n=count(root)
 for f in root.get('folders',[]) or []:
     if f in ('System','Utilities'): continue
     try:
-        req=urllib.request.Request(base+'/'+f+'?token='+tok+'&f=json')
+        req=urllib.request.Request(base+'/'+f, data=urllib.parse.urlencode({'token':tok,'f':'json'}).encode())
         n+=count(json.loads(urllib.request.urlopen(req,context=ctx,timeout=15).read().decode()))
     except Exception: pass
 print('ok:%d'%n)
@@ -250,7 +282,11 @@ print_state() {
     standalone)echo "  server topology   : standalone";;
     *)         echo "  server topology   : unknown";;
   esac
-  echo "  Databricks config : $CFG_STATE $( [ "$CFG_STATE" = ok ] && echo '[ok]' || echo '[needs attention — see Tier 1 above]')"
+  case "$CFG_STATE" in
+    ok)  echo "  credentials       : .databrickscfg [ok]${ENV_PROFILES:+  (+ provider .env: $ENV_PROFILES)}";;
+    env) echo "  credentials       : provider .env ($ENV_PROFILES) [ok]";;
+    *)   echo "  credentials       : $CFG_STATE [needs attention — see Tier 1 above]";;
+  esac
 }
 
 # child runner: inherits the terminal; treat ANY exit as "re-detect + back to menu". On failure it
@@ -268,8 +304,8 @@ run_child() {   # $1 = script name (relative to SCRIPT_DIR), rest = args
   else
     local ref
     case "$s" in
-      configure-databricks.sh) ref="README - 'Configure the Databricks connection'";;
-      register-provider.sh)    ref="README - 'Register the provider'";;
+      configure-databricks.sh) ref="README - 'Alternative: a .databrickscfg on each machine'";;
+      register-provider.sh)    ref="README - 'Upload it in Server Manager and restart'";;
       publish-service.sh)      ref="README - 'Publish a feature service'";;
       diagnose-service.sh)     ref="README - 'Troubleshooting'";;
       *)                       ref="the matching section in the repo README";;
@@ -284,9 +320,11 @@ run_child() {   # $1 = script name (relative to SCRIPT_DIR), rest = args
 # Re-enter the ArcGIS admin login mid-session (e.g. after a wrong password) — rewrites the passfile.
 relogin() {
   echo "== Re-enter ArcGIS admin login =="
-  ask "Admin URL" "$ADMIN_URL" ADMIN_URL
-  ask "URL context" "$ADMIN_CTX" ADMIN_CTX
-  ask "Admin username" "$ADMIN_USER" ADMIN_USER
+  local _u="$ADMIN_URL" _c="$ADMIN_CTX" _n="$ADMIN_USER"
+  ask "Admin URL" "$ADMIN_URL" _u || return
+  ask "URL context" "$ADMIN_CTX" _c || return
+  ask "Admin username" "$ADMIN_USER" _n || return
+  ADMIN_URL="$_u"; ADMIN_CTX="$_c"; ADMIN_USER="$_n"
   trap 'stty echo 2>/dev/null; _INT=1' INT
   if ! read -r -s -p "  Admin password: " _pw; then stty echo 2>/dev/null; echo; echo "(cancelled)"; trap 'stty echo 2>/dev/null; _INT=1; echo; echo "(interrupted)"' INT; return; fi; echo
   trap 'stty echo 2>/dev/null; _INT=1; echo; echo "(interrupted)"' INT
@@ -309,10 +347,10 @@ wait_server_ready() {
 # --- private/public toggle (reuses the esriEveryone permission lever) ------------
 toggle_privacy() {
   local svc mode principal isallowed
-  ask "Service name to change (folder/name if foldered)" "" svc
+  ask "Service name to change (folder/name if foldered)" "" svc || return
   [ -n "$svc" ] || { echo "  (no service name — skipped)"; return; }
   echo "  1) make PRIVATE (deny anonymous 'esriEveryone')   2) make PUBLIC (allow anonymous)"
-  ask "  choose 1-2" "1" mode
+  ask "  choose 1-2" "1" mode || return
   case "$mode" in 2) isallowed="true";; *) isallowed="false";; esac
   mint_admin_token
   local resp st
@@ -346,7 +384,7 @@ toggle_privacy() {
 # intermittent-404 or tune warm capacity on an already-published service.
 edit_sizing() {
   local svc cur found cmin cmax cidle nmin nmax nidle newjson resp st
-  ask "Service name to resize (folder/name if foldered)" "" svc
+  ask "Service name to resize (folder/name if foldered)" "" svc || return
   [ -n "$svc" ] || { echo "  (no service name — skipped)"; return; }
   mint_admin_token
   cur=$("${CURL[@]}" --max-time 30 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
@@ -354,9 +392,9 @@ edit_sizing() {
   [ "$found" = "yes" ] || { echo "  !! service '$svc' not found (or unreadable): $(jget "$cur" 'd.get("messages") or (d.get("error") or {}).get("message") or "?"')"; return; }
   cmin=$(jget "$cur" 'd.get("minInstancesPerNode")'); cmax=$(jget "$cur" 'd.get("maxInstancesPerNode")'); cidle=$(jget "$cur" 'd.get("maxIdleTime")')
   echo "  current: minInstancesPerNode=$cmin  maxInstancesPerNode=$cmax  maxIdleTime=${cidle}s"
-  ask_int "new min instances per node (0 = shared pool; 1+ keeps a warm instance)" "${cmin:-1}" nmin 0 50
-  while :; do ask_int "new max instances per node (>= min, at least 1)" "${cmax:-2}" nmax 1 100; [ "$nmax" -ge "$nmin" ] && break; echo "   !! max must be >= min ($nmin)."; done
-  ask_int "maxIdleTime seconds (how long a warm instance survives idle)" "${cidle:-1800}" nidle 60 86400
+  ask_int "new min instances per node (0 = shared pool; 1+ keeps a warm instance)" "${cmin:-1}" nmin 0 50 || return
+  while :; do ask_int "new max instances per node (>= min, at least 1)" "${cmax:-2}" nmax 1 100 || return; [ "$nmax" -ge "$nmin" ] && break; echo "   !! max must be >= min ($nmin)."; done
+  ask_int "maxIdleTime seconds (how long a warm instance survives idle)" "${cidle:-1800}" nidle 60 86400 || return
   # Modify the FULL service JSON and POST it back to /edit (the endpoint replaces the definition).
   newjson=$(CUR="$cur" NMIN="$nmin" NMAX="$nmax" NIDLE="$nidle" python3 -c "
 import os,json
@@ -366,6 +404,7 @@ for k in ('status','permissions','iteminfo'):    # drop read-only echoes the edi
 d['minInstancesPerNode']=int(os.environ['NMIN']); d['maxInstancesPerNode']=int(os.environ['NMAX']); d['maxIdleTime']=int(os.environ['NIDLE'])
 print(json.dumps(d))" 2>/dev/null)
   [ -n "$newjson" ] || { echo "  !! could not build the edited definition."; return; }
+  echo "  note: applying this usually restarts '$svc' (a brief interruption for its users)."
   echo "  applying: min=$nmin max=$nmax maxIdleTime=${nidle}s ..."
   resp=$("${CURL[@]}" --max-time 60 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/edit" \
     --data-urlencode "service=$newjson" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
@@ -394,9 +433,11 @@ federated_help() {
   echo "     server admin token this tool mints). Either:"
   echo "     a) In Portal ($FED_URL): Content > find the service item > open it > add to a new Map."
   echo "        If the layer draws, the service works."
-  echo "     b) Or mint a Portal token and query with it (run on the box; use a PORTAL account):"
+  echo "     b) Or mint a Portal token and query with it (run on the box; use a PORTAL account)."
+  echo "        The password goes in a 600 file, not on the command line:"
+  echo "        (umask 077; read -r -s -p 'Portal password: ' P; echo; printf '%s' \"\$P\" > ~/portal.pass)"
   echo "        PT=\$(curl -sk '$FED_URL/sharing/rest/generateToken' \\"
-  echo "              --data-urlencode 'username=<portalUser>' --data-urlencode 'password=<pw>' \\"
+  echo "              --data-urlencode 'username=<portalUser>' --data-urlencode \"password@\$HOME/portal.pass\" \\"
   echo "              --data-urlencode 'referer=$FED_URL' --data-urlencode 'f=json' \\"
   echo "              | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"token\"])')"
   echo "        curl -sk '$ADMIN_URL/$ADMIN_CTX/rest/services/<svc>/FeatureServer/0/query' \\"
@@ -415,25 +456,26 @@ federated_help() {
 detect
 while true; do
   print_state
-  # state-adaptive default: not fully ready -> full install; provider registered AND config ok -> publish
+  # state-adaptive default: not fully ready -> full install; provider registered AND credentials found -> publish
   DEF="1"
-  { [ "$PROV_STATE" != "yes" ] || [ "$CFG_STATE" != "ok" ]; } && DEF="5"
+  { [ "$PROV_STATE" != "yes" ] || { [ "$CFG_STATE" != "ok" ] && [ "$CFG_STATE" != "env" ]; }; } && DEF="5"
   # Options 2/3/5 change the box and need root or the arcgis user.
   local_note=""; [ "$PRIV" = "limited" ] && local_note="  [needs root/arcgis — re-run with sudo]"
   echo
   echo "== What would you like to do? =="
   echo "  1) Publish a table as a new feature service   $( [ "$PROV_STATE" != yes ] && echo '(needs the provider registered first)')"
-  echo "  2) Configure the Databricks connection (.databrickscfg)$local_note"
+  echo "  2) Create the Databricks credentials (a .env for the package; or a per-machine .databrickscfg)"
   echo "  3) Register / update the CDF provider$local_note"
   echo "  4) Diagnose a feature service (read-only)"
-  echo "  5) Full first-time setup (configure -> register -> publish)$local_note"
+  echo "  5) Full first-time setup (credentials -> register -> publish)$local_note"
   echo "  6) Make an existing service private / public"
-  echo "  9) Change a service's instance sizing (min/max/idle) — no republish"
-  echo "  7) Re-run detection      8) Re-enter the ArcGIS admin login$( [ "$FED_STATE" = federated ] && echo '      F) Federated: how to verify / lock down a service' )"
+  echo "  7) Change a service's instance sizing (min/max/idle) — no republish"
+  echo "  8) Re-run detection      9) Re-enter the ArcGIS admin login$( [ "$FED_STATE" = federated ] && echo '      F) Federated: how to verify / lock down a service' )"
+  echo "  (Recommended credentials: a .env with [NAME] sections inside the .cdpk, added before Register — README step 2.)"
   echo "  q) Quit"
   echo "  (Any step failing? Each maps to a script you can run directly — see the message it prints —"
   echo "   and to a matching manual step in the repo README.)"
-  _INT=0
+  _INT=0; IN_MENU=1
   if ! read -r -p "  choose [$DEF]: " CHOICE; then
     if [ "$_INT" = "1" ]; then _INT=0; echo; continue; fi   # Ctrl-C -> redraw the menu
     break                                                    # real EOF (closed stdin) -> quit
@@ -441,23 +483,30 @@ while true; do
   CHOICE="${CHOICE:-$DEF}"
   case "$CHOICE" in
     1) run_child publish-service.sh || true; detect ;;
-    2) if [ "$PRIV" = "limited" ]; then echo "  !! Configure writes /home/arcgis/.databrickscfg as arcgis — needs root/arcgis. Re-run with sudo."; else run_child configure-databricks.sh || true; fi; detect ;;
+    2) run_child configure-databricks.sh || true; detect ;;   # its .databrickscfg option checks root/arcgis itself
     3) if [ "$PRIV" = "limited" ]; then echo "  !! Register restarts the server — needs root/arcgis. Re-run with sudo."; else run_child register-provider.sh || true; fi; detect ;;
     4) run_child diagnose-service.sh || true; detect ;;
     5)
        if [ "$PRIV" = "limited" ]; then echo "  !! Full install needs root/arcgis (writes config, restarts the server). Re-run with sudo."; continue; fi
        echo; echo "== Full first-time setup =="
-       echo "  Order matters: configure the connection BEFORE registering, so the provider reads it"
-       echo "  when it restarts (it caches .databrickscfg at first read)."
-       run_child configure-databricks.sh || { echo "-> configure step did not complete — chain stopped. Fix it (or do Step 3 manually per the README), then re-run."; detect; continue; }
-       run_child register-provider.sh   || { echo "-> register step did not complete — chain stopped. Fix it (or do Step 2 manually per the README), then re-run."; detect; continue; }
+       echo "  Order: create the credentials (.env), then Register puts that .env inside the package"
+       echo "  and restarts the server (the provider reads credentials once, at startup), then Publish."
+       if [ -n "$ENV_PROFILES" ]; then
+         echo "  -> the provider already has a .env ($ENV_PROFILES) — skipping the credentials step."
+         echo "     (Register offers it again: a NEW .cdpk must contain the .env.)"
+       else
+         run_child configure-databricks.sh || { echo "-> configure step did not complete — chain stopped. Fix it (or follow the README), then re-run."; detect; continue; }
+       fi
+       export CDF_RESTART_DEFAULT=y   # publish (next) needs the provider restarted with the new package
+       run_child register-provider.sh   || { unset CDF_RESTART_DEFAULT; echo "-> register step did not complete — chain stopped. Fix it (or register in Server Manager per the README), then re-run."; detect; continue; }
+       unset CDF_RESTART_DEFAULT
        wait_server_ready || echo "   (continuing anyway — publish will retry the query)"
-       run_child publish-service.sh      || echo "-> publish did not complete — run publish-service.sh again, or see the README's Step 4."
+       run_child publish-service.sh      || echo "-> publish did not complete — run publish-service.sh again, or publish in Server Manager (README step 4)."
        detect ;;
     6) toggle_privacy; detect ;;
-    9) edit_sizing; detect ;;
-    7) detect ;;
-    8) relogin; detect ;;
+    7) edit_sizing; detect ;;
+    8) detect ;;
+    9) relogin; detect ;;
     F|f) federated_help ;;
     q|Q|quit|exit) break ;;
     *) echo "  (unrecognized choice)";;

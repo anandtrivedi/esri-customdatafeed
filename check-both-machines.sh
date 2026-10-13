@@ -141,7 +141,7 @@ echo
 
 # --- enumerate site machines ----------------------------------------------------
 echo "-- Site machines --"
-MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines?token=$TOKEN&f=json")
+MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 MACHINES=$(jget "$MRESP" '"\n".join((m.get("machineName") or "") for m in d.get("machines",[]) if m.get("machineName"))')
 MCOUNT=$(printf '%s\n' "$MACHINES" | grep -c . || true)
 echo "  count: ${MCOUNT:-0}"
@@ -171,11 +171,12 @@ probe_machine() {   # $1 = machineName -> prints "code|detail"
   base="https://$mc:6443/$CTX"
   # Is the machine's admin API reachable at all on :6443?
   # curl already prints 000 on a failed connection; `|| echo 000` would append a second one (000000).
-  r=$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$base/rest/info?f=json" 2>/dev/null || true); r="${r:-000}"
+  # --noproxy '*': these probes must hit each machine directly, never via an ambient HTTPS_PROXY.
+  r=$("${CURL[@]}" --noproxy '*' -o /dev/null -w '%{http_code}' "$base/rest/info?f=json" 2>/dev/null || true); r="${r:-000}"
   if [ "$r" = "000" ]; then echo "unreachable|:6443 not reachable from this box (DNS/SG/host firewall?) — run the on-disk check on $mc directly"; return; fi
   # Direct read-only /query against THIS machine.
   local q
-  q=$("${CURL[@]}" -G -H "Referer: $QREF" \
+  q=$("${CURL[@]}" --noproxy '*' -G -H "Referer: $QREF" \
       "$base/rest/services/$SVC/FeatureServer/0/query" \
       --data-urlencode "where=1=1" --data-urlencode "resultRecordCount=1" \
       --data-urlencode "returnGeometry=false" \
@@ -224,10 +225,13 @@ done
 if [ "$have_404" = "1" ] && { [ "$have_ok" = "1" ] || [ "$have_500" = "1" ]; }; then
   echo " * ASYMMETRY DETECTED — at least one machine 404s the query while another does not."
   echo "   That is the classic 'provider live on one node, MISSING/STALE on another' — a round-robin"
-  echo "   web adaptor then 404s ~half the requests. Machines that returned [404] need the provider."
-  echo "   -> FIX on each 404 machine: register/update the SAME .cdpk there and restart THAT server:"
-  echo "        sudo bash register-provider.sh        # choose option 2 (register existing .cdpk)"
+  echo "   web adaptor then 404s ~half the requests. Machines that returned [404] need attention."
+  echo "   -> FIX on each 404 machine: the registered package is distributed site-wide, so first"
+  echo "      RESTART ArcGIS Server on THAT machine so it reloads it:"
   echo "        sudo -u <arcgis-user> <install>/server/stopserver.sh && .../startserver.sh"
+  echo "      Credentials: rely on the .env inside the package, or put the same .databrickscfg on that"
+  echo "      machine. Still 404 after a restart? UPDATE the provider with the correct .cdpk"
+  echo "      (sudo bash register-provider.sh — it's a site-wide update)."
 elif [ "$have_ok" = "1" ] && [ "$have_404" = "0" ] && [ "$have_500" = "0" ]; then
   echo " * All reachable machines returned data — provider parity looks GOOD across the site."
   echo "   If you still see intermittent 404s, look elsewhere (min/max instances, warehouse"

@@ -232,7 +232,7 @@ Use a service principal with only the grants it needs ([Prerequisites](#prerequi
 
 The provider also reads a standard `.databrickscfg`, auto-found at `/home/arcgis/.databrickscfg` (Linux) or `%ProgramData%\ArcGIS\cdf\.databrickscfg` (Windows). Set `DATABRICKS_CONFIG_FILE` only if it lives elsewhere. It has the same `[NAME]` sections as the `.env`. A profile with the same name as a `.env` section **wins on that machine**, which can make machines behave differently.
 
-- **Linux:** `sudo bash configure-databricks.sh` writes it owned by `arcgis`, mode `600`, keeping existing profiles. Or by hand:
+- **Linux:** `sudo bash configure-databricks.sh`, option 2, writes it owned by `arcgis`, mode `600`, keeping existing profiles. (Its default, option 1, writes the `.env` for the package instead.) Or by hand:
 
   ```bash
   databricks configure --token          # asks for Host + PAT; writes ~/.databrickscfg [DEFAULT]
@@ -308,18 +308,21 @@ Auth is automatic. The provider mints short-lived Lakebase OAuth tokens for both
 
 ## Set up from the command line
 
-Everything in [Set up in the browser](#set-up-in-the-browser-recommended) can also be scripted. Credentials work the same way (a `.env` in the package, or a `.databrickscfg` per machine).
+Everything in [Set up in the browser](#set-up-in-the-browser-recommended) can also be scripted, with the same `.env`:
+- `sudo bash configure-databricks.sh` writes the `.env` (asks for the workspace name, host and token or service principal);
+- `sudo bash register-provider.sh` offers that `.env`, puts it inside a copy of the package, uploads it, restarts, and deletes the upload;
+- on Windows: write the `.env` in Notepad, then `windows\register-provider.ps1 -EnvFile .\.env`.
 
 ### Guided wizard (Linux)
 
-Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install: it prechecks the environment, then opens a menu — for a fresh box choose **option 5 (Full first-time setup)**, which chains **configure → register → publish** (configure first, so the provider reads your credentials when the register step restarts it) using an ArcGIS admin login it collects once.
+Everything runs **on the ArcGIS Server host** (SSH in first), except registering the provider, which you can do in the browser-based Server Manager. The guided **`setup.sh`** wizard does the whole install: it prechecks the environment, then opens a menu — for a fresh box choose **option 5 (Full first-time setup)**, which chains **credentials → register → publish**: it writes your `.env`, puts it inside the package while registering (then restarts), and publishes your first table, using an ArcGIS admin login it collects once.
 
 ```bash
 # 0. Get the code onto the ArcGIS Server host (it carries the wizard + the provider source).
 git clone <this-repo-url> && cd esri-customdatafeed
 
 # 1. Run the guided wizard — as ROOT (recommended) or the arcgis user (NOT a plain user).
-sudo bash setup.sh          # opens a menu -> pick 5 (Full first-time setup): configure -> register -> publish
+sudo bash setup.sh          # opens a menu -> pick 5 (Full first-time setup): .env -> register -> publish
 
 # 2. If a step ever misbehaves, the read-only health check tells you why:
 sudo bash diagnose-service.sh

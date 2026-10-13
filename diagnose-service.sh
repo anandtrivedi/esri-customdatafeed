@@ -130,15 +130,16 @@ echo
 
 # --- site machines --------------------------------------------------------------
 echo "-- Site machines --"
-MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines?token=$TOKEN&f=json")
+MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 MACHINE_COUNT=$(jget "$MRESP" 'len(d.get("machines",[]))'); MACHINE_COUNT=${MACHINE_COUNT:-?}
+[ "$MACHINE_COUNT" = "0" ] && MACHINE_COUNT="?"   # an error reply lists no machines: unknown, not "0"
 echo "  count: $MACHINE_COUNT"
 jget "$MRESP" '"\n".join("   - "+ (m.get("machineName") or "?") for m in d.get("machines",[]))'
 echo
 
 # --- registered CDF providers ---------------------------------------------------
 echo "-- Registered CDF providers --"
-PRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/types/customdataproviders?token=$TOKEN&f=json")
+PRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/types/customdataproviders" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 # Did the provider list actually parse? A transient error / bad token / HTML proxy response
 # yields empty PROVS that must NOT be read as "no providers registered".
 # "yes" only for a real provider listing: an admin error reply ({"error":...}) parses as JSON but lists nothing.
@@ -160,7 +161,7 @@ echo
 
 # --- service definition ---------------------------------------------------------
 echo "-- Service definition: $SVC.FeatureServer --"
-DRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer?token=$TOKEN&f=json")
+DRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 FOUND=$(jget "$DRESP" '"no" if (d.get("status")=="error" or "error" in d) else "yes"'); FOUND=${FOUND:-no}
 if [ "$FOUND" != "yes" ]; then
   echo "  !! service not found / error:"
@@ -168,7 +169,7 @@ if [ "$FOUND" != "yes" ]; then
   # Not JSON (proxy/HTML error page, login redirect, wrong context): show the raw reply, not a blank line.
   if [ -n "$_why" ]; then echo "  $_why"; else echo "  (not a JSON reply — wrong Admin URL/context or a proxy page?):"; printf '%s\n' "$DRESP" | head -c 400; echo; fi
   # It may be in a FOLDER (root path won't find it). List folders so the operator can retry.
-  FRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services?token=$TOKEN&f=json")
+  FRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
   FOLDERS=$(jget "$FRESP" '", ".join(f for f in d.get("folders",[]) if f and f!="/")')
   if [ -n "$FOLDERS" ]; then
     echo "  Folders on this server: $FOLDERS"
@@ -197,14 +198,14 @@ echo
 
 # --- realtime status ------------------------------------------------------------
 echo "-- Service status (realtime) --"
-SRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/status?token=$TOKEN&f=json")
+SRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/status" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 RTSTATE=$(jget "$SRESP" 'd.get("realTimeState") or ""')
 echo "  configuredState: $(jget "$SRESP" 'd.get("configuredState") or "?"')  |  realTimeState: ${RTSTATE:-?}"
 echo
 
 # --- per-machine instance statistics --------------------------------------------
 echo "-- Instance statistics (run right after a 404 to catch a 0-instance node) --"
-STRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/statistics?token=$TOKEN&f=json")
+STRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/statistics" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 RESP="$STRESP" python3 <<'PY' 2>/dev/null || echo "  (could not read statistics)"
 import os,json
 d=json.loads(os.environ["RESP"])
@@ -372,7 +373,9 @@ if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
   echo "-- idField range ('$IDFIELD') --"
   # 1) What the provider has already logged for this idField (free, and definitive once the layer has been used).
   LOGS=""
-  for d in /opt/arcgis/server/usr/logs /home/arcgis/server/usr/logs /arcgis/server/usr/logs; do
+  _ah=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+  for d in ${CDF_SERVER_DIR:+"$CDF_SERVER_DIR/usr/logs"} /opt/arcgis/server/usr/logs /app/arcgis/server/usr/logs \
+           /home/arcgis/server/usr/logs ${_ah:+"$_ah/server/usr/logs" "$_ah/arcgis/server/usr/logs"} /arcgis/server/usr/logs; do
     [ -d "$d" ] && LOGS="$LOGS $(ls -t "$d"/*/server/server-*.log 2>/dev/null | head -10 | tr '\n' ' ')"
   done
   if [ -n "${LOGS// /}" ]; then
