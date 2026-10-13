@@ -96,8 +96,9 @@ One `[NAME]` section per Databricks workspace:
 Single-line `KEY=value` settings go above the first section.
 
 ```ini
-# Optional single-line KEY=value settings go above the first section
-DATABRICKS_POOL_MAX=10
+# Optional settings (single-line KEY=value) go above the first section.
+# Max SQL-warehouse connections per ArcGIS machine (default 10):
+DATABRICKS_POOL_MAX=20
 
 # Service principal (OAuth M2M), recommended for production
 [DOD_FE]
@@ -119,7 +120,18 @@ token = dapiYYYYYYYY
 - Put comments on **their own lines**: in `token = x # note`, the `# note` becomes part of the token. A `# note` after `[NAME]` is fine.
 - Save as **UTF-8**; a BOM is fine. Quotes around values are optional. Quote a setting whose value contains `#`.
 - A mistyped header such as `[WEST] - prod`, or a stray line inside a section, is an error naming the file and line.
-- Section keys never become environment variables. Only the `KEY=value` lines above the first section do (e.g. `LAKEBASE_PASSWORD`, pool sizes, timeouts; see [Environment variables](#reference)).
+- Section keys never become environment variables. Only the `KEY=value` lines above the first section do.
+
+**Optional settings** (above the first section; the full list is under [Environment variables](#reference)):
+
+| Setting | Default | Raise or set it when |
+|---|---|---|
+| `DATABRICKS_POOL_MAX` | 10 | Many users or map layers hit Lakehouse services at once and requests fail with `Connection acquisition timeout`. Each connection runs one warehouse query, so make sure the warehouse can take that many concurrent queries. |
+| `DATABRICKS_POOL_MIN` | 2 | You want more connections kept warm after a restart. |
+| `DATABRICKS_MAX_RECORD_COUNT` | 2000 | You want a bigger default page size for services whose Max Record Count is `-`. Prefer raising it per service (see step 4). |
+| `DATABRICKS_QUERY_TIMEOUT` | 120000 (ms) | Legitimate queries need longer than 2 minutes. |
+| `DATABRICKS_TILE_QUERY_TIMEOUT` | 30000 (ms) | Map tiles on a slow table are cancelled too early. |
+| `LAKEBASE_PASSWORD` / `LAKEBASE_USER` | not set | You use a fixed Lakebase login instead of automatic tokens. It applies to every Lakebase service in the site. |
 
 </details>
 
@@ -174,6 +186,7 @@ Fill in the form, entering `-` in any field that doesn't apply. For **Workspace 
 | 16 | Minimum Scale | `-` | `-` |
 
 - Every field must have a value, which is why `-` exists. For SRID and Max Record Count, `-` gives the defaults (4326, 2000).
+- **Max Record Count** is the page size; clients fetch further pages on their own. Raise it to 5,000–15,000 for dense point layers that show "not drawn completely" at map scale, and set a **Minimum Scale** with it so clients don't request a whole continent. Bigger pages mean fewer Lakehouse queries but larger responses.
 - **Workspace Profile** is case-sensitive; `-` uses `[DEFAULT]`.
 - Set a Lakehouse **Time Column** for any table with history: without one, clients request every date in each map tile.
 - In the portal, you need privileges to create content and publish server-based layers, and item sharing controls who sees the layer.
@@ -271,9 +284,16 @@ Auth is automatic. The provider mints short-lived Lakebase OAuth tokens for both
 - In a workspace with many Lakebase projects, set `LAKEBASE_ENDPOINT_NAME=projects/<p>/branches/<b>/endpoints/<e>` to skip the endpoint lookup.
 - To use a fixed credential instead, set `LAKEBASE_PASSWORD` (+ `LAKEBASE_USER`) as `.env` settings above the first section (applies to **every** Lakebase service on **every** machine in the site), or in `init_user_param.sh` (that machine only).
 
-> **Synced Tables caveat** (checked 2026-10-12): Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns, and synced tables are read-only in Postgres. Sync the geometry as WKT text and publish a view that converts it; see [Known Limitations](#known-limitations).
+> **Synced Tables caveat** (checked 2026-10-12 against the [synced tables docs](https://docs.databricks.com/aws/en/oltp/projects/sync-tables); re-check there): Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns, and synced tables are read-only in Postgres. Sync the geometry as WKT text and publish a view that converts it; see [Known Limitations](#known-limitations).
 
 </details>
+
+---
+
+<br>
+
+> ### ✅ That's it. You're set up.
+> Everything below is optional reference: the same setup from the command line, hardening, troubleshooting and details.
 
 ---
 
