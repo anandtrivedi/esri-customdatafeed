@@ -195,7 +195,7 @@ Fill in the form, entering `-` in any field that doesn't apply. For **Workspace 
 | 16 | Minimum Scale | `-` | `-` |
 
 - Every field must have a value, which is why `-` exists. For SRID and Max Record Count, `-` gives the defaults (4326, 2000).
-- **Max Record Count** is the page size; clients fetch further pages on their own. Raise it to 5,000–15,000 for dense point layers that show "not drawn completely" at map scale, and set a **Minimum Scale** with it so clients don't request a whole continent. Bigger pages mean fewer Lakehouse queries but larger responses.
+- **Max Record Count** is the page size; clients fetch further pages on their own. Raise it to 5,000–15,000 for dense point layers that show "not drawn completely" at map scale, and set a **Minimum Scale** with it so clients don't request a whole continent. Bigger pages mean fewer Lakehouse queries but larger responses. More for big tables: [Preparing large tables](PREPARING-LARGE-TABLES.md).
 - **Workspace Profile** is case-sensitive; `-` uses `[DEFAULT]`.
 - Set a Lakehouse **Time Column** for any table with history: without one, clients request every date in each map tile.
 - In the portal, you need privileges to create content and publish server-based layers, and item sharing controls who sees the layer.
@@ -484,6 +484,8 @@ Tuning (leave at defaults unless needed): `DATABRICKS_MAX_RECORD_COUNT`, `DATABR
 ---
 
 ## Performance: Lakebase vs Lakehouse
+
+> **Serving very large tables** (hundreds of millions to billions of rows)? See [Preparing large tables](PREPARING-LARGE-TABLES.md): table layout, what to publish, service settings and capacity, from serving 28 billion AIS reports.
 
 Benchmark on 17M Overture Maps Places, warm averages, end-to-end through ArcGIS Server REST:
 
