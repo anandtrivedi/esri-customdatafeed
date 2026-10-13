@@ -271,7 +271,7 @@ Auth is automatic. The provider mints short-lived Lakebase OAuth tokens for both
 - In a workspace with many Lakebase projects, set `LAKEBASE_ENDPOINT_NAME=projects/<p>/branches/<b>/endpoints/<e>` to skip the endpoint lookup.
 - To use a fixed credential instead, set `LAKEBASE_PASSWORD` (+ `LAKEBASE_USER`) as `.env` settings above the first section (applies to **every** Lakebase service on **every** machine in the site), or in `init_user_param.sh` (that machine only).
 
-> **Synced Tables caveat:** Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns. Store geometry as WKT in a STRING column, sync that, and convert on the Lakebase side; see [Known Limitations](#known-limitations).
+> **Synced Tables caveat** (checked 2026-10-12): Databricks Sync (UC → Lakebase) does **not** carry `GEOMETRY`/`GEOGRAPHY` columns, and synced tables are read-only in Postgres. Sync the geometry as WKT text and publish a view that converts it; see [Known Limitations](#known-limitations).
 
 </details>
 
@@ -561,15 +561,15 @@ echo "=== recent Custom_data_feeds log lines ==="; ls -t "$ROOT"/server/usr/logs
 
 ## Known Limitations
 
-**Lakebase Synced Tables don't support GEOMETRY/GEOGRAPHY.** Databricks [Synced Tables](https://docs.databricks.com/aws/en/oltp/instances/sync-data/sync-table) (UC → Lakebase reverse-ETL) fail if the source table has geometry columns. **Workaround:** store geometry as WKT strings (STRING → TEXT) in the source Delta table, sync that, then convert on the Lakebase side:
+**Lakebase Synced Tables don't support GEOMETRY/GEOGRAPHY** (checked 2026-10-12 against the [synced tables docs](https://docs.databricks.com/aws/en/oltp/projects/sync-tables), last updated 2026-10-09: "GEOGRAPHY, GEOMETRY, VARIANT, and OBJECT types are not supported"; re-check that page, this may change). Synced tables are also read-only in Postgres: only `SELECT`, `CREATE INDEX` and `DROP TABLE` are allowed, and any other change breaks the sync.
+
+**Workaround:** store the geometry as WKT in a STRING column of the source Delta table and sync that. Then, in Lakebase, add a view that converts it and publish the **view** as the Lakebase Table (read-only):
 
 ```sql
--- Convert at query time:
-SELECT *, ST_GeomFromText(geometry_wkt, 4326) AS geom FROM my_table;
--- Or a generated column + index:
-ALTER TABLE my_table ADD COLUMN geom GEOMETRY(Point, 4326)
-  GENERATED ALWAYS AS (ST_GeomFromText(geometry_wkt, 4326)) STORED;
-CREATE INDEX ON my_table USING GIST (geom);
+CREATE VIEW geo_demo.my_table_geo AS
+  SELECT *, ST_GeomFromText(geometry_wkt, 4326) AS geom FROM geo_demo.my_table;
+-- Spatial index on the synced table itself (allowed), matching the view's expression:
+CREATE INDEX ON geo_demo.my_table USING GIST (ST_GeomFromText(geometry_wkt, 4326));
 ```
 
 Tables created directly in Lakebase with native PostGIS geometry work fine.
