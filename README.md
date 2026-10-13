@@ -15,6 +15,13 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
 
 ## Prerequisites
 
+- **ArcGIS Server 11.4 or later** (12.0+ for editing) with the **Custom Data Feeds runtime** installed. It's a separate install from My Esri.
+- **A Databricks SQL Warehouse** (Lakehouse tables) and/or a **Lakebase** database (fast maps, editing).
+- **A Databricks token or service principal** with access to your tables, and **outbound access** from ArcGIS Server to Databricks (HTTPS, plus port 5432 for Lakebase).
+
+<details>
+<summary><b>Prerequisite details: grants, network, IP access lists</b></summary>
+
 1. **An ArcGIS Server, 11.4 or later, with the Custom Data Feed runtime installed.** The CDF runtime is a **separate** component (not bundled with ArcGIS Server) — install `ArcGIS Custom Data Feeds` for your exact server version from My Esri on every machine (Windows/Linux) and restart, or registration fails. It bundles Node.js (don't install Node separately). Use **12.0+** for feature *editing* (not just read-only maps).
 2. **A Databricks SQL Warehouse** for Lakehouse tables (left sidebar → SQL Warehouses), and/or a **Lakebase** database for low-latency maps and editing.
 3. **Databricks credentials** — a **Service Principal (OAuth M2M)** (recommended: a machine identity that auto-refreshes, no user dependency) *or* a **Personal Access Token (PAT)** (simplest for one person). Whichever you use, it needs **both** layers of access granted to that same identity:
@@ -28,6 +35,8 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
    | `<instance>.database.cloud.databricks.com` | 5432 | Lakebase queries/edits (only if you use Lakebase) |
 
    If your workspace uses [IP access lists](https://docs.databricks.com/aws/en/security/network/front-end/ip-access-list), add **each** ArcGIS Server node's outbound IP (create your own ALLOW list, and follow your organization's policy for lists managed by someone else, e.g. a platform or security team). Otherwise the connection fails with `HTTP 403`, which surfaces to the publisher as a **misleading `"Service not found"`** — the real `403` appears only in the `Custom_data_feeds` server log. Allow-list changes take a few minutes to propagate.
+
+</details>
 
 ---
 
