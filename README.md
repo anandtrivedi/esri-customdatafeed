@@ -445,7 +445,7 @@ It runs these steps:
 5. Prompts for **instance sizing** (`min=1`/`max=2` by default, a warm instance per node to avoid the intermittent-404 cold start) and optional **Advanced** visibility/idle settings.
 6. **Creates → starts → verifies** each service, then prints its FeatureServer URL and an anonymous-access probe.
 
-> To script the raw REST call yourself, see [Manual service creation](#reference) under Reference. To publish from a Databricks agent, see [Agent-Driven Publishing](#agent-driven-publishing-mcp).
+> To script the raw REST call yourself, see [Manual service creation](#reference) under Reference.
 
 ---
 
@@ -617,24 +617,6 @@ Tables created directly in Lakebase with native PostGIS geometry work fine.
 **Lakebase layers need at least one row to publish.** Field and geometry types come from the data, so an empty editable table publishes with no fields; add one seed row first.
 
 **Polygons and lines crossing the 180° meridian** are unwrapped on output (negative longitudes shifted by +360 for that shape), so they no longer draw as bands across the map. Filters still run against the stored geometry.
-
----
-
-## Agent-Driven Publishing (MCP)
-
-![status: Beta](https://img.shields.io/badge/status-Beta-yellow) An MCP server (`mcp-server/`) that turns provider setup and per-layer publishing into a conversation — an agent inspects the Unity Catalog table (geometry, SRID, a validated int32 id), publishes it, smoke-tests it, and returns the FeatureServer URL.
-
-<details>
-<summary><b>Quickstart & tools</b></summary>
-
-```bash
-cd esri-customdatafeed/mcp-server && npm install
-claude mcp add databricks-cdf -- node "$(pwd)/bin/cli.js" serve
-```
-
-Then, in the client: register your ArcGIS target (password set via a terminal command, never typed into chat) → install the provider → *"publish catalog.schema.my_table"*. Key tools: `register_gis_target`, `provider_status`, `register_provider` (build/install/upgrade, env baked in), `inspect_table`, `create_publish_view`, `publish_layer`, `list_layers`, `unpublish_layer`. Credentials never pass through chat (resolved server-side from `env:`/`secret:` refs). Can be hosted as a Databricks App for Playground/Genie. Full details: [`mcp-server/README.md`](mcp-server/README.md).
-
-</details>
 
 ---
 

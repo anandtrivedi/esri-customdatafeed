@@ -3,7 +3,7 @@
 # publish-service.sh — interactive wizard to publish a Databricks CDF Feature Service.
 #
 # Runs on the ArcGIS Server box with only bash + curl + python3 (all already present).
-# No JSON to hand-edit, no MCP client, works air-gapped. Safe to re-run.
+# No JSON to hand-edit, works air-gapped. Safe to re-run.
 #
 # It asks one question per field, builds the createService payload itself (python3,
 # so no quoting/missing-key mistakes), then creates -> starts -> verifies the service
