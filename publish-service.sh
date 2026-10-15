@@ -604,6 +604,33 @@ offer_lakehouse_grants() {
   done
 }
 
+check_entitlements() {
+  # Warn-only. The provider's identity needs the "Databricks SQL access" entitlement (Lakehouse) and also "Workspace
+  # access" (Lakebase APIs); without them every connection fails with an unexplained 403. The CLI runs as that same
+  # identity (same profile), and the REST API names the missing entitlement, so one cheap call per backend tells us.
+  # $1 = lakehouse | lakebase
+  [ "$CLI_OK" = 1 ] || return 0
+  local out need
+  if [ "$1" = lakehouse ]; then
+    local wid="${WAREHOUSE_PATH##*/}"
+    printf '%s' "$wid" | grep -qE '^[A-Za-z0-9]+$' || return 0
+    need="Databricks SQL access"
+    out=$(timeout 45 databricks api post /api/2.0/sql/statements --profile "${WORKSPACE:-DEFAULT}" \
+      --json "{\"warehouse_id\":\"$wid\",\"statement\":\"SELECT 1\",\"wait_timeout\":\"30s\",\"on_wait_timeout\":\"CANCEL\"}" 2>&1)
+  else
+    need="Workspace access"
+    out=$(timeout 30 databricks api get /api/2.0/postgres/projects --profile "${WORKSPACE:-DEFAULT}" 2>&1)
+  fi
+  if printf '%s' "$out" | grep -qi 'entitlement'; then
+    echo "   !! The provider's identity is missing the \"$need\" entitlement (Databricks: $(printf '%s' "$out" | grep -oi 'without the [a-z, -]*entitlements\?' | head -1))."
+    echo "      Every request will fail with a 403. A workspace admin adds it under Settings > Identity and access >"
+    echo "      Service principals (or Users) > the identity > Entitlements. Continuing."
+  elif printf '%s' "$out" | grep -qi 'scope'; then
+    echo "   !! Databricks says the token lacks a scope: $(printf '%s' "$out" | grep -oi '[^"]*scope[^"]*' | head -1)"
+    echo "      Lakehouse needs the \"sql\" scope; Lakebase also \"postgres\". Continuing."
+  fi
+}
+
 check_id_range() {
   # Warn-only: MIN/MAX of the id column (usually answered from Delta file statistics, so fast even on big tables).
   # Esri OBJECTIDs are 32-bit; larger ids worked in our own testing but are outside what Esri supports. Above
@@ -813,7 +840,8 @@ while true; do
 
   # Optional least-privilege grant help, BEFORE createService so the sample-query
   # verification below actually confirms the grant took effect.
-  if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; else offer_lakebase_grants; fi
+  if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; check_entitlements lakehouse
+  else offer_lakebase_grants; check_entitlements lakebase; fi
   echo
 
   # Always create STOPPED, then /start below (the start step already runs for every service and
