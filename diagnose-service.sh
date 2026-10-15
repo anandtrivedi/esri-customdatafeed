@@ -426,10 +426,54 @@ except Exception: print('')
   echo
 fi
 
+# --- Databricks access errors in the recent server logs ---------------------------------
+# The SQL driver reports a refused connection only as "bad HTTP status code: 403"; the provider appends the likely
+# causes, and Databricks' own REST errors name a missing entitlement or token scope. Not service-specific: the provider
+# process is shared, so these lines can come from any service on the box.
+LOGS="${LOGS:-}"
+if [ -z "${LOGS// /}" ]; then
+  _ah=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+  for d in ${CDF_SERVER_DIR:+"$CDF_SERVER_DIR/usr/logs"} /opt/arcgis/server/usr/logs /app/arcgis/server/usr/logs \
+           /home/arcgis/server/usr/logs ${_ah:+"$_ah/server/usr/logs" "$_ah/arcgis/server/usr/logs"} /arcgis/server/usr/logs; do
+    [ -d "$d" ] && LOGS="$LOGS $(ls -t "$d"/*/server/server-*.log 2>/dev/null | head -10 | tr '\n' ' ')"
+  done
+fi
+ACCESS_ERR=""
+if [ -n "${LOGS// /}" ]; then
+  echo "-- Databricks access errors (recent server logs, any service) --"
+  # shellcheck disable=SC2086
+  if grep -qiE 'without the [a-z, -]*entitlement' $LOGS 2>/dev/null; then
+    ACCESS_ERR="entitlement"
+    echo "  [PROBLEM] Databricks: the provider's identity lacks an entitlement — $(grep -ohiE 'without the [a-z, -]*entitlements?' $LOGS | sort -u | head -2 | paste -sd ';' -)"
+  fi
+  # shellcheck disable=SC2086
+  if grep -qiE "Scopes '[^']*' are not assigned|does not have required scopes" $LOGS 2>/dev/null; then
+    ACCESS_ERR="${ACCESS_ERR:+$ACCESS_ERR,}scope"
+    echo "  [PROBLEM] Databricks: the token or service principal secret lacks a scope — $(grep -ohiE "Scopes '[^']*' are not assigned|required scopes: [a-z-]+" $LOGS | sort -u | head -2 | paste -sd ';' -)"
+  fi
+  # shellcheck disable=SC2086
+  if grep -qiE 'blocked by Databricks IP ACL' $LOGS 2>/dev/null; then
+    ACCESS_ERR="${ACCESS_ERR:+$ACCESS_ERR,}ipacl"
+    echo "  [PROBLEM] Databricks: this server's outbound IP is blocked by the workspace IP access list."
+  fi
+  # shellcheck disable=SC2086
+  if [ -z "$ACCESS_ERR" ] && grep -qF 'bad HTTP status code: 403' $LOGS 2>/dev/null; then
+    ACCESS_ERR="403"
+    echo "  [PROBLEM] Databricks refused connections with a bare 403 (entitlement, scope, CAN USE or IP access list)."
+  fi
+  [ -z "$ACCESS_ERR" ] && echo "  (none found)"
+  echo
+fi
+
 # --- ASSESSMENT -----------------------------------------------------------------
 echo "============================================================"
 echo " ASSESSMENT — likely problem(s) and what to do"
 echo "============================================================"
+if [ -n "$ACCESS_ERR" ]; then
+  echo "  * Databricks access ($ACCESS_ERR): the identity in the workspace profile needs the \"Databricks SQL access\""
+  echo "    entitlement (plus \"Workspace access\" for Lakebase), CAN USE on the warehouse, and token/secret scopes \"sql\""
+  echo "    (plus \"postgres\" for Lakebase). After fixing, restart ArcGIS Server (stopserver/startserver)."
+fi
 PROBLEMS=0
 
 if [ "$FOUND" != "yes" ]; then
