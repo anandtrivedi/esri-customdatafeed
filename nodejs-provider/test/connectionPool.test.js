@@ -5,6 +5,7 @@ describe('connectionPool', () => {
   let connectionPool;
   let connectCallLog;
   let sessionLog;
+  let tokenRequests;
 
   beforeEach(() => {
     // New array each test. Capture it locally so old test pools (from a
@@ -26,8 +27,10 @@ describe('connectionPool', () => {
       async close() {}
     };
 
+    tokenRequests = [];
     connectionPool = proxyquire('../src/modules/connectionPool', {
       '@databricks/sql': { DBSQLClient: DBSQLClientStub },
+      './oauthToken': { getOAuthToken: async (ws, scope) => { tokenRequests.push({ clientId: ws.clientId, scope }); return `tok-${scope}`; } },
     });
   });
 
@@ -96,7 +99,7 @@ describe('connectionPool', () => {
       expect(connectCallLog[0].oauthClientId).to.be.undefined;
     });
 
-    it('passes OAuth M2M creds with authType: databricks-oauth', async () => {
+    it('OAuth M2M: authenticates with our own sql-scoped token, not the driver M2M flow (which asks all-apis)', async () => {
       connectionPool.getPool(
         {
           workspaceAlias: 'B',
@@ -112,14 +115,28 @@ describe('connectionPool', () => {
       await new Promise((r) => setImmediate(r));
 
       expect(connectCallLog).to.have.lengthOf(1);
-      expect(connectCallLog[0]).to.include({
-        host: 'b.example.com',
-        path: '/sql/1.0/warehouses/xyz',
-        authType: 'databricks-oauth',
-        oauthClientId: 'sp-bbb',
-        oauthClientSecret: 'secret-bbb',
+      const opts = connectCallLog[0];
+      expect(opts).to.include({ host: 'b.example.com', path: '/sql/1.0/warehouses/xyz', authType: 'custom' });
+      expect(opts.oauthClientId).to.be.undefined;
+      expect(opts.oauthClientSecret).to.be.undefined;
+      expect(opts.token).to.be.undefined;
+      expect(await opts.provider.authenticate()).to.deep.equal({ Authorization: 'Bearer tok-sql' });
+      expect(tokenRequests).to.deep.equal([{ clientId: 'sp-bbb', scope: 'sql' }]);
+    });
+
+    it('adds the entitlement/scope hint to a 403 connection failure', async () => {
+      const failing = proxyquire('../src/modules/connectionPool', {
+        '@databricks/sql': { DBSQLClient: class {
+          async connect() {}
+          async openSession() { throw new Error('Received a response with a bad HTTP status code: 403'); }
+          async close() {}
+        } },
+        './oauthToken': { getOAuthToken: async () => 't' },
       });
-      expect(connectCallLog[0].token).to.be.undefined;
+      const pool = failing.getPool({ workspaceAlias: 'C', hostname: 'c.example.com', authType: 'pat', token: 'x' }, '/p', { min: 0 });
+      const err = await pool.acquire().then(() => null, (e) => e);
+      expect(err.message).to.include('bad HTTP status code: 403').and.include('Databricks SQL access').and.include('"sql" scope');
+      await failing.shutdownPool();
     });
 
     it('does not call client.connect at all when min: 0', async () => {

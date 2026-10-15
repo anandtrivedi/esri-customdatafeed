@@ -27,6 +27,14 @@ A Node.js Custom Data Provider that publishes Databricks tables as live ArcGIS S
 3. **Databricks credentials** — a **Service Principal (OAuth M2M)** (recommended: a machine identity that auto-refreshes, no user dependency) *or* a **Personal Access Token (PAT)** (simplest for one person). Whichever you use, it needs **both** layers of access granted to that same identity:
    - **Compute:** `CAN USE` on the SQL Warehouse.
    - **Data (Unity Catalog):** `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the specific table/view. *(Lakebase: `CONNECT`/`USAGE`/`SELECT`, plus `INSERT`/`UPDATE`/`DELETE` for editing.)* Grant table-level, not catalog-wide.
+   - **Entitlements and token scopes** (`all-apis` is not needed):
+
+     | | Lakehouse | Lakebase (read and edit) |
+     |---|---|---|
+     | Scopes (scoped PAT or SP secret) | `sql` | `sql`, `postgres` |
+     | Entitlements of the user or SP | Databricks SQL access | Databricks SQL access, Workspace access |
+
+     Without the **Databricks SQL access** entitlement every connection fails with `bad HTTP status code: 403`, whatever the scopes.
 4. **Outbound network access** from the ArcGIS Server to Databricks:
 
    | Destination | Port | Used for |
@@ -263,10 +271,11 @@ They serve only services published without a workspace name, and only when no `[
 
 **Service principal setup** (Databricks account console):
 1. Create the SP and assign it to the workspace.
-2. Generate an OAuth secret (`client_id` / `client_secret`).
-3. Grant `CAN USE` on the warehouse, plus Lakebase access if used.
+2. Give it the **Databricks SQL access** entitlement (plus **Workspace access** for Lakebase).
+3. Generate an OAuth secret (`client_id` / `client_secret`). It can be limited to the `sql` scope (`sql`, `postgres` with Lakebase).
+4. Grant `CAN USE` on the warehouse, plus Lakebase access if used.
 
-Each profile uses **one** auth mode and gets its own connection pool. For Lakebase over OAuth M2M, the provider exchanges `client_id`/`client_secret` at `/oidc/v1/token`, then mints Lakebase tokens and refreshes them about 5 minutes before they expire. Ref: [OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
+Each profile uses **one** auth mode and gets its own connection pool. For a service principal the provider exchanges `client_id`/`client_secret` at `/oidc/v1/token` for tokens limited to the scope each backend needs (`sql` for the warehouse, `postgres` for the Lakebase APIs), then mints Lakebase tokens, refreshing each about 5 minutes before it expires. Ref: [OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).
 
 **Lookup order:**
 - A service with a workspace name uses that name from the machine's `.databrickscfg`, else from the `.env`. If neither has it, its requests fail with `workspace profile "…" not found` and the list of available profiles.
@@ -281,6 +290,9 @@ Each profile uses **one** auth mode and gets its own connection pool. For Lakeba
 | Authentication fails though the secret looks right | A `# comment` at the end of the value line became part of the value |
 | Works on some machines, fails on others | A `.databrickscfg` on some machines overrides the `.env` profile, or `.databrickscfg` exists on only some machines |
 | `Source IP … blocked by Databricks IP ACL` | ArcGIS Server's outbound IP isn't on the workspace allowlist |
+| `bad HTTP status code: 403` on every connection | The user or SP lacks the **Databricks SQL access** entitlement, a scoped PAT lacks `sql`, or no `CAN USE` on the warehouse |
+| `Scopes '…' are not assigned to the client` | The SP secret lacks that scope: `sql` (Lakehouse) or `postgres` (Lakebase) |
+| Lakebase: `disabled for users without the workspace-access entitlement` | Give the SP or user the **Workspace access** entitlement |
 
 </details>
 

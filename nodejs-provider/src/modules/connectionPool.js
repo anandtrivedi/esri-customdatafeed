@@ -11,11 +11,18 @@
  * Auth modes (resolved per workspace profile):
  *   - PAT:        token in workspaceConfig
  *   - OAuth M2M:  client_id + client_secret in workspaceConfig
- *                 (the Node SQL driver handles token refresh internally)
+ *                 (oauthToken.js mints a sql-scoped token and refreshes it)
  */
 
 const { DBSQLClient } = require('@databricks/sql');
 const { userAgentTag } = require('./version');
+const { getOAuthToken } = require('./oauthToken');
+
+// The driver reports a refused connection only as "bad HTTP status code: 403". Seen live: the identity lacked the
+// Databricks SQL access entitlement (every scope fails the same way), or a PAT was created without the sql scope.
+const FORBIDDEN_HINT =
+  ' (Databricks refused the connection: the user or service principal needs the "Databricks SQL access" entitlement ' +
+  'and CAN USE on the warehouse; a scoped token needs the "sql" scope)';
 
 function statementTimeoutSeconds() {
   const ms = parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000;
@@ -74,11 +81,13 @@ class DatabricksConnectionPool {
 
     let connectOptions;
     if (this.workspaceConfig.authType === 'oauth-m2m') {
+      // Our own token limited to the sql scope, not the driver's M2M flow (which always asks for all-apis). The driver
+      // calls authenticate() before every request, so the cached token is renewed before it expires.
+      const workspaceConfig = this.workspaceConfig;
       connectOptions = {
         ...baseOptions,
-        authType: 'databricks-oauth',
-        oauthClientId: this.workspaceConfig.clientId,
-        oauthClientSecret: this.workspaceConfig.clientSecret,
+        authType: 'custom',
+        provider: { authenticate: async () => ({ Authorization: `Bearer ${await getOAuthToken(workspaceConfig, 'sql')}` }) },
       };
     } else {
       connectOptions = {
@@ -107,6 +116,9 @@ class DatabricksConnectionPool {
       console.log(`[Pool ${this.poolLabel()}] Connection ${connection.id} created (pool size: ${this.pool.length})`);
       return connection;
     } catch (error) {
+      if (/bad HTTP status code: 403\b/.test(error.message || '') && !error.message.includes(FORBIDDEN_HINT)) {
+        error.message += FORBIDDEN_HINT;
+      }
       console.error(`[Pool ${this.poolLabel()}] Failed to create connection:`, error.message);
       // connect() may have already succeeded before openSession() threw (e.g. a bad STATEMENT_TIMEOUT or a transient
       // session-open error). Close the client so a connected-but-sessionless socket isn't leaked on every failed open.

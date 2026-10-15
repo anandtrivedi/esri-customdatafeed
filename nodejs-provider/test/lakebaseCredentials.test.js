@@ -90,7 +90,9 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
   beforeEach(() => {
     routes = {}; calls = []; pools = []; poolObjs = []; endHangs = false;
     for (const k of ENV) { SAVED[k] = process.env[k]; delete process.env[k]; }
-    LakebasePool = proxyquire("../src/modules/lakebasePool", { pg: { Pool: FakePool }, https: fakeHttps() });
+    const https = fakeHttps();
+    const oauthToken = proxyquire("../src/modules/oauthToken", { https });
+    LakebasePool = proxyquire("../src/modules/lakebasePool", { pg: { Pool: FakePool }, https, "./oauthToken": oauthToken });
   });
 
   afterEach(async () => {
@@ -372,5 +374,16 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
     await LakebasePool.getLakebasePool({ host: HOST_AUTO, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
     expect(pools[0].user).to.equal("sp-client-id");
     expect(pools[0].password).to.equal(`auto-token-for:${EP_AUTO}`);
+  });
+
+  it("OAuth M2M workspace token asks for the postgres scope, not all-apis", async () => {
+    routes = autoscalingRoutes({
+      "POST /oidc/v1/token": ok({ access_token: "ws-token", expires_in: 3600 }),
+    });
+    const m2m = { workspaceAlias: "arclake-sp", hostname: "my-workspace.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
+    await LakebasePool.getLakebasePool({ host: HOST_AUTO, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
+    const mints = calls.filter((c) => c.path === "/oidc/v1/token");
+    expect(mints).to.have.lengthOf(1);
+    expect(mints[0].body).to.include("scope=postgres").and.not.include("all-apis");
   });
 });
