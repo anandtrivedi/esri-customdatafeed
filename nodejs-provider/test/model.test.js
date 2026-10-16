@@ -682,6 +682,7 @@ describe("model", () => {
         expect(err.message).to.include("DATABRICKS_MAX_RETURN_IDS");
         expect(err.code).to.equal(400);
         expect(lakebaseQueryLog[0].sql).to.include("LIMIT 500001");
+        expect(err.message).to.match(/^returnIdsOnly matched more than the configured maximum of 500000 object ids/);
         done();
       });
     });
@@ -704,6 +705,22 @@ describe("model", () => {
       expect(meta.idField).to.equal("objectid");
       const lhMeta = await new Model().getMetadata({ params: { tableName: "c.s.t", idField: "OBJECTID" } });
       expect(lhMeta.idField).to.equal("OBJECTID"); // Lakehouse keeps the configured spelling
+    });
+
+    it("Lakebase edits accept attributes keyed with the configured spelling (OBJECTID, NAME)", async () => {
+      lakebaseQueryResult = { rows: [], rowCount: 1 };
+      const up = await new Model().editData(lb({ idField: "OBJECTID" }), { updates: [{ attributes: { OBJECTID: 5, NAME: "x" } }] });
+      expect(up.updateResults[0]).to.deep.equal({ objectId: 5, success: true }); // was: "Update needs an integer objectid"
+      const upd = lakebaseQueryLog[lakebaseQueryLog.length - 1];
+      expect(upd.sql).to.match(/SET name = \$1/).and.match(/WHERE objectid = \$2/);
+      expect(upd.params).to.deep.equal(["x", 5]);
+
+      lakebaseQueryLog = [];
+      lakebaseQueryResult = [{ rows: [{ objectid: 43 }] }];
+      const add = await new Model().editData(lb({ idField: "OBJECTID" }), { adds: [{ attributes: { OBJECTID: 999, NAME: "y" }, geometry: { x: 0, y: 0 } }] });
+      expect(add.addResults[0]).to.deep.equal({ objectId: 43, success: true });
+      expect(lakebaseQueryLog[0].sql).to.not.match(/\(objectid|, objectid/); // the id stays generated, not written as 999
+      expect(lakebaseQueryLog[0].params).to.not.include(999);
     });
 
     it("a malformed delete id fails alone; the valid ids are still deleted", async () => {
@@ -1633,6 +1650,40 @@ describe("model", () => {
   });
 });
 
+// The row caps parse like DATABRICKS_TILE_QUERY_TIMEOUT: a number or the default, never a parseInt prefix.
+describe("row-cap env parsing", () => {
+  const load = (env) => {
+    Object.assign(process.env, env);
+    try {
+      return proxyquire("../src/model", {
+        "./modules/connectionPool": connectionPoolStub, "./modules/lakebasePool": lakebasePoolStub,
+        "./modules/workspaceResolver": workspaceResolverStub, dotenv: dotenvStub,
+      })._config.databricks;
+    } finally { for (const k of Object.keys(env)) delete process.env[k]; }
+  };
+  it("reads 1e6 as a million, not 1", () => {
+    const c = load({ DATABRICKS_MAX_RETURN_IDS: "1e6", DATABRICKS_MAX_DISTINCT_ROWS: " 2000000 " });
+    expect(c.maxReturnIds).to.equal(1000000);
+    expect(c.maxDistinctRows).to.equal(2000000);
+  });
+  it("falls back to the default (with a warning) for 30s, 2,000, -1 and 1.5 instead of a tiny cap", () => {
+    for (const bad of ["30s", "2,000", "-1", "1.5", "abc"]) {
+      const c = load({ DATABRICKS_MAX_RETURN_IDS: bad, DATABRICKS_MAX_DISTINCT_ROWS: bad });
+      expect(c.maxReturnIds, bad).to.equal(500000);
+      expect(c.maxDistinctRows, bad).to.equal(1000000);
+    }
+  });
+  it("keeps 0 (disabled) and the defaults when unset", () => {
+    expect(load({ DATABRICKS_MAX_RETURN_IDS: "0" }).maxReturnIds).to.equal(0);
+    const blank = load({ DATABRICKS_MAX_RETURN_IDS: "  ", DATABRICKS_MAX_DISTINCT_ROWS: " " }); // not 0 (= disabled)
+    expect(blank.maxReturnIds).to.equal(500000);
+    expect(blank.maxDistinctRows).to.equal(1000000);
+    const c = load({});
+    expect(c.maxReturnIds).to.equal(500000);
+    expect(c.maxDistinctRows).to.equal(1000000);
+  });
+});
+
 // returnIdsOnly ceiling (DATABRICKS_MAX_RETURN_IDS): an id set larger than the ceiling must error with an actionable
 // message, not silently truncate. Isolated describe so the small ceiling doesn't affect the other suites.
 describe("returnIdsOnly ceiling", () => {
@@ -1646,6 +1697,7 @@ describe("returnIdsOnly ceiling", () => {
     process.env.ENABLE_USER_AUTH = "false";
     process.env.ENABLE_SIMPLE_AUTH = "false";
     process.env.DATABRICKS_MAX_RETURN_IDS = "2"; // tiny ceiling for the test
+    process.env.DATABRICKS_MAX_DISTINCT_ROWS = "2";
     CeilModel = proxyquire("../src/model", {
       "./modules/connectionPool": connectionPoolStub,
       "./modules/lakebasePool": lakebasePoolStub,
@@ -1653,8 +1705,24 @@ describe("returnIdsOnly ceiling", () => {
       dotenv: dotenvStub,
     });
   });
-  after(() => { delete process.env.DATABRICKS_MAX_RETURN_IDS; });
+  after(() => { delete process.env.DATABRICKS_MAX_RETURN_IDS; delete process.env.DATABRICKS_MAX_DISTINCT_ROWS; });
   beforeEach(() => { lakehouseQueryRows = []; lakehouseReleaseLog = []; });
+
+  it("names returnDistinctValues and its own env var when a distinct list exceeds DATABRICKS_MAX_DISTINCT_ROWS", (done) => {
+    lakehouseQueryRows = [{ name: "a" }, { name: "b" }, { name: "c" }];
+    const req = {
+      query: { f: "json", returnDistinctValues: true, outFields: "name", returnGeometry: false, where: "1=1" },
+      params: { tableName: "catalog.schema.towers", geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY" },
+      ip: "127.0.0.1",
+    };
+    new CeilModel().getData(req, (err) => {
+      expect(err).to.be.an("error");
+      expect(err.message).to.match(/^returnDistinctValues matched more than the configured maximum of 2 rows/);
+      expect(err.message).to.include("DATABRICKS_MAX_DISTINCT_ROWS").and.not.include("DATABRICKS_MAX_RETURN_IDS");
+      expect(err.code).to.equal(400);
+      done();
+    });
+  });
 
   const idsReq = () => ({
     query: { f: "json", returnIdsOnly: true, where: "1=1" },

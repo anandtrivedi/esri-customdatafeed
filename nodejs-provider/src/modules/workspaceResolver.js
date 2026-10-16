@@ -2,8 +2,9 @@
  * workspaceResolver.js
  * Resolves Databricks workspace credentials by profile alias.
  *
- * Reads ~/.databrickscfg (or DATABRICKS_CONFIG_FILE) for named profiles,
- * with env-var fallback for the implicit "default" profile.
+ * Named profiles come from ~/.databrickscfg (or DATABRICKS_CONFIG_FILE) and from [PROFILE] sections in the provider's
+ * own .env (same format; the .databrickscfg wins on a name clash), so a .cdpk carrying a .env needs no file on each
+ * machine. The plain DATABRICKS_* env vars are the fallback for the implicit "default" profile.
  *
  * Profile shape returned:
  *   {
@@ -32,6 +33,11 @@ const os = require('os');
 const path = require('path');
 
 let profileCache = null;
+let profileSources = Object.create(null); // alias -> file it came from (for error messages)
+
+// The provider's .env (packaged in the .cdpk). Lines above its first [SECTION] are env vars (loaded by model.js);
+// [SECTION]s are workspace profiles in .databrickscfg format, read here.
+let providerEnvFile = path.join(__dirname, '..', '..', '.env');
 
 // Candidate .databrickscfg locations when DATABRICKS_CONFIG_FILE is not set, in priority
 // order. ArcGIS Server does not reliably set HOME for the provider process, so os.homedir()
@@ -70,62 +76,127 @@ function getConfigFilePath() {
  *   - Empty lines ignored
  *   - Key-value pairs before any section header are ignored
  */
-function parseIni(contents) {
-  const profiles = {};
+// A section header: a whole line "[NAME]", optionally followed by a # or ; comment. Shared with envVarsPart so the
+// .env split and the profile parser always agree on where the sections start.
+const SECTION_RE = /^\[([^\]]+)\]\s*(?:[#;].*)?$/;
+// A line allowed above the first section: blank, a # or ; comment, or a single-line [export ]KEY=value setting.
+const isSettingLine = (line) => { const t = line.trim(); return !t || /^[#;]/.test(t) || /^(?:export\s+)?[\w.-]+\s*=/.test(t); };
+
+// A bad line fails only the profiles it can affect (they throw when resolved), not every service on the box. Kept
+// non-enumerable so a profile still compares and lists like plain key/values.
+const PARSE_ERROR = Symbol('parseError');
+const markBroken = (profile, message) => {
+  if (!profile[PARSE_ERROR]) Object.defineProperty(profile, PARSE_ERROR, { value: message, enumerable: false });
+};
+
+function parseIni(contents, source = 'the credentials file', warn = () => {}) {
+  // No prototype: a [__proto__] or [constructor] section must not touch Object.prototype or shadow a lookup.
+  const profiles = Object.create(null);
   let currentSection = null;
+  let lastKey = null;
+  let preambleError = null;
   const lines = contents.split(/\r?\n/);
+  // Inside a section, the keys after a bad line would land in this profile, so it fails. Above the first section, the
+  // .env's env-var part ends at that line (envVarsPart), so every profile in this file fails.
+  const fail = (message) => {
+    warn(message);
+    if (currentSection) markBroken(profiles[currentSection], message);
+    else if (!preambleError) preambleError = message;
+    lastKey = null;
+  };
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith('#') || line.startsWith(';')) continue;
+  for (const [i, rawLine] of lines.entries()) {
+    const line = rawLine.trim(); // also drops a leading BOM
+    if (line === '' || line.startsWith('#') || line.startsWith(';')) { lastKey = null; continue; }
 
-    const sectionMatch = line.match(/^\[(.+)\]$/);
+    const sectionMatch = line.match(SECTION_RE);
     if (sectionMatch) {
       currentSection = sectionMatch[1].trim();
-      if (!profiles[currentSection]) profiles[currentSection] = {};
+      if (!profiles[currentSection]) profiles[currentSection] = Object.create(null);
+      lastKey = null;
+      continue;
+    }
+    // A mistyped header ("[WEST] - prod") would otherwise be skipped and its keys merged into the previous profile.
+    if (line.startsWith('[')) { fail(`Malformed section header on line ${i + 1} of ${source}: expected [NAME]`); continue; }
+
+    if (!currentSection) {
+      // Above the first section only settings belong (the .env's env-var part, which envVarsPart ends at the same line).
+      if (!isSettingLine(line)) fail(`Unrecognized line ${i + 1} of ${source}: expected KEY=value, [NAME] or a # comment`);
       continue;
     }
 
-    if (!currentSection) continue;
+    // An indented line without "=" continues the previous value (Python configparser: scopes = sql,\n  postgres).
+    if (lastKey && /^\s/.test(rawLine) && !line.includes('=')) {
+      profiles[currentSection][lastKey] += `\n${line}`;
+      continue;
+    }
 
     const kvMatch = line.match(/^([^=]+?)\s*=\s*(.*)$/);
     if (kvMatch) {
       const key = kvMatch[1].trim();
-      const value = kvMatch[2].trim();
+      const value = kvMatch[2].trim().replace(/^(["'])(.*)\1$/, '$2'); // token = "dapi…" as in a .env
       profiles[currentSection][key] = value;
+      lastKey = key;
+      continue;
     }
+    // Anything else inside a section (e.g. "WEST] - prod") would silently fold the next keys into this profile.
+    fail(`Unrecognized line ${i + 1} of ${source}: expected [NAME], key = value or a # comment`);
   }
 
+  if (preambleError) for (const name of Object.keys(profiles)) markBroken(profiles[name], preambleError);
   return profiles;
 }
 
-function loadProfiles() {
-  if (profileCache !== null) return profileCache;
+/**
+ * The env-var part of a .env: the single-line KEY=value settings (and comments) above the first line that isn't one,
+ * which is where the [NAME] profiles start (or a mistyped header), so no profile key can reach process.env.
+ */
+function envVarsPart(text) {
+  const lines = text.split(/\r?\n/);
+  const first = lines.findIndex((l) => !isSettingLine(l));
+  return first === -1 ? text : lines.slice(0, first).join('\n');
+}
 
-  const filePath = getConfigFilePath();
-  if (!fs.existsSync(filePath)) {
-    profileCache = {};
-    return profileCache;
-  }
-
+function readProfilesFrom(filePath) {
+  if (!fs.existsSync(filePath)) return Object.create(null);
   let contents;
   try {
     contents = fs.readFileSync(filePath, 'utf8');
   } catch (err) {
-    throw new Error(`Failed to read Databricks config file ${filePath}: ${err.message}`);
+    throw configError(`Failed to read Databricks credentials file ${filePath}: ${err.message}`);
   }
+  return parseIni(contents, filePath, (m) => console.warn(`[CDF] ${m} (only the profiles it affects fail)`));
+}
 
-  profileCache = parseIni(contents);
+function loadProfiles() {
+  if (profileCache !== null) return profileCache;
+  const merged = Object.create(null);
+  const sources = Object.create(null);
+  for (const filePath of [providerEnvFile, getConfigFilePath()]) { // later wins: .databrickscfg over the .env
+    const profiles = readProfilesFrom(filePath);
+    for (const alias of Object.keys(profiles)) { merged[alias] = profiles[alias]; sources[alias] = filePath; }
+  }
+  profileSources = sources;
+  profileCache = merged;
   return profileCache;
 }
 
 function clearProfileCache() {
   profileCache = null;
+  profileSources = Object.create(null);
 }
 
-function buildProfileFromIni(alias, raw) {
+// A publisher-fixable config problem: 400, so it surfaces instead of collapsing into a 404.
+function configError(message) {
+  const err = new Error(message);
+  err.code = 400;
+  return err;
+}
+
+function buildProfileFromIni(alias, raw, source = getConfigFilePath()) {
+  if (raw[PARSE_ERROR]) throw configError(raw[PARSE_ERROR]);
   if (!raw.host) {
-    throw new Error(`Profile [${alias}] in ${getConfigFilePath()} is missing required "host"`);
+    throw configError(`Profile [${alias}] in ${source} is missing required "host"`);
   }
 
   const hasToken = Boolean(raw.token);
@@ -133,20 +204,20 @@ function buildProfileFromIni(alias, raw) {
   const hasClientSecret = Boolean(raw.client_secret);
 
   if (hasToken && (hasClientId || hasClientSecret)) {
-    throw new Error(
-      `Profile [${alias}] is ambiguous: defines both PAT (token) and OAuth M2M (client_id/client_secret). Pick one.`
+    throw configError(
+      `Profile [${alias}] in ${source} is ambiguous: defines both PAT (token) and OAuth M2M (client_id/client_secret). Pick one.`
     );
   }
 
   if (hasClientId !== hasClientSecret) {
-    throw new Error(
-      `Profile [${alias}] is incomplete: OAuth M2M requires both client_id and client_secret`
+    throw configError(
+      `Profile [${alias}] in ${source} is incomplete: OAuth M2M requires both client_id and client_secret`
     );
   }
 
   if (!hasToken && !hasClientId) {
-    throw new Error(
-      `Profile [${alias}] has no credentials: provide either token (PAT) or client_id + client_secret (OAuth M2M)`
+    throw configError(
+      `Profile [${alias}] in ${source} has no credentials: provide either token (PAT) or client_id + client_secret (OAuth M2M)`
     );
   }
 
@@ -173,7 +244,7 @@ function buildProfileFromIni(alias, raw) {
 function buildDefaultFromEnv() {
   // DATABRICKS_HOST is injected by the Databricks Apps runtime (hostname only, no scheme);
   // DATABRICKS_SERVER_HOSTNAME is the explicit/local-dev form.
-  const rawHost = process.env.DATABRICKS_SERVER_HOSTNAME || process.env.DATABRICKS_HOST;
+  const rawHost = (process.env.DATABRICKS_SERVER_HOSTNAME || process.env.DATABRICKS_HOST || '').trim();
   if (!rawHost) return null;
   const hostname = rawHost.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 
@@ -214,19 +285,19 @@ function resolveWorkspace(alias) {
     if (!profiles[requestedAlias]) {
       const available = Object.keys(profiles).join(', ') || '(none)';
       const err = new Error(
-        `Databricks workspace profile "${requestedAlias}" not found in ${getConfigFilePath()} ` +
-        `on ArcGIS Server host "${os.hostname()}". Available profiles: ${available}. ` +
-        `The profile must exist on EVERY server machine — set it up with configure-databricks.sh ` +
-        `(README Step 3); registering the .cdpk does NOT install credentials.`
+        `Databricks workspace profile "${requestedAlias}" not found in ${getConfigFilePath()} or in the provider's ` +
+        `.env on ArcGIS Server host "${os.hostname()}". Available profiles: ${available}. ` +
+        `Add a [${requestedAlias}] section to the .env inside the .cdpk (reaches every machine), or to each ` +
+        `machine's .databrickscfg via configure-databricks.sh (README Step 3).`
       );
       err.code = 400; // config error (publisher-fixable) — surface it, don't let it collapse into a 404
       throw err;
     }
-    return buildProfileFromIni(requestedAlias, profiles[requestedAlias]);
+    return buildProfileFromIni(requestedAlias, profiles[requestedAlias], profileSources[requestedAlias]);
   }
 
   if (profiles.DEFAULT) {
-    return buildProfileFromIni('DEFAULT', profiles.DEFAULT);
+    return buildProfileFromIni('DEFAULT', profiles.DEFAULT, profileSources.DEFAULT);
   }
 
   const envDefault = buildDefaultFromEnv();
@@ -234,9 +305,9 @@ function resolveWorkspace(alias) {
 
   const err = new Error(
     `No default Databricks workspace configured on ArcGIS Server host "${os.hostname()}". ` +
-    `Define a [DEFAULT] profile in ${getConfigFilePath()} (or set DATABRICKS_SERVER_HOSTNAME and ` +
-    `DATABRICKS_ACCESS_TOKEN env vars) via configure-databricks.sh (README Step 3) — ` +
-    `registering the .cdpk does NOT install credentials.`
+    `Add a [DEFAULT] section to the provider's .env or to ${getConfigFilePath()} (configure-databricks.sh, README ` +
+    `Step 3), or set DATABRICKS_SERVER_HOSTNAME plus DATABRICKS_ACCESS_TOKEN (or DATABRICKS_CLIENT_ID and ` +
+    `DATABRICKS_CLIENT_SECRET).`
   );
   err.code = 400; // config error (publisher-fixable) — surface it, don't let it collapse into a 404
   throw err;
@@ -245,10 +316,12 @@ function resolveWorkspace(alias) {
 module.exports = {
   resolveWorkspace,
   clearProfileCache,
+  envVarsPart,
   _internal: {
     parseIni,
     buildProfileFromIni,
     getConfigFilePath,
+    setProviderEnvFile: (p) => { providerEnvFile = p; profileCache = null; },
     resolveConfigPath,
   },
 };

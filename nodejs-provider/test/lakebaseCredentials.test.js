@@ -78,7 +78,7 @@ function autoscalingRoutes(extra = {}) {
   };
 }
 
-const ws = { workspaceAlias: "arclake", hostname: "fevm-arclake.cloud.databricks.com", authType: "pat", token: "t" };
+const ws = { workspaceAlias: "arclake", hostname: "my-workspace.cloud.databricks.com", authType: "pat", token: "t" };
 const cfg = (host, database = "databricks_postgres") => ({ host, port: 5432, database, workspaceConfig: ws });
 const pathsCalled = () => calls.map((c) => `${c.method} ${c.path}`);
 
@@ -90,7 +90,9 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
   beforeEach(() => {
     routes = {}; calls = []; pools = []; poolObjs = []; endHangs = false;
     for (const k of ENV) { SAVED[k] = process.env[k]; delete process.env[k]; }
-    LakebasePool = proxyquire("../src/modules/lakebasePool", { pg: { Pool: FakePool }, https: fakeHttps() });
+    const https = fakeHttps();
+    const oauthToken = proxyquire("../src/modules/oauthToken", { https });
+    LakebasePool = proxyquire("../src/modules/lakebasePool", { pg: { Pool: FakePool }, https, "./oauthToken": oauthToken });
   });
 
   afterEach(async () => {
@@ -307,7 +309,7 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
   it("static LAKEBASE_PASSWORD on an OAuth M2M profile → logs in as LAKEBASE_USER, not the SP client id", async () => {
     process.env["LAKEBASE_PASSWORD"] = "static-pw"; // bracket notation keeps this stub off the secret scanner
     process.env.LAKEBASE_USER = "native_role";
-    const m2m = { workspaceAlias: "sp", hostname: "fevm-arclake.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
+    const m2m = { workspaceAlias: "sp", hostname: "my-workspace.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
     await LakebasePool.getLakebasePool({ host: HOST_PROV, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
     expect(pools[0].user).to.equal("native_role");
     expect(calls).to.have.lengthOf(0);
@@ -368,9 +370,20 @@ describe("lakebasePool — credential minting (Provisioned + Autoscaling)", () =
     routes = autoscalingRoutes({
       "POST /oidc/v1/token": ok({ access_token: "ws-token", expires_in: 3600 }),
     });
-    const m2m = { workspaceAlias: "arclake-sp", hostname: "fevm-arclake.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
+    const m2m = { workspaceAlias: "arclake-sp", hostname: "my-workspace.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
     await LakebasePool.getLakebasePool({ host: HOST_AUTO, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
     expect(pools[0].user).to.equal("sp-client-id");
     expect(pools[0].password).to.equal(`auto-token-for:${EP_AUTO}`);
+  });
+
+  it("OAuth M2M workspace token asks for the postgres scope, not all-apis", async () => {
+    routes = autoscalingRoutes({
+      "POST /oidc/v1/token": ok({ access_token: "ws-token", expires_in: 3600 }),
+    });
+    const m2m = { workspaceAlias: "arclake-sp", hostname: "my-workspace.cloud.databricks.com", authType: "oauth-m2m", clientId: "sp-client-id", clientSecret: "s" };
+    await LakebasePool.getLakebasePool({ host: HOST_AUTO, port: 5432, database: "databricks_postgres", workspaceConfig: m2m });
+    const mints = calls.filter((c) => c.path === "/oidc/v1/token");
+    expect(mints).to.have.lengthOf(1);
+    expect(mints[0].body).to.include("scope=postgres").and.not.include("all-apis");
   });
 });

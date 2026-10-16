@@ -72,7 +72,6 @@ else
   ask "Admin username" "siteadmin" ADMINUSER
   if ! read -rs -p "  Admin password: " PW; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi; echo
 fi
-ask "Service name (use folder/name if it's in a folder)" "TEST_FeatureService_Databricks" SVC
 echo
 
 # --- mint admin (requestip) + query (referer) tokens ----------------------------
@@ -99,6 +98,34 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 echo "[ok] admin token minted"
+echo
+
+# --- pick the service: list this server's CDF (CUSTOMDATA) FeatureServers, all folders ----
+_svcs=()
+_fl=$("${CURL[@]}" "$SERVER/$CTX/admin/services" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+for _f in "" $(jget "$_fl" '" ".join(f for f in d.get("folders",[]) if f and f!="/" and f not in ("System","Utilities"))'); do
+  _r=$("${CURL[@]}" "$SERVER/$CTX/admin/services${_f:+/$_f}" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+  for _n in $(jget "$_r" '" ".join(x["serviceName"] for x in d.get("services",[]) if x.get("type")=="FeatureServer")'); do
+    _p="${_f:+$_f/}$_n"
+    _d=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$_p.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+    [ "$(jget "$_d" 'd.get("provider") or ""')" = "CUSTOMDATA" ] && _svcs+=("$_p")
+  done
+done
+echo "-- Custom Data Feed services on this server --"
+if [ ${#_svcs[@]} -eq 0 ]; then
+  echo "  (none found — none published yet, or the admin user can't list them)"
+  ask "Service name (use folder/name if it's in a folder)" "" SVC
+else
+  for _i in "${!_svcs[@]}"; do printf "  %3d) %s\n" $((_i+1)) "${_svcs[$_i]}"; done
+  ask "Service to check: number or name (folder/name if in a folder)" "1" SVC
+  case "$SVC" in *[!0-9]*|"") ;; *)
+    if [ "$SVC" -ge 1 ] && [ "$SVC" -le ${#_svcs[@]} ]; then SVC="${_svcs[$((SVC-1))]}"
+    else echo "!! no service number $SVC (1-${#_svcs[@]})."; exit 1; fi;;
+  esac
+fi
+[ -n "$SVC" ] || { echo "!! no service name given."; exit 1; }
+SVC="${SVC%.FeatureServer}"
+echo "  checking: $SVC"
 echo
 
 # --- federation detection -------------------------------------------------------
@@ -130,15 +157,16 @@ echo
 
 # --- site machines --------------------------------------------------------------
 echo "-- Site machines --"
-MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines?token=$TOKEN&f=json")
+MRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/machines" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 MACHINE_COUNT=$(jget "$MRESP" 'len(d.get("machines",[]))'); MACHINE_COUNT=${MACHINE_COUNT:-?}
+[ "$MACHINE_COUNT" = "0" ] && MACHINE_COUNT="?"   # an error reply lists no machines: unknown, not "0"
 echo "  count: $MACHINE_COUNT"
 jget "$MRESP" '"\n".join("   - "+ (m.get("machineName") or "?") for m in d.get("machines",[]))'
 echo
 
 # --- registered CDF providers ---------------------------------------------------
 echo "-- Registered CDF providers --"
-PRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/types/customdataproviders?token=$TOKEN&f=json")
+PRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/types/customdataproviders" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 # Did the provider list actually parse? A transient error / bad token / HTML proxy response
 # yields empty PROVS that must NOT be read as "no providers registered".
 # "yes" only for a real provider listing: an admin error reply ({"error":...}) parses as JSON but lists nothing.
@@ -160,7 +188,7 @@ echo
 
 # --- service definition ---------------------------------------------------------
 echo "-- Service definition: $SVC.FeatureServer --"
-DRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer?token=$TOKEN&f=json")
+DRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 FOUND=$(jget "$DRESP" '"no" if (d.get("status")=="error" or "error" in d) else "yes"'); FOUND=${FOUND:-no}
 if [ "$FOUND" != "yes" ]; then
   echo "  !! service not found / error:"
@@ -168,7 +196,7 @@ if [ "$FOUND" != "yes" ]; then
   # Not JSON (proxy/HTML error page, login redirect, wrong context): show the raw reply, not a blank line.
   if [ -n "$_why" ]; then echo "  $_why"; else echo "  (not a JSON reply — wrong Admin URL/context or a proxy page?):"; printf '%s\n' "$DRESP" | head -c 400; echo; fi
   # It may be in a FOLDER (root path won't find it). List folders so the operator can retry.
-  FRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services?token=$TOKEN&f=json")
+  FRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
   FOLDERS=$(jget "$FRESP" '", ".join(f for f in d.get("folders",[]) if f and f!="/")')
   if [ -n "$FOLDERS" ]; then
     echo "  Folders on this server: $FOLDERS"
@@ -197,14 +225,14 @@ echo
 
 # --- realtime status ------------------------------------------------------------
 echo "-- Service status (realtime) --"
-SRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/status?token=$TOKEN&f=json")
+SRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/status" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 RTSTATE=$(jget "$SRESP" 'd.get("realTimeState") or ""')
 echo "  configuredState: $(jget "$SRESP" 'd.get("configuredState") or "?"')  |  realTimeState: ${RTSTATE:-?}"
 echo
 
 # --- per-machine instance statistics --------------------------------------------
 echo "-- Instance statistics (run right after a 404 to catch a 0-instance node) --"
-STRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/statistics?token=$TOKEN&f=json")
+STRESP=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$SVC.FeatureServer/statistics" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 RESP="$STRESP" python3 <<'PY' 2>/dev/null || echo "  (could not read statistics)"
 import os,json
 d=json.loads(os.environ["RESP"])
@@ -372,7 +400,9 @@ if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
   echo "-- idField range ('$IDFIELD') --"
   # 1) What the provider has already logged for this idField (free, and definitive once the layer has been used).
   LOGS=""
-  for d in /opt/arcgis/server/usr/logs /home/arcgis/server/usr/logs /arcgis/server/usr/logs; do
+  _ah=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+  for d in ${CDF_SERVER_DIR:+"$CDF_SERVER_DIR/usr/logs"} /opt/arcgis/server/usr/logs /app/arcgis/server/usr/logs \
+           /home/arcgis/server/usr/logs ${_ah:+"$_ah/server/usr/logs" "$_ah/arcgis/server/usr/logs"} /arcgis/server/usr/logs; do
     [ -d "$d" ] && LOGS="$LOGS $(ls -t "$d"/*/server/server-*.log 2>/dev/null | head -10 | tr '\n' ' ')"
   done
   if [ -n "${LOGS// /}" ]; then
@@ -423,10 +453,70 @@ except Exception: print('')
   echo
 fi
 
+# --- Databricks access errors in the recent server logs ---------------------------------
+# The SQL driver reports a refused connection only as "bad HTTP status code: 403"; the provider appends the likely
+# causes, and Databricks' own REST errors name a missing entitlement or token scope. Not service-specific: the provider
+# process is shared, so these lines can come from any service on the box.
+LOGS="${LOGS:-}"
+if [ -z "${LOGS// /}" ]; then
+  _ah=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+  for d in ${CDF_SERVER_DIR:+"$CDF_SERVER_DIR/usr/logs"} /opt/arcgis/server/usr/logs /app/arcgis/server/usr/logs \
+           /home/arcgis/server/usr/logs ${_ah:+"$_ah/server/usr/logs" "$_ah/arcgis/server/usr/logs"} /arcgis/server/usr/logs; do
+    [ -d "$d" ] && LOGS="$LOGS $(ls -t "$d"/*/server/server-*.log 2>/dev/null | head -10 | tr '\n' ' ')"
+  done
+fi
+ACCESS_ERR=""
+# Only the last 15 minutes: an error that was fixed (e.g. the IP was then allowed) must not outlive the fix. Log
+# times are the server's local time, ISO-formatted, so a string comparison works. No GNU date -> no filter.
+_since=$(date -d '15 minutes ago' +%Y-%m-%dT%H:%M 2>/dev/null || true)
+if [ -n "${LOGS// /}" ] && [ -n "$_since" ]; then
+  _recent=$(mktemp)
+  # shellcheck disable=SC2086
+  cat $LOGS 2>/dev/null | awk -v s="$_since" 'match($0, /time="[^"]+"/) { t = substr($0, RSTART + 6, 16) } t >= s' > "$_recent"
+  LOGS="$_recent"
+fi
+if [ -n "${LOGS// /}" ]; then
+  echo "-- Databricks access errors (server logs, last 15 minutes, any service) --"
+  # shellcheck disable=SC2086
+  if grep -qiE 'without the [a-z, -]*entitlement' $LOGS 2>/dev/null; then
+    ACCESS_ERR="entitlement"
+    echo "  [PROBLEM] Databricks: the provider's identity lacks an entitlement — $(grep -ohiE 'without the [a-z, -]*entitlements?' $LOGS | sort -u | head -2 | paste -sd ';' -)"
+  fi
+  # shellcheck disable=SC2086
+  if grep -qiE "Scopes '[^']*' are not assigned|does not have required scopes" $LOGS 2>/dev/null; then
+    ACCESS_ERR="${ACCESS_ERR:+$ACCESS_ERR,}scope"
+    echo "  [PROBLEM] Databricks: the token or service principal secret lacks a scope — $(grep -ohiE "Scopes '[^']*' are not assigned|required scopes: [a-z-]+" $LOGS | sort -u | head -2 | paste -sd ';' -)"
+  fi
+  # shellcheck disable=SC2086
+  if grep -qiE 'blocked by Databricks IP ACL' $LOGS 2>/dev/null; then
+    ACCESS_ERR="${ACCESS_ERR:+$ACCESS_ERR,}ipacl"
+    echo "  [PROBLEM] Databricks: this server's outbound IP is blocked by the workspace IP access list."
+  fi
+  # shellcheck disable=SC2086
+  if [ -z "$ACCESS_ERR" ] && grep -qF 'bad HTTP status code: 403' $LOGS 2>/dev/null; then
+    ACCESS_ERR="403"
+    echo "  [PROBLEM] Databricks refused connections with a bare 403 (entitlement, scope, CAN USE or IP access list)."
+  fi
+  [ -z "$ACCESS_ERR" ] && echo "  (none found)"
+  echo
+fi
+[ -n "${_recent:-}" ] && rm -f "$_recent"
+
 # --- ASSESSMENT -----------------------------------------------------------------
 echo "============================================================"
 echo " ASSESSMENT — likely problem(s) and what to do"
 echo "============================================================"
+if [ -n "$ACCESS_ERR" ]; then
+  case ",$ACCESS_ERR," in *,ipacl,*)
+    echo "  * Databricks IP access list: the workspace blocks this server's public IP (the log line names it). Add that"
+    echo "    IP (or the NAT/egress range) to the workspace's IP access list; no ArcGIS restart is needed for this one.";;
+  esac
+  case ",$ACCESS_ERR," in *,entitlement,*|*,scope,*|*,403,*)
+    echo "  * Databricks access ($ACCESS_ERR): the identity in the workspace profile needs the \"Databricks SQL access\""
+    echo "    entitlement (plus \"Workspace access\" for Lakebase), CAN USE on the warehouse, and token/secret scopes \"sql\""
+    echo "    (plus \"postgres\" for Lakebase). After fixing, restart ArcGIS Server (sudo systemctl restart arcgisserver, or stopserver/startserver).";;
+  esac
+fi
 PROBLEMS=0
 
 if [ "$FOUND" != "yes" ]; then
@@ -459,20 +549,25 @@ else
     echo " * NOTE: provider is '$PROVIDER', not CUSTOMDATA — this may not be a Databricks CDF"
     echo "        service, so some of the advice below may not apply."
   fi
-  # min=0 -> POSSIBLE intermittent-404 cause; escalate only when corroborated (multi-machine)
+  # min/max = 0/0 is the shared instance pool: what Server Manager / Portal publishing creates, and
+  # healthy (verified live: 0/0 services serve fine). min=0 matters only on a multi-machine site or
+  # when the "404, works on refresh" symptom is seen; max=0 with min>=1 is a contradiction.
+  SIZING_FIX="setup.sh option 7, or Server Manager > the service > Pooling"
   if [ "$MININST" = "0" ]; then
     if [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
       echo " * minInstancesPerNode=0 on a MULTI-machine site ($MACHINE_COUNT) -> a plausible intermittent-"
       echo "     404 cause: a round-robin node with no resident instance can 404 while another serves."
       echo "     Confirm against the live query above / the per-machine lines / the log before changing it."
-      echo "     -> If corroborated: minInstancesPerNode=1, maxInstancesPerNode>=2 (a warm instance per node)."
+      echo "     -> If corroborated: min=1, max>=2 (a warm instance per node) via $SIZING_FIX."
       PROBLEMS=$((PROBLEMS+1))
+    elif [ "$MAXINST" = "0" ]; then
+      echo " * min/max instances 0/0 = the shared instance pool (the default when publishing from"
+      echo "     Server Manager or Portal). Normal: shared instances serve it on demand, so the zero"
+      echo "     instance counts above are expected. Only if you see '404, then works on refresh' under"
+      echo "     load: set min=1, max=2 via $SIZING_FIX."
     else
-      echo " * minInstancesPerNode=0 -> no instance is kept resident. This CAN cause intermittent"
-      echo "     '404, works on refresh' UNDER shared-pool pressure (many min=0 services vs pool size),"
-      echo "     but on a quiet single-machine box it may be perfectly healthy."
-      echo "     -> If you see that symptom, set min=1/max>=2; also check the shared-instance pool size"
-      echo "        vs how many services use it. Don't 'fix' this if you aren't seeing the symptom."
+      echo " * minInstancesPerNode=0 -> no instance is kept warm; the first request after idle starts one."
+      echo "     Fine on a quiet box. Only if you see '404, then works on refresh': set min=1 via $SIZING_FIX."
     fi
   # multi-machine with min>=1 = healthy topology (informational, NOT a problem)
   elif [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
@@ -480,18 +575,14 @@ else
     echo "     -> Just confirm the service is started on ALL nodes (each per-machine line above"
     echo "        should show instances); a node stuck at 0 would 404 via round-robin."
   fi
-  # maxInstancesPerNode=0 -> its own, distinct misconfiguration (independent of min). For a CDF
-  # (CUSTOMDATA) dedicated-instance service this means NO instance is guaranteed resident on a
-  # node, which can 404 requests outright — often a harder problem than min=0 and easy to miss
-  # because the min=0 message above doesn't cover it.
-  if [ "$MAXINST" = "0" ]; then
-    echo " * maxInstancesPerNode=0 -> the service can't guarantee a resident instance on any node."
-    echo "     For a CDF (CUSTOMDATA) dedicated-instance service this is a misconfiguration that can"
-    echo "     404 requests. -> set maxInstancesPerNode>=2 (with minInstancesPerNode>=1)."
+  if [ "$MAXINST" = "0" ] && [ -n "$MININST" ] && [ "$MININST" != "0" ]; then
+    echo " * minInstancesPerNode=$MININST but maxInstancesPerNode=0 -> contradictory sizing; ArcGIS can't"
+    echo "     start the warm instance you asked for. -> set max>=2 via $SIZING_FIX."
     PROBLEMS=$((PROBLEMS+1))
   fi
   # STARTED but zero live instances right now (arms the log-tail advice for the init-failure case)
-  if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" = "0" ]; then
+  # (Not for the shared pool: its instances are never counted against the service.)
+  if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" = "0" ] && ! { [ "$MININST" = "0" ] && [ "$MAXINST" = "0" ]; }; then
     echo " * No instance is running right now (free=0, busy=0)."
     echo "     -> Normal for a min=0 service that's idle. BUT if requests are actively 404ing, the"
     echo "        provider is failing to INITIALIZE (Databricks auth/connectivity, wrong table/column)"

@@ -7,7 +7,7 @@ const { translateToGeoJSON } = require("./translate");
 const { parseMinScale } = require("./scale");
 const { buildSqlQuery } = require("./sql");
 const { generateFiltersApplied } = require("./filters");
-const { getGeometryQuery, getExtentFromGeoJson } = require("./geometry");
+const { getGeometryQuery, getExtentFromGeoJson, getWorldExtent } = require("./geometry");
 const { getAuditLogger } = require("./auditLog");
 const { getGeometryFieldExpression, resolveGeometryFormat } = require("./geometryFormat");
 const {
@@ -28,6 +28,7 @@ module.exports = {
   generateFiltersApplied,
   getGeometryQuery,
   getExtentFromGeoJson,
+  getWorldExtent,
   getAuditLogger,
   getGeometryFieldExpression,
   resolveGeometryFormat,

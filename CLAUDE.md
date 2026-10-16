@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (560 tests, ~11s)
+# Run all tests (609 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -60,6 +60,7 @@ Modules split by backend. Import from `modules/index.js` (the barrel export), no
 | `sanitize.js` | SQL injection prevention: `validateFieldName`, `validateIdentifier`, `escapeSqlString`, `checkWhereClauseSafety`, `validateInteger` |
 | `filters.js` | Generates `filtersApplied` metadata object for CDF runtime |
 | `auditLog.js` | Optional JSON-lines audit logging (enabled via `ENABLE_AUDIT_LOG=true`) |
+| `oauthToken.js` | Service principal tokens from `/oidc/v1/token` limited to one scope (`sql` for the warehouse, `postgres` for Lakebase APIs); cached per scope, 5-min refresh buffer |
 
 ### Critical behavioral contracts
 
@@ -80,7 +81,8 @@ Modules split by backend. Import from `modules/index.js` (the barrel export), no
 **CDF runtime compatibility:** `authorize()` and `editData()` support both calling conventions — 11.4 callback pattern `(req, callback)` and 12.0 async pattern (return/throw). `getData()` uses callback pattern (both versions).
 
 **Config layering** (2 config surfaces for users):
-- `.databrickscfg` — the one credentials file users author (auto-found at `~/.databrickscfg`, then `/home/arcgis/.databrickscfg`); profiles = workspaces. Optional env/tuning (pool sizes, timeouts, `DATABRICKS_CONFIG_FILE` override) go in ArcGIS's `init_user_param.sh`.
+- `.databrickscfg` — the one credentials file users author (auto-found at `~/.databrickscfg`, then `/home/arcgis/.databrickscfg`); profiles = workspaces. Profiles can also be `[NAME]` sections in the provider's own `.env` (packaged in the `.cdpk`, so every machine gets them; same INI format; `.databrickscfg` wins on a name clash). Only the lines above the `.env`'s first section are loaded as env vars (`envVarsPart`); section keys never reach `process.env`. Optional env/tuning (pool sizes, timeouts, `DATABRICKS_CONFIG_FILE` override) go in ArcGIS's `init_user_param.sh`.
+- A bad line fails only the profiles it can affect (`parseIni` marks them; they throw a 400 when resolved), not every service: inside a section that profile, above the first section every profile in that file (the `.env`'s env-var part ends there). An indented line without `=` continues the previous value (configparser style, e.g. `scopes = sql,` + `  postgres`).
 - `req.params` (per-service) — Table name, geometry column, idField, maxRecordCount, srid, lakebase settings. Set during `createService`. Overrides env var defaults.
 
 ### Spatial filter handling differences
@@ -132,31 +134,33 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**560 tests across 20 files:**
+**609 tests across 22 files:**
 | File | Count | Tests |
 |------|-------|-------|
-| `model.test.js` | 107 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
-| `sanitize.test.js` | 59 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
+| `model.test.js` | 112 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
+| `sanitize.test.js` | 61 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
 | `lakebaseQuery.test.js` | 54 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
 | `sql.test.js` | 42 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
 | `geometryFormat.test.js` | 39 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
 | `editSql.test.js` | 33 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization |
 | `geometry.test.js` | 27 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
-| `workspaceResolver.test.js` | 28 | `.databrickscfg` profile resolution → workspace + auth config |
+| `workspaceResolver.test.js` | 45 | `.databrickscfg` and `.env` [PROFILE] resolution → workspace + auth config |
 | `translate.test.js` | 18 | Row→GeoJSON, invalid geometry handling, ID casting, antimeridian |
 | `cloudFetch.test.js` | 13 | CloudFetch-off statement options, crash repro regression |
-| `extent.test.js` | 11 | Spatial extent cache/TTLs, de-dupe, own-connection, budget-bounded borrow, detached cleanup |
+| `extent.test.js` | 21 | Spatial extent cache/TTLs, de-dupe, own-connection, budget-bounded borrow, detached cleanup, world-extent fallback, token on layer info |
 | `filters.test.js` | 15 | filtersApplied flags, distinct bypass, combined filters |
 | `clientGone.test.js` | 8 | Client-abort cancel, tile timeout, single-response guarantee |
 | `esriGeometry.test.js` | 9 | Esri geometry → GeoJSON conversion |
 | `timeExtent.test.js` | 9 | Time extent cache, parallel extents, background continuation |
 | `version.test.js` | 10 | Provider version reporting |
-| `connectionPool.test.js` | 16 | Databricks SQL pool sizing, idle cleanup, wait queue, creation cap |
+| `connectionPool.test.js` | 22 | Databricks SQL pool sizing, idle cleanup, wait queue, creation cap, warm-up serves waiters, sql-scoped SP auth, 403 cause from REST (single-flight) |
 | `scale.test.js` | 4 | minScale parameter parsing/advertising |
-| `lakebaseCredentials.test.js` | 25 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user |
+| `lakebaseCredentials.test.js` | 26 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user, postgres scope |
+| `oauthToken.test.js` | 7 | SP token per scope, cache/refresh/single-flight, invalid_scope fallback, no retry on access_denied |
 | `lakebasePool.test.js` | 2 | Pool keying basics |
+| `cdconfig.test.js` | 1 | Publish-form line length (Server Manager renders each parameter on one nowrap line) |
 
-Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exception: `model.test.js` tests the full `model.js` including getData/editData integration.
+Test file → source file mapping is 1:1 (e.g., `test/sql.test.js` tests `src/modules/sql.js`). Exceptions: `model.test.js` tests the full `model.js` including getData/editData integration; `cdconfig.test.js` checks the manifest.
 
 ### model.test.js setup pattern
 
@@ -244,6 +248,8 @@ expect(() => checkWhereClauseSafety("1=1; DROP TABLE x")).to.throw();
 
 ## Service parameters
 
+**Keep each `label (description)` under 115 characters** (`test/cdconfig.test.js`). Server Manager's publish form renders every parameter as one `nowrap` line with the input after it: the long descriptions written for Portal's ⓘ tooltips widened the dialog to ~4,200 px and pushed every input off-screen. Detailed guidance lives in the README.
+
 Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When creating a service via Admin REST API, all must be included — use empty strings for unused ones. The presence of `lakebaseHost` determines backend routing. `maxRecordCount` and `srid` can be set per-service (fallback: env var, then 2000/4326 defaults).
 
 ## Files to know about
@@ -255,6 +261,10 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 
 - **Client WHERE is parenthesized** before the time/geometry/objectId filters are ANDed on (both backends). Unwrapped, `a OR b` let those filters apply to `b` only — on a 28B-row table that was a near-full scan per request, which filled the connection pool and made every service on the box hang.
 - **Metadata extents run in PARALLEL on borrowed connections (v1.1.7)** (`model.js` `getLayerExtent`/`getLayerTimeExtent`): the spatial (`ST_Envelope_Agg`) and time extents used to run sequentially on the request's own connection — two stacked 10 s budgets plus awaited cancel/close round-trips made cold-cache metadata take 15–21 s live. Now each extent borrows its own pooled connection and both run via `Promise.all`, and the ENTIRE path (borrow → statement open → fetch) races `CDF_EXTENT_WAIT_MS` — a queued borrow can't stall the response past the budget (pool-saturation hold-and-wait was the round-1 review's main catch). Cleanup (cancel/close/release) is fire-and-forget (`_releaseExtentConnection`); a failed `close()` releases with `{destroy: true}` so a session in unknown state is never recycled. A spatial-extent timeout negatively caches for `CDF_EXTENT_RETRY_MS` (1 h) and, if the borrow was still queued, the late-granted connection skips opening the statement (`abandoned` flag) and just returns to the pool. Success caches 24 h (`CDF_EXTENT_CACHE_MS`); non-timeout errors 1 min (`CDF_EXTENT_ERROR_RETRY_MS`). Concurrent cold-cache requests share one in-flight query per cache key (so a burst costs at most one extra connection per extent per table). Cache keys include the pool identity (workspace|warehouse). Cancelled ops' `fetchAll()` rejections are sunk (`.catch`) to avoid unhandled rejections.
+- **World-extent fallback** (v1.1.8): when the spatial extent timed out or failed (cache entry `unknown: true`), metadata advertises the whole world in the table's WKID (4326: ±180/±90; 3857/102100/102113/900913: ±20037508.34) instead of omitting `extent`. Omitted, the runtime derives the extent from the response's few rows (seen live: a global 28B-row table advertised one point in Hawaii, so "Zoom to layer" landed there). Applied only at metadata assembly, never cached, so the hourly retry still replaces it with the real extent. Not used for other WKIDs (no meaningful world box), for a table whose aggregate answered NULL (known-empty), or on query responses.
+- **Metadata vs data requests** (v1.2.0, `NON_QUERY_PARAMS` in `model.js`): a request is metadata when every query parameter is `f`, `token`, `callback`, `_`, `_ts`, `returnUpdates` or `returnAdvancedSymbols` (the runtime passes the same params for layer info and `/query`, so there is no route to key on). Before 1.2.0 any second parameter made it a data request, so on a secured or federated server (`?f=json&token=...` from Map Viewer/JS SDK) layer info fetched a full page (15,000 rows from the 28B-row table), computed no extent, and the runtime advertised a box derived from those rows. Seen live on 34.x; anonymous clients and header tokens (`X-Esri-Authorization`) were unaffected, which is why earlier checks passed.
+- **Extra GEOMETRY/GEOGRAPHY/VARIANT/complex columns** (verified live 2026-10-14, @databricks/sql 1.12.0, arclake `atrivedi.cdf_demo.cdf_edge_types`, `testimages/edge/edge_types.js`): `SELECT * EXCEPT (geom)` returns them raw and nothing errors. Second GEOMETRY and GEOGRAPHY → EWKT strings (`SRID=4326;...`); VARIANT → JSON string; STRUCT/MAP → objects, ARRAY → arrays, BINARY → Buffer (all typed `esriFieldTypeString`, so clients see `[object Object]`/JSON); DECIMAL → number; TIMESTAMP_NTZ → Date read as UTC. New ST_ functions need no driver change (they run on the warehouse). Fix for messy columns = publish a view that drops/converts them. Re-run the script after any driver upgrade.
+- **Scopes and entitlements, no `all-apis`** (v1.2.1, `oauthToken.js`; verified live 2026-10-15 on arclake with throwaway SPs, `testimages/scope/`): @databricks/sql 1.12.0's own M2M flow always requests `all-apis` (`OAuthManager.getScopes`), so an SP secret limited to `sql` failed (`Scopes 'all-apis' are not assigned`). The pool now authenticates SPs with `authType: 'custom'` and our own `scope=sql` token (the driver calls `authenticate()` before every request, so refresh is ours), and Lakebase REST calls use `scope=postgres` (covers `/api/2.0/database/*` and `/postgres/*`). An `invalid_scope` reply falls back to `all-apis`; `access_denied` doesn't. Needed: scopes `sql` (+ `postgres` for Lakebase), for PATs and SP secrets alike; entitlements **Databricks SQL access** (+ **Workspace access** for Lakebase). Without Databricks SQL access every scope fails with the driver's opaque `bad HTTP status code: 403` (only the REST API names the entitlement), so on a 403 `connectionPool` asks `/api/2.0/sql/warehouses/<id>` with the same token (once a minute) and appends Databricks' message, e.g. `Source IP address: … is blocked by Databricks IP ACL` (verified live on a new box), else a generic hint. `offline_access` is not a valid SP scope. The Databricks CLI (helper scripts) also defaults to `all-apis` and can't log in with a limited secret unless the profile has `scopes = sql, postgres` (verified live; the provider ignores the key, `configure-databricks.sh` writes it). This also bypasses the driver's OAuth host allowlist for SPs (the GovCloud `.mil`/`.us` patch is still applied but no longer on the SP path).
 - **PBF always on** (v1.1.5): `supportedQueryFormats` is never set, so the runtime advertises `JSON,geojson,PBF`. Verified on 12.1.0 (correct quantization transform, same features as JSON). The old `enablePbf` parameter was removed from `cdconfig.json` — verified live that services which had it stored still load (ArcGIS ignores the now-undeclared value), so nothing in `model.js` reads it.
 - **Time extent** (v1.1.5, reworked v1.1.7): `timeInfo.timeExtent` = min/max of `timeColumn`, cached/de-duped/time-boxed. When it exceeds `CDF_EXTENT_WAIT_MS` the SAME query keeps running in the background on its dedicated borrowed connection (up to `CDF_TIME_EXTENT_BG_MS` = 120 s) — it is NOT cancelled and re-run; only a query that also blows the background cap is cancelled and negatively cached for 1 h. Without a `timeColumn`, Map Viewer requests all dates per tile — the wizard pushes publishers to set one; the provider logs a one-time warning.
 - **CloudFetch off** (`statementOptions()` in `model.js`): every `executeStatement` passes `useCloudFetch: false` unless `DATABRICKS_USE_CLOUDFETCH=true`. With it on, a host that can't reach the workspace's storage gets a 403 per download, and @databricks/sql 1.12.0's `CloudFetchResultHandler.fetchNext()` awaits only the first of up to 10 concurrent downloads; the rest reject unhandled and Node exits the whole CDF process (seen 2026-10-07; `testing/repro-cloudfetch-unhandled.js`). Per statement on purpose: the 1.12.0 `DBSQLClient` constructor ignores a config argument. Driver pinned to exactly 1.12.0. Measured from a laptop: CDF-sized pages (≤50K rows) never used CloudFetch; inline was as fast at 300K–1M rows (`testing/live-cloudfetch-check.js`).
@@ -265,7 +275,7 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 - **Antimeridian** (v1.1.5): `translate.js` `normalizeAntimeridian` unwraps 4326 lines/polygons whose longitude span > 180° (not poleward of ±85°), per polygon (holes follow the outer ring).
 - **Lakebase identifiers are lowercased** (`model.js` Lakebase paths + `getMetadata`): SQL uses unquoted identifiers, which Postgres folds to lowercase, so result rows are keyed lowercase. An idField configured as `OBJECTID` used to break reads, adds (`objectId: NaN`) and deletes ("not found").
 - **`editingEnabled=false` is enforced** in `editData` (400) and read-only services advertise no templates/editable fields. cdconfig's provider-level `editingEnabled: true` otherwise turns editing on for every service. Unset stays editable (older services).
-- **WHERE parentheses must balance** (`sanitize.js`, outside quoted spans): `1=1) OR (1=1` would close the `(where)` wrapper and drop the ANDed filters. Backslash escapes count only on the Lakehouse path (`backslashEscapes: true`); Postgres treats `\` as a literal.
+- **WHERE parentheses must balance** (`sanitize.js`, outside quoted spans): `1=1) OR (1=1` would close the `(where)` wrapper and drop the ANDed filters. Backslash escapes count only on the Lakehouse path (`backslashEscapes: true`); Postgres treats `\` as a literal. String forms the scanner can't follow are rejected: Databricks raw strings `r'…'`, Postgres `E'…'` and `$$…$$`/`$tag$`, and an unterminated quote (verified live: `r'\' = r'\' ) OR (1=1 AND b = r'\'` returned 10 of 10 rows with `AND id < 0` appended).
 - **Lakebase hardening**: one response per request (`respond` guard, as Lakehouse), `SET statement_timeout` on each new client (not the startup parameter, which poolers can reject), REST socket timeouts, token refresh doesn't await the old pool's `end()`, Esri Web Mercator codes (102100/102113/900913) mapped to 3857 before `ST_Transform`, and the filter geometry's own SR (or the Mercator heuristic) used when there is no `inSR`.
 - **`resultRecordCount` is capped** to `maxRecordCountPerPage` (default 2000) in both Lakehouse and Lakebase paths. Users cannot request unbounded result sets.
 - **Lakebase SSL**: `LAKEBASE_SSL_VERIFY` defaults to `false` (accepts any cert). The Databricks API helper also skips cert verification (`rejectUnauthorized: false`). Fine for Databricks-issued certs, but be aware in custom PKI environments.

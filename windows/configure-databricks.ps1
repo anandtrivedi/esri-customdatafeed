@@ -21,6 +21,11 @@
   Restart the ArcGIS Server service afterward - env vars and .databrickscfg are read
   once at process start.
 
+  This is the PER-MACHINE alternative to the primary method in v1.2.0: a .env with
+  [NAME] profiles inside the .cdpk (register-provider.ps1 -EnvFile), which ArcGIS copies
+  to every machine. A profile written here OVERRIDES the same-named .env profile on this
+  machine. Rewriting an existing .databrickscfg keeps its profiles but not its comments.
+
   MULTI-MACHINE: the provider code + service definitions propagate across a site
   automatically, but this file + env var are per-machine. Either put .databrickscfg on
   a shared path all nodes can read and run this on each node with that same -ConfigFile,
@@ -52,8 +57,9 @@ $ErrorActionPreference = 'Stop'
 function Write-Head($t) { Write-Host ""; Write-Host "== $t ==" -ForegroundColor Cyan }
 function Read-Plain([securestring]$s) {
   if (-not $s) { return "" }
-  [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+  $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)
+  try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+  finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }   # don't leave the secret in unmanaged memory
 }
 
 # --- minimal INI read/write that preserves other profiles -------------------
@@ -62,7 +68,7 @@ function Read-Ini([string]$Path) {
   $sections = [ordered]@{}
   if (Test-Path -LiteralPath $Path) {
     $cur = $null
-    foreach ($line in Get-Content -LiteralPath $Path) {
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
       $t = $line.Trim()
       if ($t -match '^\[(.+)\]$') {
         $cur = $Matches[1]
@@ -87,11 +93,17 @@ function Write-Ini([System.Collections.Specialized.OrderedDictionary]$Sections, 
 }
 
 # --- lock a file's ACL to SYSTEM + Administrators + the service account ------
+# Fails closed: if the file can't be locked to SYSTEM + Administrators, it throws, and the caller removes the temp
+# file before any secret is written into it. (icacls signals failure only by exit code, never an exception.)
+function Invoke-IcaclsOrThrow([string]$Path, [string]$Op, [string]$Arg) {
+  if ($Arg) { & icacls $Path $Op $Arg | Out-Null } else { & icacls $Path $Op | Out-Null }
+  if ($LASTEXITCODE -ne 0) { throw "icacls $Op $Arg failed (exit $LASTEXITCODE) on $Path - not writing secrets to it." }
+}
 function Set-CfgAcl([string]$Path) {
+  Invoke-IcaclsOrThrow $Path '/inheritance:r' ''
+  Invoke-IcaclsOrThrow $Path '/grant:r' '*S-1-5-18:R'       # SYSTEM
+  Invoke-IcaclsOrThrow $Path '/grant:r' '*S-1-5-32-544:F'   # Administrators
   try {
-    & icacls $Path /inheritance:r | Out-Null
-    & icacls $Path /grant:r "*S-1-5-18:R"      | Out-Null   # SYSTEM
-    & icacls $Path /grant:r "*S-1-5-32-544:F"  | Out-Null   # Administrators
     # Grant the ArcGIS Server service account read, if it's a normal (non-built-in) account.
     $svc = Get-CimInstance Win32_Service -Filter "DisplayName='$ServiceName'" -ErrorAction SilentlyContinue
     if (-not $svc) { $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue }
@@ -120,11 +132,11 @@ function Set-CfgAcl([string]$Path) {
         }
       }
     }
-    Write-Host "  [ok] locked ACL on $Path (SYSTEM + Administrators + service account)." -ForegroundColor Green
   } catch {
-    Write-Host "  [warn] could not fully lock the ACL: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "  [warn] could not grant the service account read: $($_.Exception.Message)" -ForegroundColor Yellow
     Write-Host "         Ensure the ArcGIS Server service account can READ $Path."
   }
+  Write-Host "  [ok] locked ACL on $Path (SYSTEM + Administrators; service account per the lines above)." -ForegroundColor Green
 }
 
 # ===========================================================================
@@ -171,6 +183,7 @@ $destDir = Split-Path -Parent $ConfigFile
 if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
 
 # Fail closed: if the existing file is present but unreadable, don't clobber other workspaces.
+$hadFile = Test-Path -LiteralPath $ConfigFile
 $ini = Read-Ini $ConfigFile
 if (-not $ini.Contains($ProfileName)) { $ini[$ProfileName] = [ordered]@{} }
 # clear prior auth keys so PAT<->OAuth can't mix
@@ -196,6 +209,7 @@ try {
   throw
 }
 Write-Host "  [ok] wrote $ConfigFile (profile '$ProfileName', $AuthMode auth, host $DatabricksHost)." -ForegroundColor Green
+if ($hadFile) { Write-Host "       Other profiles were kept; comments in the old file were not." }
 
 # scrub secrets from memory
 $tokenPlain = $null; $secretPlain = $null; [System.GC]::Collect()
@@ -205,7 +219,9 @@ if ($SetConfigFileEnv) {
   Write-Head "Machine environment (replaces init_user_param.sh)"
   [Environment]::SetEnvironmentVariable('DATABRICKS_CONFIG_FILE', $ConfigFile, 'Machine')
   Write-Host "  [ok] set Machine env var DATABRICKS_CONFIG_FILE=$ConfigFile" -ForegroundColor Green
-  Write-Host "       (The ArcGIS Server service reads this at start - a running server won't see it until restart.)"
+  Write-Host "       The ArcGIS Server service reads this at start: restart it to pick it up."
+  Write-Host "       If it still isn't seen after a restart, reboot (services can keep the environment from boot)."
+  Write-Host "       With the default -ConfigFile the variable is optional; the provider also finds that path itself."
 }
 
 # --- optional connectivity check --------------------------------------------
@@ -232,4 +248,5 @@ Write-Host "   Restart-Service -DisplayName '$ServiceName' -Force"
 Write-Host ""
 Write-Host " Multi-machine: repeat on every node (shared -ConfigFile path, or a local copy each),"
 Write-Host " then restart each node. Rotations: edit the file + restart."
+Write-Host " Note: a profile here overrides the same-named profile in the package's .env on this machine."
 Write-Host "============================================================"

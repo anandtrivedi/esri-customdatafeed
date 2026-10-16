@@ -137,6 +137,35 @@ describe("sanitize", () => {
       expect(checkWhereClauseSafety("`odd(col` = 1")).to.equal("`odd(col` = 1"); // backtick identifier
     });
 
+    it("rejects string forms whose escaping would hide parentheses from the check", () => {
+      // Each would close the (where) wrapper and drop the ANDed geometry/time/objectId filters (verified live:
+      // Databricks returned 10 of 10 rows for the r'\\' form with "AND id < 0" appended).
+      const lh = { backslashEscapes: true };
+      expect(() => checkWhereClauseSafety("r'\\' = r'\\' ) OR (1=1 AND b = r'\\'", lh)).to.throw(/Raw string literals/);
+      expect(() => checkWhereClauseSafety("a = R\"x\"", lh)).to.throw(/Raw string literals/);
+      expect(() => checkWhereClauseSafety("E'\\'' = E'\\'' ) OR (1=1 AND b = E'\\''")).to.throw(/Escape string literals/);
+      expect(() => checkWhereClauseSafety("a = e'x'")).to.throw(/Escape string literals/);
+      expect(() => checkWhereClauseSafety("$$($$ = $$($$ ) OR (1=1 AND b = $$)$$")).to.throw(/Dollar-quoted/);
+      expect(() => checkWhereClauseSafety("a = $q$x$q$")).to.throw(/Dollar-quoted/);
+      expect(() => checkWhereClauseSafety("name = $t1$($t1$) OR 1=1")).to.throw(/Dollar-quoted/); // digits in the tag
+      expect(checkWhereClauseSafety("a = $1")).to.equal("a = $1"); // $1 is a parameter, not a quote
+      expect(() => checkWhereClauseSafety("a = 'x", lh)).to.throw(/Unterminated/);
+      expect(() => checkWhereClauseSafety("a = 'x\\'", lh)).to.throw(/Unterminated/); // Databricks: \' doesn't close it
+      expect(() => checkWhereClauseSafety('"col = 1')).to.throw(/Unterminated/);
+    });
+
+    it("still allows the WHERE clauses ArcGIS clients send (dates, LIKE, names ending in r/e, $ in names)", () => {
+      for (const w of [
+        "d >= date '2024-01-01' AND t < TIMESTAMP '2024-02-01 00:00:00'",
+        "name = 'Mr' OR name = 'Mme'", "upper(name) LIKE '%E%'", "r = 'x' AND e = 'y'", "owner='R'",
+        "name = 'it''s'", "note = '$$ (x'", "a$b$c = 1", "price = 1 AND code IN ('E1','R2')",
+        "CAST(id AS STRING) = '5'", "status IS NULL OR status = ''",
+      ]) {
+        expect(checkWhereClauseSafety(w), w).to.equal(w);
+        expect(checkWhereClauseSafety(w, { backslashEscapes: true }), w).to.equal(w);
+      }
+    });
+
     it("should allow normal WHERE clauses", () => {
       expect(checkWhereClauseSafety("status = 'active'")).to.equal(
         "status = 'active'"

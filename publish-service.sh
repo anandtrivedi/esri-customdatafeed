@@ -3,7 +3,7 @@
 # publish-service.sh — interactive wizard to publish a Databricks CDF Feature Service.
 #
 # Runs on the ArcGIS Server box with only bash + curl + python3 (all already present).
-# No JSON to hand-edit, no MCP client, works air-gapped. Safe to re-run.
+# No JSON to hand-edit, works air-gapped. Safe to re-run.
 #
 # It asks one question per field, builds the createService payload itself (python3,
 # so no quoting/missing-key mistakes), then creates -> starts -> verifies the service
@@ -13,15 +13,18 @@
 #   Run it ON the ArcGIS Server box, as root (simplest) or as the arcgis user:
 #       sudo bash publish-service.sh          # or, if already root:  bash publish-service.sh
 #   Root is fine — the script only makes authenticated HTTPS calls to the ArcGIS admin
-#   API (token auth, no OS privileges needed), and as root it can also read the
-#   arcgis-owned .databrickscfg to offer the workspace-profile pick-list. Running as a
-#   plain non-root user still works, but the pick-list falls back to typing the name.
+#   API (token auth, no OS privileges needed), and as root it can also read the provider's
+#   .env and the arcgis-owned .databrickscfg to offer the workspace-profile pick-list.
+#   Running as a plain non-root user still works, but the pick-list falls back to typing the name.
 #
-#   The PROVIDER runs as the 'arcgis' user and reads ~/.databrickscfg at query time, so
-#   make sure the config lives where arcgis can read it:
-#       sudo chown arcgis:arcgis /home/arcgis/.databrickscfg
-#       sudo chmod 600 /home/arcgis/.databrickscfg
-#   (or set DATABRICKS_CONFIG_FILE in init_user_param.sh to a path arcgis can read).
+#   CREDENTIALS (the provider reads them at startup):
+#     - recommended: a .env with [NAME] sections inside the .cdpk (README step 2), installed into
+#       the provider folder on every machine;
+#     - alternative: a per-machine .databrickscfg (a same-named profile there overrides the .env),
+#       owned by arcgis with mode 600:
+#         sudo chown arcgis:arcgis /home/arcgis/.databrickscfg && sudo chmod 600 /home/arcgis/.databrickscfg
+#       (or set DATABRICKS_CONFIG_FILE in init_user_param.sh to a path arcgis can read);
+#     - DATABRICKS_SERVER_HOSTNAME + DATABRICKS_ACCESS_TOKEN env vars, for the default workspace only.
 #
 # NOTE: the ArcGIS admin token is minted once at startup and reused for the whole
 #   session. ArcGIS tokens default to ~60 min. If you publish many tables across a
@@ -43,8 +46,9 @@ case "${1:-}" in
     echo "  creates -> starts -> verifies the service, printing its FeatureServer URL."
     echo "  No JSON to hand-edit, no admin token to mint yourself. Works air-gapped."
     echo
-    echo "  Requires: bash, curl, python3 (all present on ArcGIS Server) and a"
-    echo "  .databrickscfg readable by the arcgis user (see the repo README, Step 3)."
+    echo "  Requires: bash, curl, python3 (all present on ArcGIS Server) and Databricks credentials:"
+    echo "  a .env inside the provider package (recommended), a per-machine .databrickscfg, or the"
+    echo "  DATABRICKS_* env vars for the default workspace. See the repo README, step 2."
     exit 0
     ;;
 esac
@@ -72,8 +76,8 @@ PUBLISHED=()
 _tmppass=""; MINT_RESP=""
 _cleanup() { rm -f "${_tmppass}"; }
 trap _cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'stty echo 2>/dev/null; exit 130' INT     # stty: Ctrl-C during the hidden password read
+trap 'stty echo 2>/dev/null; exit 143' TERM
 
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
@@ -238,7 +242,31 @@ else
   echo "         '$PROVIDER_NAME'. If publishing fails with 'provider not found', register it."
 fi
 
+# The installed provider's .env (carried inside the .cdpk) can hold [NAME] workspace profiles too.
+# Install roots: setup.sh's resolved one first, then the standard and home-directory layouts.
+PROV_ENV=""
+_ahome=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
+for r in ${CDF_SERVER_DIR:+"$CDF_SERVER_DIR"} /opt/arcgis/server /app/arcgis/server \
+         ${_ahome:+"$_ahome/server" "$_ahome/arcgis/server"} /home/arcgis/server /home/arcgis/arcgis/server /arcgis/server; do
+  f="${r%/}/framework/runtime/customdata/providers/$PROVIDER_NAME/.env"
+  [ -r "$f" ] && { PROV_ENV="$f"; break; }
+done
+# Profile NAMES only (never values), using the provider's own header rule ([NAME], optional # comment, BOM-safe).
+env_profiles() {
+  [ -n "$PROV_ENV" ] || return 0
+  python3 - "$PROV_ENV" <<'PY' 2>/dev/null
+import re, sys
+for line in open(sys.argv[1], encoding="utf-8-sig").read().splitlines():
+    m = re.match(r"^\[([^\]]+)\]\s*(?:[#;].*)?$", line.strip())
+    if m: print(m.group(1).strip())
+PY
+}
+
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
+ENV_PROFILES=$(env_profiles)   # read once, so every message below agrees
+if [ -n "$ENV_PROFILES" ]; then
+  echo "  [ok]   workspace profiles in the provider's .env: $(printf '%s' "$ENV_PROFILES" | tr '\n' ' ')"
+fi
 if [ -f "$CFG" ]; then
   echo "  [ok]   Databricks config found: $CFG"
   # Ownership check — must be arcgis so the provider process can read it.
@@ -256,14 +284,18 @@ if [ -f "$CFG" ]; then
   else
     echo "  [ok]   permissions: ${CFG_PERMS:-unknown}"
   fi
-  if [ ! -s "$CFG" ]; then
+  if [ ! -s "$CFG" ] && [ -z "$ENV_PROFILES" ]; then
     echo "  [WARN] $CFG is empty — add a [DEFAULT] profile before publishing."
   fi
+elif [ -n "$ENV_PROFILES" ]; then
+  echo "  [ok]   no $CFG on this machine (credentials come from the provider's .env)"
 else
-  echo "  [FAIL] $CFG not found."
-  echo "         The provider runs as 'arcgis' and must read this file at query time."
-  echo "         Create it:  sudo -u arcgis databricks configure --token"
-  echo "         Or copy:    sudo cp ~/.databrickscfg $CFG && sudo chown arcgis:arcgis $CFG && sudo chmod 600 $CFG"
+  echo "  [WARN] no credentials found: no .env with profiles in the provider package, and no $CFG."
+  echo "         (This check can't see DATABRICKS_* env vars set in init_user_param.sh — fine if you use those.)"
+  echo "         Fix: add a .env with [NAME] sections to the .cdpk and re-upload it (README step 2), or"
+  echo "         create $CFG:  sudo -u arcgis databricks configure --token"
+  ask "Continue anyway? (y/N)" "n" _CONT_NOCREDS
+  case "$_CONT_NOCREDS" in y|Y|yes|YES) ;; *) echo "-> stopped. Nothing was created."; exit 1;; esac
 fi
 echo
 
@@ -312,7 +344,7 @@ svc = {
     #       isolationLevel="HIGH"    keeps clean per-service process isolation (LOW shares one
     #                                process across instances => cross-service state/global bugs)
     #       loadBalancing            CDF has no clean sticky-session support
-    #       forwardUserIdentity      provider authenticates as its own .databrickscfg identity
+    #       forwardUserIdentity      provider authenticates as its own identity (.env / .databrickscfg profile)
     "instancesPerContainer": 1,
     "maxWaitTime": 60, "maxStartupTime": 300, "maxUsageTime": 600,
     "loadBalancing": "ROUND_ROBIN", "isolationLevel": "HIGH",
@@ -331,12 +363,12 @@ PY
 }
 
 # --- helper: guess "geometryColumn idField" from `databricks tables get` JSON ---
-# Prints two space-separated tokens ('_' when unknown). Best-effort suggestions only.
+# Prints three space-separated tokens: geometry, id, time ('_' when unknown). Best-effort suggestions only.
 guess_cols() {
 python3 -c "
 import sys,json
 try: d=json.load(sys.stdin)
-except Exception: print('_ _'); sys.exit()
+except Exception: print('_ _ _'); sys.exit()
 cols=[(c.get('name'),(c.get('type_name') or c.get('type_text') or '').upper()) for c in d.get('columns',[]) if c.get('name')]
 geom=''
 for n,t in cols:
@@ -380,8 +412,9 @@ echo "-- Data source (used for every table you publish this session) --"
 CFG="${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}"
 PROFILES=""
 [ -r "$CFG" ] && PROFILES=$(grep -oE '^\[[^]]+\]' "$CFG" 2>/dev/null | tr -d '[]' | tr -d '\r')
+PROFILES=$(printf '%s\n%s\n' "$PROFILES" "$ENV_PROFILES" | grep -v '^$' | awk '!seen[$0]++')
 if [ -n "$PROFILES" ]; then
-  echo "  Workspace profiles found in $CFG:"
+  echo "  Workspace profiles found (.databrickscfg and the provider's .env; a same-named .databrickscfg profile wins on this machine):"
   declare -a PROFARR=(); n=1
   while IFS= read -r p; do
     [ -n "$p" ] || continue
@@ -396,8 +429,8 @@ if [ -n "$PROFILES" ]; then
     ask "Workspace profile name (blank = env-var default)" "" WORKSPACE
   fi
 else
-  echo "  (could not read $CFG to list profiles — enter it manually. Use the exact name"
-  echo "   inside the brackets in .databrickscfg, DEFAULT if it has a [DEFAULT] section,"
+  echo "  (no profiles found to list — enter it manually. Use the exact name inside the brackets"
+  echo "   in the provider's .env or .databrickscfg, DEFAULT if it has a [DEFAULT] section,"
   echo "   or leave blank to use the env-var default workspace.)"
   ask "Databricks workspace profile" "DEFAULT" WORKSPACE
 fi
@@ -416,7 +449,8 @@ if command -v databricks >/dev/null 2>&1 && [ -n "$WORKSPACE" ]; then
     CLI_OK=1
     echo "  [ok]   Databricks CLI detected + authenticated (profile '$WORKSPACE') — auto-detect on"
   else
-    echo "  [info] Databricks CLI present but auth check timed out or failed — falling back to manual entry"
+    echo "  [info] Databricks CLI can't authenticate profile '$WORKSPACE' (the CLI reads only .databrickscfg;"
+    echo "         a profile that exists only in the provider's .env is invisible to it) — manual entry"
   fi
 fi
 
@@ -491,7 +525,7 @@ resolve_grant_principal() {
 
 offer_lakehouse_grants() {
   [ "$CLI_OK" = 1 ] || {
-    echo "  (Databricks CLI not available — skipping grant help. Grant USE CATALOG / USE SCHEMA /"
+    echo "  (Databricks CLI not available or can't authenticate this profile — skipping grant help. Grant USE CATALOG / USE SCHEMA /"
     echo "   SELECT on $TABLE to the provider's identity manually; see the README.)"; return; }
 
   # Validate the three identifier parts to a strict charset BEFORE building any SQL. If any
@@ -568,6 +602,33 @@ offer_lakehouse_grants() {
         break ;;
     esac
   done
+}
+
+check_entitlements() {
+  # Warn-only. The provider's identity needs the "Databricks SQL access" entitlement (Lakehouse) and also "Workspace
+  # access" (Lakebase APIs); without them every connection fails with an unexplained 403. The CLI runs as that same
+  # identity (same profile), and the REST API names the missing entitlement, so one cheap call per backend tells us.
+  # $1 = lakehouse | lakebase
+  [ "$CLI_OK" = 1 ] || return 0
+  local out need
+  if [ "$1" = lakehouse ]; then
+    local wid="${WAREHOUSE_PATH##*/}"
+    printf '%s' "$wid" | grep -qE '^[A-Za-z0-9]+$' || return 0
+    need="Databricks SQL access"
+    out=$(timeout 45 databricks api post /api/2.0/sql/statements --profile "${WORKSPACE:-DEFAULT}" \
+      --json "{\"warehouse_id\":\"$wid\",\"statement\":\"SELECT 1\",\"wait_timeout\":\"30s\",\"on_wait_timeout\":\"CANCEL\"}" 2>&1)
+  else
+    need="Workspace access"
+    out=$(timeout 30 databricks api get /api/2.0/postgres/projects --profile "${WORKSPACE:-DEFAULT}" 2>&1)
+  fi
+  if printf '%s' "$out" | grep -qi 'entitlement'; then
+    echo "   !! The provider's identity is missing the \"$need\" entitlement (Databricks: $(printf '%s' "$out" | grep -oi 'without the [a-z, -]*entitlements\?' | head -1))."
+    echo "      Every request will fail with a 403. A workspace admin adds it under Settings > Identity and access >"
+    echo "      Service principals (or Users) > the identity > Entitlements. Continuing."
+  elif printf '%s' "$out" | grep -qi 'scope'; then
+    echo "   !! Databricks says the token lacks a scope: $(printf '%s' "$out" | grep -oi '[^"]*scope[^"]*' | head -1)"
+    echo "      Lakehouse needs the \"sql\" scope; Lakebase also \"postgres\". Continuing."
+  fi
 }
 
 check_id_range() {
@@ -711,7 +772,7 @@ while true; do
     # over the data's range (the provider computes it) and query one interval at a time.
     echo "  Time column — STRONGLY RECOMMENDED for any table with more than one record per place over time"
     echo "  (tracks, sensor readings, daily aggregates). Without it, clients request every date in every tile."
-    ask "Time column${SUG_TIME:+ (detected: $SUG_TIME)}" "$SUG_TIME" TIME_COL
+    ask "Time column (- for none)${SUG_TIME:+ (detected: $SUG_TIME)}" "$SUG_TIME" TIME_COL
     [ "$TIME_COL" = "-" ] && TIME_COL=""
     if [ -z "$TIME_COL" ] && [ -n "$SUG_TIME" ]; then
       echo "   !! '$TABLE' has a date/time column ($SUG_TIME) but you left Time column blank."
@@ -779,7 +840,8 @@ while true; do
 
   # Optional least-privilege grant help, BEFORE createService so the sample-query
   # verification below actually confirms the grant took effect.
-  if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; else offer_lakebase_grants; fi
+  if [ "$BACKEND" = "lakehouse" ]; then offer_lakehouse_grants; check_entitlements lakehouse
+  else offer_lakebase_grants; check_entitlements lakebase; fi
   echo
 
   # Always create STOPPED, then /start below (the start step already runs for every service and
@@ -1013,7 +1075,8 @@ print('open' if ('features' in d and 'error' not in d) else 'protected')" 2>/dev
       echo "       proxy/LB — even unfederated.)"
       echo "   - 404 / 'Service not found' => service did not start: wrong tableName/geometryColumn, or the"
       echo "       provider errored initializing it (table/column missing). Fix the value and re-run."
-      echo "   - 'No default Databricks workspace configured' => .databrickscfg/workspace issue"
+      echo "   - 'workspace profile ... not found' / 'No default Databricks workspace configured' => profile missing"
+      echo "       from the provider's .env, .databrickscfg, or the DATABRICKS_* env vars"
       echo "       (workspace='${WORKSPACE:-(env-var default)}'); restart the server after fixing (profiles cache)."
       echo "   - invalid_client / 401 => SP creds or OIDC unreachable.  SSL => NODE_EXTRA_CA_CERTS in init_user_param.sh."
       echo "   - SELECT / column error => tableName/geometryColumn/idField wrong, or SP lacks USE + SELECT grants."

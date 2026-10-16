@@ -17,12 +17,19 @@
   build box (register-provider.sh option 1) and copy it here, then run this to
   register it. One .cdpk runs on any platform (pure-JS core).
 
+  CREDENTIALS: the release .cdpk carries none. Either put a .env (with [NAME]
+  workspace profiles) at the top level of the package - pass -EnvFile and this
+  script adds it to a temporary copy before uploading - or use a per-machine
+  .databrickscfg (configure-databricks.ps1). With a .env, ArcGIS keeps copies of the
+  package (config store, uploads, backups); this script deletes its upload item after
+  a successful register/update.
+
   NOTE ON UPDATES: registering a name that already exists is refused by ArcGIS,
-  so for an existing provider this calls `update`. An update RE-EXTRACTS over the
-  provider directory (wiping any .env inside it - credentials in .databrickscfg /
-  the DATABRICKS_CONFIG_FILE env var live elsewhere and are safe). A FAILED update
-  can leave existing services 404ing until a good package is registered, so it
-  always confirms first.
+  so for an existing provider this calls `update`. An update REPLACES the provider
+  directory with the uploaded package: a .env must be inside every package you
+  upload, or the provider is left without one. A .databrickscfg / DATABRICKS_* machine
+  env vars outside the package are unaffected. A FAILED update can leave existing
+  services 404ing until a good package is registered, so it always confirms first.
 
 .EXAMPLE
   .\register-provider.ps1
@@ -31,6 +38,11 @@
 .EXAMPLE
   .\register-provider.ps1 -CdpkPath .\databricks-geospatial-provider.cdpk -AdminUser siteadmin -Restart yes -Yes
   Non-interactive-ish: still prompts for the admin password (secure), skips y/N confirmations.
+
+.EXAMPLE
+  .\register-provider.ps1 -CdpkPath .\databricks-geospatial-provider.cdpk -EnvFile .\.env
+  Adds .env (your Databricks workspace profiles) to the top level of a temporary copy of the
+  package and uploads that copy. The original .cdpk is not modified.
 #>
 [CmdletBinding()]
 param(
@@ -43,7 +55,8 @@ param(
   [string]$ProviderName,
   [ValidateSet('ask','yes','no')][string]$Restart = 'ask',
   [switch]$Yes,                     # skip y/N confirmations (register/update/restart)
-  [string]$ServiceName = "ArcGIS Server"
+  [string]$ServiceName = "ArcGIS Server",
+  [string]$EnvFile                   # optional .env added at the top level of a temp copy before upload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,12 +93,46 @@ function Get-CdpkProviderName([string]$Path) {
       $entry = $zip.Entries |
         Where-Object { $_.Name -eq 'cdconfig.json' } |
         Sort-Object { $_.FullName.Length } | Select-Object -First 1   # shallowest cdconfig.json
-      if (-not $entry) { return $null }
-      $sr = New-Object System.IO.StreamReader($entry.Open())
+      if (-not $entry) { Write-Host "  [warn] no cdconfig.json in the package - is it a .cdpk?" -ForegroundColor Yellow; return $null }
+      $sr = New-Object System.IO.StreamReader($entry.Open(), [System.Text.Encoding]::UTF8)
       try { $json = $sr.ReadToEnd() } finally { $sr.Dispose() }
       return ($json | ConvertFrom-Json).name
     } finally { $zip.Dispose() }
-  } catch { return $null }
+  } catch {
+    Write-Host "  [warn] could not read cdconfig.json from the package: $($_.Exception.Message)" -ForegroundColor Yellow
+    return $null
+  }
+}
+
+# --- does the package carry a top-level .env? -------------------------------
+function Test-CdpkHasEnv([string]$Path) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  try { $zip = [System.IO.Compression.ZipFile]::OpenRead($Path) }
+  catch { Write-Host "   [warn] could not open $Path as a zip: $($_.Exception.Message)" -ForegroundColor Yellow; return $false }
+  try { return [bool]($zip.Entries | Where-Object { $_.FullName -eq '.env' }) } finally { $zip.Dispose() }
+}
+
+# --- copy the package into $Dir and add/replace its top-level .env ---------------
+function New-CdpkWithEnv([string]$Path, [string]$EnvPath, [string]$Dir) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $out = Join-Path $Dir ([System.IO.Path]::GetFileName($Path))   # ArcGIS checks the uploaded file name
+  Copy-Item -LiteralPath $Path -Destination $out -Force
+  $zip = [System.IO.Compression.ZipFile]::Open($out, [System.IO.Compression.ZipArchiveMode]::Update)
+  try {
+    foreach ($e in @($zip.Entries | Where-Object { $_.FullName -eq '.env' })) { $e.Delete() }
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path -LiteralPath $EnvPath).Path, '.env') | Out-Null
+  } finally { $zip.Dispose() }
+  return $out
+}
+
+# --- delete an upload item (it may hold credentials if the package carries a .env) ---
+function Remove-UploadItem([string]$Server,[string]$Ctx,[string]$Token,[string]$ItemId) {
+  try {
+    $r = Invoke-RestMethod -Uri "$Server/$Ctx/admin/uploads/$ItemId/delete" -Method Post `
+         -Body @{ token = $Token; f = 'json' } @IwrExtra
+    if ($r.status -eq 'success') { Write-Host "   [ok] deleted upload item $ItemId (ArcGIS keeps uploads until deleted)." -ForegroundColor Green; return }
+  } catch {}
+  Write-Host "   [warn] could not delete upload item $ItemId - delete it in Server Administrator > uploads; it may contain credentials." -ForegroundColor Yellow
 }
 
 # --- mint an ArcGIS admin token (client=requestip, matching the .sh) ----------
@@ -240,8 +287,13 @@ if (-not $CdpkPath) {
   } elseif ($found.Count -gt 1) {
     Write-Host "  Multiple .cdpk files found:"
     for ($i=0; $i -lt $found.Count; $i++) { Write-Host ("    {0}) {1}" -f ($i+1), $found[$i].FullName) }
-    $pick = Read-Host "  choose a number [1]"; if ([string]::IsNullOrWhiteSpace($pick)) { $pick = 1 }
-    $CdpkPath = $found[[int]$pick - 1].FullName
+    $n = 0
+    while ($true) {
+      $pick = Read-Host "  choose a number [1]"; if ([string]::IsNullOrWhiteSpace($pick)) { $pick = '1' }
+      if ([int]::TryParse($pick, [ref]$n) -and $n -ge 1 -and $n -le $found.Count) { break }
+      Write-Host "  enter a number from 1 to $($found.Count)." -ForegroundColor Yellow
+    }
+    $CdpkPath = $found[$n - 1].FullName
   } else {
     $CdpkPath = Read-Host "  Path to the .cdpk file"
   }
@@ -262,6 +314,16 @@ if (Test-Path -LiteralPath $shaFile) {
 if (-not $ProviderName) { $ProviderName = Get-CdpkProviderName $CdpkPath }
 if (-not $ProviderName) { $ProviderName = "databricks-geospatial-provider" }
 Write-Host "  Provider name: $ProviderName"
+
+if ($EnvFile) {
+  if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) { throw "-EnvFile not found: $EnvFile" }
+  Write-Host "  Credentials: $EnvFile will be added as the package's top-level .env (on a temporary copy)."
+} elseif (Test-CdpkHasEnv $CdpkPath) {
+  Write-Host "  Credentials: the package already contains a top-level .env."
+} else {
+  Write-Host "  Credentials: the package has NO .env. Services then need a .databrickscfg on each machine" -ForegroundColor Yellow
+  Write-Host "               (configure-databricks.ps1) or DATABRICKS_* machine env vars. To use a .env, pass -EnvFile." -ForegroundColor Yellow
+}
 
 # --- preflight the providers folder (create if missing, make writable) ------
 # Skipped on non-Windows PowerShell (no Win32_Service / icacls) - this script targets Windows.
@@ -289,26 +351,49 @@ $action = if ($registered -contains $ProviderName) { 'update' } else { 'register
 
 if ($action -eq 'update') {
   Write-Host "   '$ProviderName' is already registered - this will be an UPDATE (upgrade)." -ForegroundColor Yellow
-  Write-Host "   [!] An update RE-EXTRACTS over $providerDir (any provider-local .env is wiped;"
-  Write-Host "       credentials in .databrickscfg / DATABRICKS_CONFIG_FILE are safe). A FAILED update"
-  Write-Host "       can leave existing services 404ing until a good package is registered."
+  Write-Host "   [!] An update REPLACES $providerDir with the uploaded package: a .env must be inside"
+  Write-Host "       the package, or the provider is left without one (a .databrickscfg / machine env vars"
+  Write-Host "       are unaffected). A FAILED update can leave services 404ing until a good package is registered."
+  if (-not $EnvFile -and -not (Test-CdpkHasEnv $CdpkPath) -and (Test-Path -LiteralPath (Join-Path $providerDir '.env'))) {
+    Write-Host "   [!] $providerDir has a .env but this package does not - the update REMOVES it." -ForegroundColor Red
+    Write-Host "       Pass -EnvFile <your .env> to keep using it." -ForegroundColor Red
+  }
   if (-not (Confirm-Step "Proceed with UPDATE of '$ProviderName'?" $false)) { Write-Host "Aborted - nothing changed."; exit 0 }
 } else {
   Write-Host "   '$ProviderName' is not registered yet - this will be a first-time REGISTER."
   if (-not (Confirm-Step "Proceed with REGISTER of '$ProviderName'?" $true)) { Write-Host "Aborted - nothing changed."; exit 0 }
 }
 
-# --- upload -----------------------------------------------------------------
-Write-Host "-> uploading $(Split-Path $CdpkPath -Leaf)..."
-$itemId = Send-CdpkUpload -Server $AdminUrl -Ctx $Context -Token $token -Path $CdpkPath
-Write-Host "   ok (itemID $itemId)."
+# --- upload (a temp copy with the .env added, if -EnvFile) -----------------------
+$tmpDir = $null
+$uploadPath = $CdpkPath
+try {
+  if ($EnvFile) {
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cdf-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    $uploadPath = New-CdpkWithEnv -Path $CdpkPath -EnvPath $EnvFile -Dir $tmpDir
+    Write-Host "   [ok] added .env at the top level of a temporary copy of the package."
+  }
+  Write-Host "-> uploading $(Split-Path $uploadPath -Leaf)..."
+  $itemId = Send-CdpkUpload -Server $AdminUrl -Ctx $Context -Token $token -Path $uploadPath
+  Write-Host "   ok (itemID $itemId)."
+} finally {
+  if ($tmpDir) { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }   # it holds credentials
+}
 
 # --- register / update ------------------------------------------------------
 Write-Host "-> ${action}ing the provider..."
-$resp = Invoke-RestMethod -Uri "$AdminUrl/$Context/admin/services/types/customdataproviders/$action" `
-        -Method Post -Body @{ id = $itemId; token = $token; f = 'json' } -TimeoutSec 600 @IwrExtra
+try {
+  $resp = Invoke-RestMethod -Uri "$AdminUrl/$Context/admin/services/types/customdataproviders/$action" `
+          -Method Post -Body @{ id = $itemId; token = $token; f = 'json' } -TimeoutSec 600 @IwrExtra
+} catch {
+  Write-Host "!! $action request failed: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "   Upload item $itemId was left on the server - delete it in Server Administrator > uploads once resolved; it may contain credentials."
+  exit 1
+}
 if ($resp.status -eq 'success') {
   Write-Host "   [ok] $action succeeded." -ForegroundColor Green
+  Remove-UploadItem -Server $AdminUrl -Ctx $Context -Token $token -ItemId $itemId
 } else {
   Write-Host "!! $action did not report success. Server said:" -ForegroundColor Red
   Write-Host ($resp | ConvertTo-Json -Depth 6)
@@ -316,6 +401,7 @@ if ($resp.status -eq 'success') {
     Write-Host "   [!] If this update FAILED, the provider directory may have been removed - existing"
     Write-Host "       services will 404 until a good .cdpk is registered. Re-run with a correct package."
   }
+  Write-Host "   Upload item $itemId was left on the server - delete it in Server Administrator > uploads once resolved; it may contain credentials."
   exit 1
 }
 
@@ -331,12 +417,17 @@ if ($doRestart) {
   $svc = Get-Service -DisplayName $ServiceName -ErrorAction SilentlyContinue
   if (-not $svc) { $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue }
   if (-not $svc) {
-    Write-Host "  [warn] service '$ServiceName' not found. Restart manually (Services.msc) or run:" -ForegroundColor Yellow
-    Write-Host "         `"$InstallRoot\stopserver.bat`"  then  `"$InstallRoot\startserver.bat`""
+    Write-Host "  [warn] service '$ServiceName' not found. Restart it manually: Services app (services.msc) > ArcGIS Server > Restart," -ForegroundColor Yellow
+    Write-Host "         or pass -ServiceName with the service's name (Get-Service *arcgis*)."
   } else {
     Write-Host "-> restarting '$($svc.DisplayName)' (this can take 1-2 minutes)..."
-    Restart-Service -InputObject $svc -Force
-    $restarted = $true
+    try {
+      Restart-Service -InputObject $svc -Force
+      $restarted = $true
+    } catch {
+      Write-Host "  [warn] restart did not complete: $($_.Exception.Message)" -ForegroundColor Yellow
+      Write-Host "         The provider is ${action}ed but not active until '$ServiceName' restarts - restart it in services.msc." -ForegroundColor Yellow
+    }
   }
 } else {
   Write-Host "  (not restarted - the provider is uploaded and ${action}ed but WON'T be active until the"
@@ -365,8 +456,11 @@ $plainPass = $null; [System.GC]::Collect()
 
 Write-Host ""
 Write-Host "============================================================"
+$next = if ($EnvFile -or (Test-CdpkHasEnv $CdpkPath)) { " Next: publish services (the workspace field takes a [NAME] from your .env)." } `
+        else { " Next: credentials - re-run with -EnvFile <.env>, or run configure-databricks.ps1 on every machine; then publish." }
 if (-not $restarted) {
   Write-Host " $action uploaded - NOT active yet. Restart the '$ServiceName' service to load it."
+  Write-Host $next
   exit 0
 }
 switch ($verified) {
@@ -375,6 +469,6 @@ switch ($verified) {
   'no'      { Write-Host " $action done but '$ProviderName' is NOT in the provider list - check the server log."; $rc = 2 }
   default   { Write-Host " $action done - verification INCONCLUSIVE."; $rc = 2 }
 }
-Write-Host " Next: configure credentials with configure-databricks.ps1, then publish services."
+Write-Host $next
 Write-Host "============================================================"
 exit $rc

@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 #
-# configure-databricks.sh — create/update the .databrickscfg the CDF provider reads.
+# configure-databricks.sh — write a Databricks workspace profile for the CDF provider.
+#
+# By default it writes a .env to put inside the .cdpk (the recommended way: ArcGIS distributes the
+# package to every machine; README step 2). register-provider.sh then offers that .env for the package.
+# Option 2 writes this machine's .databrickscfg instead: the per-machine alternative, where a
+# same-named profile overrides the .env on this machine.
 #
 # The provider runs as the 'arcgis' OS user and reads ~/.databrickscfg (or $DATABRICKS_CONFIG_FILE)
-# at query time. This writes a profile (PAT or OAuth M2M service principal) into that file
+# once, so restart ArcGIS Server after changing it. Option 2 writes a profile (PAT or OAuth M2M service principal) into that file
 # ATOMICALLY, preserving any existing profiles, and leaves it owned by arcgis with mode 600 — the
 # exact ownership/permissions the provider needs (a group/world-readable creds file is a finding,
 # and a root-owned one the provider can't read). Standalone and air-gapped (bash + python3 only).
@@ -16,7 +21,7 @@
 #   - SHARED (default): one .databrickscfg on the site's shared storage + DATABRICKS_CONFIG_FILE
 #     pointing at it (set once per node in init_user_param.sh) — rotate one file for the whole site.
 #   - PER-MACHINE: a .databrickscfg in each node's arcgis home — run this script on every node.
-# With no admin login (pure standalone) it behaves exactly as the single-machine tool it always was.
+# With no admin login (pure standalone), option 2 behaves exactly as the single-machine tool it always was.
 #
 #   sudo bash configure-databricks.sh        # run as root (writes /home/arcgis/.databrickscfg as arcgis)
 #   bash configure-databricks.sh --help
@@ -25,9 +30,11 @@ set -uo pipefail
 
 case "${1:-}" in
   -h|--help)
-    echo "configure-databricks.sh — write a .databrickscfg profile (PAT or OAuth M2M) for the CDF provider."
-    echo "  Run on the ArcGIS Server box, ideally as root: sudo bash configure-databricks.sh"
-    echo "  Writes the file atomically, owned by arcgis, mode 600, preserving existing profiles."
+    echo "configure-databricks.sh — write a Databricks workspace profile (PAT or OAuth M2M) for the CDF provider."
+    echo "  Default: a .env to put inside the .cdpk (recommended; it reaches every machine). Then run"
+    echo "  register-provider.sh, which offers that .env for the package. Mode 600; other sections kept."
+    echo "  Option 2: this machine's .databrickscfg (per-machine alternative; overrides a same-named .env"
+    echo "  profile), written atomically, owned by arcgis, mode 600, preserving existing profiles."
     echo "  On a multi-machine site (detected when given the ArcGIS admin login) it offers a shared"
     echo "  credentials file + wires DATABRICKS_CONFIG_FILE so every node reads it."
     exit 0 ;;
@@ -163,18 +170,30 @@ if [ -n "${CDF_ADMIN_PASSFILE:-}" ] && [ -f "${CDF_ADMIN_PASSFILE:-}" ] \
 fi
 
 echo "============================================================"
-echo " Configure Databricks connection (.databrickscfg)"
+echo " Configure the Databricks connection (.env for the package, or .databrickscfg)"
 echo "============================================================"
+echo
+
+# --- .env for the package (default) or this machine's .databrickscfg ---------------
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+echo "  Where should the credentials go?"
+echo "    1) A .env to put inside the .cdpk (recommended: ArcGIS copies it to every machine)"
+echo "    2) This machine's .databrickscfg (per-machine alternative)"
+ask "  choose 1-2" "1" _target
+TARGET="env"; [ "$_target" = "2" ] && TARGET="cfg"
 echo
 
 # --- choose where credentials live (multi-machine aware) ------------------------
 # DEPLOY_MODE: single (unchanged old behavior) | shared (one file on shared storage) | pernode.
 DEPLOY_MODE="single"
-if [ "$MULTI" = "1" ]; then
+if [ "$TARGET" = "env" ]; then
+  ask "Path of the .env to create or update (put it in the package next; keep it for upgrades)" "$SCRIPT_DIR/.env" CFG
+elif [ "$MULTI" = "1" ]; then
   echo "  [multi-machine site detected — $MACHINE_COUNT machines]"
   printf '%s\n' "$MACHINE_NAMES" | sed 's/^/     - /'
   echo "  Provider CODE is shared across the site automatically, but .databrickscfg is a per-machine"
   echo "  file — credentials must reach EVERY machine or round-robin traffic 404s on the ones missing it."
+  echo "  (A .env inside the .cdpk avoids this: ArcGIS copies the package to every machine. README step 2.)"
   echo
   echo "  How should credentials be stored?"
   if [ -n "$SHARED_CFG" ]; then
@@ -193,7 +212,7 @@ if [ "$MULTI" = "1" ]; then
   echo
 fi
 
-case "$DEPLOY_MODE" in
+[ "$TARGET" = "env" ] || case "$DEPLOY_MODE" in
   shared)
     while :; do
       ask "Config file path (SHARED — must be readable by the arcgis user on ALL nodes)" "$SHARED_CFG" CFG
@@ -202,7 +221,11 @@ case "$DEPLOY_MODE" in
   *)   # single (unchanged) and pernode both use the per-host default
     ask "Config file path" "${DATABRICKS_CONFIG_FILE:-/home/arcgis/.databrickscfg}" CFG ;;
 esac
-ask "Profile name (DEFAULT unless you serve multiple workspaces)" "DEFAULT" PROFILE
+while :; do
+  ask "Profile name (DEFAULT unless you serve multiple workspaces)" "DEFAULT" PROFILE
+  printf '%s' "$PROFILE" | grep -qE '^[A-Za-z0-9_.-]+$' && break
+  echo "   !! use letters, digits, '_', '.' or '-' only (this is what you'll type when publishing)."
+done
 while :; do
   ask "Databricks host (e.g. https://your-workspace.cloud.databricks.com)" "" HOST
   [ -n "$HOST" ] && break; echo "   !! Host is required."
@@ -222,6 +245,67 @@ else
 fi
 echo
 
+# --- .env: add or replace this profile's section, keeping everything else ------------
+if [ "$TARGET" = "env" ]; then
+  _umask_old=$(umask); umask 077
+  mkdir -p "$(dirname "$CFG")" || { echo "!! could not create $(dirname "$CFG")."; exit 1; }
+  TMP=$(mktemp "$(dirname "$CFG")/.env.cdftmp.XXXXXX") || { echo "!! could not create a temp file — nothing was written."; exit 1; }
+  umask "$_umask_old"
+  trap 'rm -f "$TMP"' EXIT
+  # Secrets reach python through the environment, never argv. Settings lines, comments and other
+  # sections are kept; only the [PROFILE] block is replaced (or appended).
+  ENV_PATH="$CFG" PROFILE="$PROFILE" HOST="$HOST" AUTH="$AUTH" TOKEN="$TOKEN" \
+  CLIENT_ID="$CLIENT_ID" CLIENT_SECRET="$CLIENT_SECRET" OUT="$TMP" python3 - <<'PY' || { echo "!! failed to build the .env — nothing was written."; exit 1; }
+import os, re
+g = os.environ.get
+src, prof = g("ENV_PATH"), g("PROFILE")
+lines = open(src, encoding="utf-8-sig").read().splitlines() if os.path.exists(src) else []
+hdr = re.compile(r"^\[([^\]]+)\]\s*(?:[#;].*)?$")
+out, skip = [], False
+for line in lines:
+    m = hdr.match(line.strip())
+    if m:
+        name = m.group(1).strip()
+        skip = name == prof
+        if not skip and name.lower() == prof.lower():
+            print("  [warn] the file already has [%s]; profile names are case-sensitive, so [%s] is a separate one." % (name, prof))
+    if not skip:
+        out.append(line)
+while out and not out[-1].strip():
+    out.pop()
+block = ["", "[%s]" % prof, "host = %s" % g("HOST")]
+if g("AUTH") == "oauth":
+    # scopes: the Databricks CLI asks for all-apis unless told otherwise, which a least-privilege secret refuses
+    block += ["client_id = %s" % g("CLIENT_ID"), "client_secret = %s" % g("CLIENT_SECRET"), "scopes = sql, postgres"]
+else:
+    block += ["token = %s" % g("TOKEN")]
+with open(g("OUT"), "w", encoding="utf-8") as f:
+    f.write("\n".join((out + block) if out else block[1:]) + "\n")
+print("  [ok] profile [%s] prepared (%s auth) for host %s" % (prof, g("AUTH"), g("HOST")))
+PY
+  chmod 600 "$TMP" && mv -f "$TMP" "$CFG" || { echo "!! could not write $CFG."; exit 1; }
+  trap - EXIT
+  echo "  [ok] wrote $CFG (mode 600; it holds a secret, keep it safe for every upgrade)."
+  if command -v databricks >/dev/null 2>&1; then
+    echo "-> verifying with the Databricks CLI..."
+    # Exported in a subshell (never on a command line), so the secret stays out of the process list.
+    if ( export DATABRICKS_CONFIG_FILE=/dev/null DATABRICKS_HOST="$HOST"
+         if [ "$AUTH" = "oauth" ]; then export DATABRICKS_CLIENT_ID="$CLIENT_ID" DATABRICKS_CLIENT_SECRET="$CLIENT_SECRET"
+         else export DATABRICKS_TOKEN="$TOKEN"; fi
+         timeout 20 databricks current-user me -o json >/dev/null 2>&1 ); then
+      echo "   [ok] authenticated to Databricks."
+    else
+      echo "   [warn] the CLI could not authenticate (bad token/secret, wrong host, or no network). Fix and re-run."
+    fi
+  fi
+  echo
+  echo "  Next: put it in the package and upload:  sudo bash register-provider.sh"
+  if [ "$CFG" = "$SCRIPT_DIR/.env" ]; then echo "        (it offers this .env for the package), then restart ArcGIS Server."
+  else echo "        and enter $CFG when it asks for the .env, then restart ArcGIS Server."; fi
+  echo "  When publishing, enter $PROFILE as the workspace profile."
+  exit 0
+fi
+
 # --- write the profile atomically, preserving other profiles --------------------
 # python does the INI merge into a temp file; we then set owner arcgis + mode 600 and atomically
 # move it into place. Secrets are passed to python via the environment (not argv) and the temp
@@ -232,7 +316,7 @@ ME=$(id -un 2>/dev/null); MYUID=$(id -u 2>/dev/null)
 if [ "$ME" != "arcgis" ] && [ "$MYUID" != "0" ]; then
   echo "!! Run this as root (sudo) or as the arcgis user so $CFG can be owned by arcgis."
   echo "   The provider runs as arcgis and must read it. Nothing was written."
-  echo "   Manual fallback: create the profile by hand (see the repo README, Step 3) then:"
+  echo "   Manual fallback: create the profile by hand (see the repo README) then:"
   echo "     sudo chown arcgis:arcgis $CFG && sudo chmod 600 $CFG"
   exit 1
 fi
@@ -268,15 +352,18 @@ if src and os.path.exists(src):
         sys.stderr.write("refusing to overwrite %s: it exists but could not be parsed (%s)\n" % (src, e)); raise SystemExit(3)
     if not got:
         sys.stderr.write("refusing to overwrite %s: it exists but could not be read\n" % src); raise SystemExit(3)
+    with open(src, encoding="utf-8", errors="replace") as fh:
+        if any(l.lstrip().startswith(("#", ";")) for l in fh):
+            print("  [note] comments in %s are not kept when it is rewritten (copy it first if you need them)" % src)
 prof = g("PROFILE")
 if not cfg.has_section(prof):
     cfg.add_section(prof)
 sect = cfg[prof]
-for k in ("token", "client_id", "client_secret"):   # clear prior auth so PAT<->OAuth can't mix
+for k in ("token", "client_id", "client_secret", "scopes"):   # clear prior auth so PAT<->OAuth can't mix
     if k in sect: del sect[k]
 sect["host"] = g("HOST")
 if g("AUTH") == "oauth":
-    sect["client_id"] = g("CLIENT_ID"); sect["client_secret"] = g("CLIENT_SECRET")
+    sect["client_id"] = g("CLIENT_ID"); sect["client_secret"] = g("CLIENT_SECRET"); sect["scopes"] = "sql, postgres"
 else:
     sect["token"] = g("TOKEN")
 with open(g("OUT"), "w") as f:
@@ -332,7 +419,7 @@ if [ "$DEPLOY_MODE" = "shared" ]; then
   echo "  On EACH OTHER machine in the site, do this one-time step, then restart THAT machine:"
   echo "     1) add to <install>/server/usr/init_user_param.sh:"
   echo "          export DATABRICKS_CONFIG_FILE=\"$CFG\""
-  echo "     2) sudo -u arcgis <install>/server/stopserver.sh && sudo -u arcgis <install>/server/startserver.sh"
+  echo "     2) sudo systemctl restart arcgisserver  (or, without the systemd unit, as arcgis: stopserver.sh then startserver.sh)"
   echo "  Machines in this site (you are on ONE of them — repeat on the rest):"
   printf '%s\n' "$MACHINE_NAMES" | sed 's/^/     - /'
   echo "  Future credential rotations: edit ONLY $CFG, then restart each node."
@@ -348,9 +435,9 @@ elif [ "$DEPLOY_MODE" = "pernode" ]; then
   fi
   echo "  This wrote credentials on THIS node only. Run configure-databricks.sh on EACH other machine"
   echo "  (same profile / host / credentials), then restart each:"
-  echo "     sudo -u arcgis <install>/server/stopserver.sh && sudo -u arcgis <install>/server/startserver.sh"
+  echo "     sudo systemctl restart arcgisserver  (or, without the systemd unit, as arcgis: stopserver.sh then startserver.sh)"
   echo "  Machines in this site (you are on ONE of them — repeat on the rest):"
   printf '%s\n' "$MACHINE_NAMES" | sed 's/^/     - /'
   echo "  Verify every node serves data: bash check-both-machines.sh"
 fi
-echo "Done. Restart ArcGIS Server if the provider was already running (it caches .databrickscfg at first read)."
+echo "Done. Restart ArcGIS Server if the provider was already running (it reads .databrickscfg once)."

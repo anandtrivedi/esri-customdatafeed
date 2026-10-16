@@ -22,9 +22,10 @@
 #   stop/startserver.sh paths.
 #
 # NOTE ON UPGRADES: registering a name that already exists is refused by ArcGIS, so for an
-#   existing provider this script calls `update` instead of `register`. An update RE-EXTRACTS
-#   over the provider directory (wiping any .env inside it), and a FAILED update can delete
-#   the live provider dir until a good package is registered — so it always asks first.
+#   existing provider this script calls `update` instead of `register`. An update replaces the
+#   provider directory with the uploaded package, so a .env (workspace credentials) must be INSIDE
+#   every package you upload — the script offers to add one. A FAILED update can delete the live
+#   provider dir until a good package is registered — so it always asks first.
 #
 set -uo pipefail   # deliberately NOT -e: we handle and explain errors ourselves.
 
@@ -39,6 +40,8 @@ case "${1:-}" in
     echo "  It auto-detects the ArcGIS install root (/opt/arcgis or /app/arcgis), builds the"
     echo "  provider .cdpk from ./nodejs-provider (or takes an existing .cdpk), mints an admin"
     echo "  token, then register (first install) or update (upgrade) -> restart -> verify."
+    echo "  Before uploading it can add your .env (workspace credentials) to the package, and it"
+    echo "  removes its upload from the server afterwards."
     echo
     echo "  Requires: bash, curl, python3 (all present on ArcGIS Server); plus zip and a Node"
     echo "  runtime only when building a fresh .cdpk. Works air-gapped."
@@ -62,11 +65,11 @@ CURL=(curl -sk --noproxy 'localhost,127.0.0.1,::1' --connect-timeout 10)
 # Always clean up the password temp file. EXIT covers every exit path; INT/TERM also
 # terminate (a trapped signal otherwise replaces the default terminate). SIGKILL can't
 # be trapped.
-_tmppass=""; MINT_RESP=""
-_cleanup() { rm -f "${_tmppass}"; }
+_tmppass=""; _tmpenvdir=""; MINT_RESP=""
+_cleanup() { rm -f "${_tmppass}"; [ -n "$_tmpenvdir" ] && rm -rf "$_tmpenvdir"; }
 trap _cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'stty echo 2>/dev/null; exit 130' INT   # stty: a Ctrl-C during the hidden password read
+trap 'stty echo 2>/dev/null; exit 143' TERM
 
 # --- prompt helper: ask "Question" "default" VARNAME ---------------------------
 ask() {
@@ -219,7 +222,7 @@ _ahome=$(getent passwd arcgis 2>/dev/null | cut -d: -f6)
 [ -n "${HOME:-}" ] && _cands+=("$HOME" "$HOME/arcgis")
 for _c in "${_cands[@]}"; do
   if [ -e "$_c/server/startserver.sh" ] || [ -d "$_c/server/framework/runtime/node" ]; then
-    case " ${_found[*]} " in *" $_c "*) ;; *) _found+=("$_c") ;; esac   # dedupe
+    case " ${_found[*]:-} " in *" $_c "*) ;; *) _found+=("$_c") ;; esac   # dedupe (:- for bash < 4.4 under set -u)
   fi
 done
 if [ "${#_found[@]}" -eq 1 ]; then
@@ -245,6 +248,19 @@ if [ ! -e "$SERVER_DIR/startserver.sh" ]; then
   echo "         Double-check the install root if register/update or restart fails."
 fi
 echo "  -> using server dir: $SERVER_DIR"
+
+# A systemd unit that runs this install's startserver.sh owns the server's processes: restarting with the scripts
+# outside it leaves the unit empty, systemd then runs its ExecStop and stops the new server (seen live ~2 min after a
+# restart). When such a unit exists, restart through systemctl.
+ARCGIS_UNIT=""
+if command -v systemctl >/dev/null 2>&1; then
+  for _u in arcgisserver arcgis-server; do
+    # `show` asks systemd, so it works as a non-root user too (Esri's unit file is mode 600)
+    systemctl show -p ExecStart "$_u.service" 2>/dev/null | grep -qF "$SERVER_DIR/startserver.sh" && { ARCGIS_UNIT="$_u"; break; }
+  done
+fi
+if [ -n "$ARCGIS_UNIT" ]; then RESTART_CMD="sudo systemctl restart $ARCGIS_UNIT"
+else RESTART_CMD="sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"; fi
 echo
 
 # --- auto-detect a prebuilt .cdpk ----------------------------------------------
@@ -267,6 +283,17 @@ for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist" "$NODEJS_DIR"; do
   [ -n "$_d" ] || continue
   if [ -f "$_d/$CDPK_CANON" ]; then DETECTED_CDPK="$_d/$CDPK_CANON"; DETECTED_TRUSTED=1; break; fi
 done
+if [ -z "$DETECTED_CDPK" ]; then   # the repo's prebuilt cdpk/12.x or cdpk/11.x, matching the installed ArcGIS
+  _ags_ver=$(sed -n 's/^Z_REAL_VERSION=//p' "$ARCGIS_ROOT"/.ESRI.properties.* \
+    "$(getent passwd arcgis 2>/dev/null | cut -d: -f6)"/.ESRI.properties.* 2>/dev/null | head -1)
+  case "$_ags_ver" in 11.*) _pkg_dirs="11.x";; 12.*) _pkg_dirs="12.x 11.x";; *) _pkg_dirs="11.x";; esac
+  for _v in $_pkg_dirs; do
+    if [ -f "$SCRIPT_DIR/cdpk/$_v/$CDPK_CANON" ]; then
+      DETECTED_CDPK="$SCRIPT_DIR/cdpk/$_v/$CDPK_CANON"; DETECTED_TRUSTED=1
+      echo "  [ok]   ArcGIS ${_ags_ver:-version unknown} -> prebuilt cdpk/$_v"; break
+    fi
+  done
+fi
 if [ -z "$DETECTED_CDPK" ]; then   # a single stray *.cdpk in a trusted dir also counts as trusted
   for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist"; do
     [ -n "$_d" ] || continue
@@ -432,10 +459,11 @@ else
   # Keep the .env excludes EXACTLY as written. A wildcard like '*.env*' would also strip
   # node_modules files whose names contain ".env" (e.g. @dabh/diagnostics/.../process.env.js),
   # breaking the package with "Cannot find module '../adapters/process.env'" at register time.
-  CDPK_PATH="$NODEJS_DIR/$PROVIDER_NAME.cdpk"
+  # Named from cdconfig's fileName: ArcGIS checks the uploaded file name against it.
+  CDPK_PATH="$NODEJS_DIR/$CDPK_CANON"
   rm -f "$CDPK_PATH"   # don't append to a stale archive
-  echo "-> packaging $PROVIDER_NAME.cdpk..."
-  if ! ( cd "$NODEJS_DIR" && zip -qr "$PROVIDER_NAME.cdpk" \
+  echo "-> packaging $CDPK_CANON..."
+  if ! ( cd "$NODEJS_DIR" && zip -qr "$CDPK_CANON" \
         cdconfig.json package.json package-lock.json src/ node_modules/ \
         -x '.env' '.env.*' 'test/*' '*.md' 'src/databricks-config.json' ); then
     echo "!! zip failed — nothing packaged."; exit 1
@@ -507,10 +535,14 @@ case "$ALREADY" in
     ACTION="update"
     echo "   '$PROVIDER_NAME' is already registered — this will be an UPDATE (upgrade)."
     echo
-    echo "   [!] An update RE-EXTRACTS over $PROVIDER_DIR"
-    echo "       — any .env inside it is wiped (credentials in .databrickscfg / init_user_param.sh"
-    echo "       are safe; they live elsewhere). A FAILED update can delete that dir until a good"
-    echo "       package is registered, so existing services may 404 briefly during the upgrade."
+    echo "   [!] An update replaces $PROVIDER_DIR"
+    echo "       with the uploaded package: a .env must be inside the package (next step), while a"
+    echo "       .databrickscfg / init_user_param.sh outside it is unaffected. A FAILED update can"
+    echo "       delete that dir until a good package is registered, so services may 404 briefly."
+    if [ ! -d "$PROVIDER_DIR" ]; then
+      echo "   [warn] $PROVIDER_DIR does not exist, so no rollback backup can be taken."
+      echo "          Is the install root right ($SERVER_DIR)?"
+    fi
     ask "   Proceed with UPDATE of '$PROVIDER_NAME'? (y/N)" "n" GO
     ;;
   no)
@@ -529,13 +561,73 @@ esac
 case "$GO" in y|Y|yes|YES) : ;; *) echo "Aborted — nothing changed."; exit 0;; esac
 echo
 
+# --- optional: put a .env (workspace credentials) inside the package ------------------
+# An update replaces the provider folder with the uploaded package, so a .env must be INSIDE every
+# package you upload (README step 2); release packages ship without one. The original .cdpk is never
+# modified: a mode-600 temporary copy (removed on exit) gets the .env and is what's uploaded.
+UPLOAD_PATH="$CDPK_PATH"
+_pkg_env=$(python3 -c "import sys,zipfile;print('yes' if '.env' in zipfile.ZipFile(sys.argv[1]).namelist() else 'no')" "$CDPK_PATH" 2>/dev/null)
+_def_env=""
+# Default: the .env configure-databricks.sh writes next to these scripts, else (on an update) the live one.
+if [ "$_pkg_env" != "yes" ]; then
+  if [ -r "$SCRIPT_DIR/.env" ]; then _def_env="$SCRIPT_DIR/.env"
+  elif [ "$ACTION" = "update" ] && [ -r "$PROVIDER_DIR/.env" ]; then _def_env="$PROVIDER_DIR/.env"; fi
+fi
+_live_env=""; [ "$ACTION" = "update" ] && [ -r "$PROVIDER_DIR/.env" ] && _live_env="$PROVIDER_DIR/.env"
+echo "-- Credentials in the package (.env) --"
+echo "  A .env holds [NAME] workspace profiles inside the provider. Looked for one in:"
+for _p in "$SCRIPT_DIR/.env" "$PROVIDER_DIR/.env"; do
+  if [ -r "$_p" ]; then echo "    found     $_p"; else echo "    not found $_p"; fi
+done
+if [ "$_pkg_env" = "yes" ]; then
+  echo "  The package already contains a .env: Enter keeps it, a path replaces it."
+elif [ -n "$_def_env" ]; then
+  [ "$_def_env" = "$SCRIPT_DIR/.env" ] && echo "  Enter puts $_def_env (from configure-databricks.sh) in the package."
+  [ "$_def_env" = "$_live_env" ] && echo "  Enter copies the provider's current .env into the new package, so it keeps working."
+  [ -n "$_live_env" ] && [ "$_def_env" != "$_live_env" ] && echo "  (The provider's current .env is replaced by it; type $_live_env to keep that one instead.)"
+else
+  echo "  None found, so Enter uploads no .env: credentials then come from a .databrickscfg"
+  echo "  (DATABRICKS_CONFIG_FILE in init_user_param.sh, or ~arcgis/.databrickscfg) or env vars."
+  echo "  If your profiles are in a .env somewhere else, type its full path."
+fi
+ask "Path to a .env to put inside the package ('none' for no .env)" "$_def_env" ENV_SRC
+case "$ENV_SRC" in none|NONE|-) ENV_SRC=""
+  if [ -n "$_live_env" ] && [ "$_pkg_env" != "yes" ]; then
+    echo "  [!] The update replaces the provider folder, so $_live_env is DELETED and services"
+    echo "      that use its [NAME] profiles stop working (it stays in the pre-update backup)."
+    ask "Upload with no .env anyway? (y/N)" "N" _noenv_ok
+    case "$_noenv_ok" in y|Y|yes|YES) ;; *) echo "  Keeping it: using $_live_env."; ENV_SRC="$_live_env";; esac
+  fi;;
+esac
+if [ -n "$ENV_SRC" ]; then
+  { [ -f "$ENV_SRC" ] && [ -r "$ENV_SRC" ]; } || { echo "!! '$ENV_SRC' is not a readable file."; exit 1; }
+  grep -qE '^[[:space:]]*(\[[^]]+\]|(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*=)' "$ENV_SRC" \
+    || { echo "!! '$ENV_SRC' has no [NAME] section or KEY=value line — not a provider .env."; exit 1; }
+  _tmpenvdir=$(mktemp -d) && chmod 700 "$_tmpenvdir" || { echo "!! could not create a temp dir."; exit 1; }
+  UPLOAD_PATH="$_tmpenvdir/$(basename "$CDPK_PATH")"   # same file name: ArcGIS checks it
+  if ! ( umask 077; python3 - "$CDPK_PATH" "$ENV_SRC" "$UPLOAD_PATH" <<'PY'
+import sys, zipfile
+src, env, dst = sys.argv[1:4]
+with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for item in zin.infolist():
+        if item.filename != '.env':
+            zout.writestr(item, zin.read(item.filename))
+    zout.write(env, '.env')   # top level, next to cdconfig.json
+PY
+  ); then echo "!! could not add the .env to the package."; exit 1; fi
+  echo "   [ok] .env added to a temporary copy of the package (the original is unchanged)."
+elif [ "$_pkg_env" != "yes" ]; then
+  echo "  (no .env in the package — credentials must come from a .databrickscfg or env vars)"
+fi
+echo
+
 # --- upload the .cdpk ------------------------------------------------------------
-# The upload endpoint takes the file as multipart (-F). token+f go in the query string here
-# (the documented working pattern for uploads) rather than --data-urlencode, which can't be
-# mixed with -F. A large package upload gets a generous --max-time.
-echo "-> uploading $(basename "$CDPK_PATH")..."
+# The upload endpoint takes the file as multipart (-F). token+f go in the query string here (the
+# documented working pattern for uploads) rather than --data-urlencode, which can't be mixed with -F.
+# A large package upload gets a generous --max-time.
+echo "-> uploading $(basename "$UPLOAD_PATH")..."
 UPLOAD=$("${CURL[@]}" --max-time 600 "$SERVER/$CTX/admin/uploads/upload?token=$TOKEN&f=json" \
-  -F "itemFile=@$CDPK_PATH")
+  -F "itemFile=@$UPLOAD_PATH")
 ITEMID=$(printf '%s' "$UPLOAD" | python3 -c "import sys,json;d=json.load(sys.stdin);print((d.get('item') or {}).get('itemID') or '')" 2>/dev/null)
 if [ -z "$ITEMID" ]; then
   echo "!! Upload did not return an itemID. The server said:"
@@ -571,10 +663,16 @@ if [ "$ACTION" = "update" ] && [ -d "$PROVIDER_DIR" ]; then
 fi
 
 # --- register or update ----------------------------------------------------------
-echo "-> ${ACTION}ing the provider..."
+echo "-> ${ACTION%e}ing the provider..."
 RESP=$("${CURL[@]}" --max-time 120 "$SERVER/$CTX/admin/services/types/customdataproviders/$ACTION" \
   --data-urlencode "id=$ITEMID" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 STATUS=$(printf '%s' "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status','') )" 2>/dev/null)
+# ArcGIS keeps every upload under arcgisuploads/ until deleted, and the package can carry a .env with
+# credentials — delete it now (success or not; the local .cdpk is what a retry uploads).
+_del=$("${CURL[@]}" --max-time 30 "$SERVER/$CTX/admin/uploads/$ITEMID/delete" \
+  --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+if printf '%s' "$_del" | grep -q '"success"'; then echo "   [ok] removed the uploaded item from the server."
+else echo "   [warn] could not remove upload $ITEMID — delete it in Server Administrator > uploads."; fi
 if [ "$STATUS" = "success" ]; then
   echo "   [ok] $ACTION succeeded."
   [ -n "$BACKUP_FILE" ] && echo "   (pre-update backup kept at $BACKUP_FILE — remove it once the upgrade is confirmed working.)"
@@ -588,7 +686,7 @@ else
       echo "   Rollback — restore the pre-update copy from the backup tarball, then restart:"
       echo "       sudo -u arcgis rm -rf '$PROVIDER_DIR'"
       echo "       sudo -u arcgis tar xzf '$BACKUP_FILE' -C '$(dirname "$PROVIDER_DIR")'"
-      echo "       sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+      echo "       $RESTART_CMD"
     else
       echo "       Re-run with a correct package to restore service."
     fi
@@ -601,28 +699,31 @@ echo
 
 # --- restart + verify -----------------------------------------------------------
 echo "-- Restart --"
-echo "  ArcGIS Server must restart to load the ${ACTION}ed provider."
-echo "  Commands: $SERVER_DIR/stopserver.sh  then  $SERVER_DIR/startserver.sh  (as the arcgis user)"
-ask "  Restart ArcGIS Server now? (y/N)" "n" DORESTART
+echo "  ArcGIS Server must restart to load the ${ACTION%e}ed provider."
+echo "  Command: $RESTART_CMD"
+# setup.sh's full first-time setup sets CDF_RESTART_DEFAULT=y: the next step (publish) needs the restart.
+if [ "${CDF_RESTART_DEFAULT:-n}" = "y" ]; then ask "  Restart ArcGIS Server now? (Y/n)" "y" DORESTART
+else ask "  Restart ArcGIS Server now? (y/N)" "n" DORESTART; fi
 RESTARTED=0
 case "$DORESTART" in
   y|Y|yes|YES)
-    echo "-> stopping..."; run_as_arcgis "$SERVER_DIR/stopserver.sh" || echo "   [warn] stopserver returned nonzero."
-    echo "-> starting (this can take 1-2 minutes)..."; run_as_arcgis "$SERVER_DIR/startserver.sh" || echo "   [warn] startserver returned nonzero."
+    if [ -n "$ARCGIS_UNIT" ]; then
+      echo "-> restarting through systemd ($ARCGIS_UNIT, this can take 1-2 minutes)..."
+      if [ "$(id -u)" = 0 ]; then systemctl restart "$ARCGIS_UNIT"; else sudo systemctl restart "$ARCGIS_UNIT"; fi \
+        || echo "   [warn] systemctl restart $ARCGIS_UNIT returned nonzero."
+    else
+      echo "-> stopping..."; run_as_arcgis "$SERVER_DIR/stopserver.sh" || echo "   [warn] stopserver returned nonzero."
+      echo "-> starting (this can take 1-2 minutes)..."; run_as_arcgis "$SERVER_DIR/startserver.sh" || echo "   [warn] startserver returned nonzero."
+    fi
     RESTARTED=1
     ;;
   *)
-    echo "  (not restarted — the provider is uploaded and ${ACTION}ed but WON'T be active until you"
-    echo "   restart: $SERVER_DIR/stopserver.sh then $SERVER_DIR/startserver.sh)"
+    echo "  (not restarted — the provider is uploaded and ${ACTION%e}ed but WON'T be active until you"
+    echo "   restart: $RESTART_CMD)"
     ;;
 esac
 echo
 
-if [ "$ACTION" = "update" ]; then
-  echo "  Reminder: an update re-extracted the provider dir. If you keep a provider-local .env at"
-  echo "  $PROVIDER_DIR/.env, re-create it now (or rely on init_user_param.sh, which survives)."
-  echo
-fi
 
 # Verify the provider is listed (only meaningful after a restart / when it was already loaded).
 echo "-> verifying the provider is registered..."
@@ -678,25 +779,22 @@ echo
 echo "============================================================"
 if [ "$RESTARTED" != "1" ]; then
   echo " ${ACTION^} uploaded — NOT active yet. Restart to load it:"
-  echo "   sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+  echo "   $RESTART_CMD"
   RC=0
 else
   case "$VERIFIED" in
-    yes)     echo " Done — provider '$PROVIDER_NAME' ${ACTION}ed and verified active."; RC=0 ;;
+    yes)     echo " Done — provider '$PROVIDER_NAME' ${ACTION%e}ed and verified active."; RC=0 ;;
     pending) echo " ${ACTION^} + restart done — server still starting; provider NOT yet confirmed."; RC=2 ;;
     no)      echo " ${ACTION^} done but '$PROVIDER_NAME' is NOT in the provider list — check the server log."; RC=2 ;;
     *)       echo " ${ACTION^} done — verification INCONCLUSIVE (couldn't read the provider list)."; RC=2 ;;
   esac
 fi
 echo
-echo " IMPORTANT — this installs the provider CODE only, NOT Databricks credentials."
-echo "   The publish form asks only for a workspace-profile NAME. The actual credentials"
-echo "   must already exist on THIS server (and every node) in /home/arcgis/.databrickscfg,"
-echo "   owned by the arcgis user, mode 600 — the provider reads them at runtime, and ArcGIS"
-echo "   never stores them. Set them up BEFORE publishing:"
-echo "      sudo bash configure-databricks.sh      # writes .databrickscfg (chown arcgis, chmod 600)"
-echo "   then RESTART the server (the provider caches the file at startup):"
-echo "      sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+echo " Credentials: the publish form asks only for a workspace-profile NAME. The recommended place is"
+echo "   the .env inside the package (it reaches every machine; ArcGIS keeps copies in its config store"
+echo "   and backups). A same-named profile in this machine's .databrickscfg overrides it; the"
+echo "   DATABRICKS_* env vars serve only the default workspace. After changing any of them, RESTART:"
+echo "      $RESTART_CMD"
 echo
 echo " Next: publish tables against it with publish-service.sh."
 echo "============================================================"
