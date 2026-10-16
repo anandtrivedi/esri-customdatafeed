@@ -418,7 +418,7 @@ if [ "$DEPLOY_MODE" = "shared" ]; then
   echo "  On EACH OTHER machine in the site, do this one-time step, then restart THAT machine:"
   echo "     1) add to <install>/server/usr/init_user_param.sh:"
   echo "          export DATABRICKS_CONFIG_FILE=\"$CFG\""
-  echo "     2) sudo -u arcgis <install>/server/stopserver.sh && sudo -u arcgis <install>/server/startserver.sh"
+  echo "     2) sudo systemctl restart arcgisserver  (or, without the systemd unit, as arcgis: stopserver.sh then startserver.sh)"
   echo "  Machines in this site (you are on ONE of them — repeat on the rest):"
   printf '%s\n' "$MACHINE_NAMES" | sed 's/^/     - /'
   echo "  Future credential rotations: edit ONLY $CFG, then restart each node."
@@ -434,7 +434,7 @@ elif [ "$DEPLOY_MODE" = "pernode" ]; then
   fi
   echo "  This wrote credentials on THIS node only. Run configure-databricks.sh on EACH other machine"
   echo "  (same profile / host / credentials), then restart each:"
-  echo "     sudo -u arcgis <install>/server/stopserver.sh && sudo -u arcgis <install>/server/startserver.sh"
+  echo "     sudo systemctl restart arcgisserver  (or, without the systemd unit, as arcgis: stopserver.sh then startserver.sh)"
   echo "  Machines in this site (you are on ONE of them — repeat on the rest):"
   printf '%s\n' "$MACHINE_NAMES" | sed 's/^/     - /'
   echo "  Verify every node serves data: bash check-both-machines.sh"

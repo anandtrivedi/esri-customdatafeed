@@ -472,7 +472,7 @@ echo "============================================================"
 if [ -n "$ACCESS_ERR" ]; then
   echo "  * Databricks access ($ACCESS_ERR): the identity in the workspace profile needs the \"Databricks SQL access\""
   echo "    entitlement (plus \"Workspace access\" for Lakebase), CAN USE on the warehouse, and token/secret scopes \"sql\""
-  echo "    (plus \"postgres\" for Lakebase). After fixing, restart ArcGIS Server (stopserver/startserver)."
+  echo "    (plus \"postgres\" for Lakebase). After fixing, restart ArcGIS Server (sudo systemctl restart arcgisserver, or stopserver/startserver)."
 fi
 PROBLEMS=0
 

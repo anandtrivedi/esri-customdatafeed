@@ -248,6 +248,19 @@ if [ ! -e "$SERVER_DIR/startserver.sh" ]; then
   echo "         Double-check the install root if register/update or restart fails."
 fi
 echo "  -> using server dir: $SERVER_DIR"
+
+# A systemd unit that runs this install's startserver.sh owns the server's processes: restarting with the scripts
+# outside it leaves the unit empty, systemd then runs its ExecStop and stops the new server (seen live ~2 min after a
+# restart). When such a unit exists, restart through systemctl.
+ARCGIS_UNIT=""
+if command -v systemctl >/dev/null 2>&1; then
+  for _u in arcgisserver arcgis-server; do
+    # `show` asks systemd, so it works as a non-root user too (Esri's unit file is mode 600)
+    systemctl show -p ExecStart "$_u.service" 2>/dev/null | grep -qF "$SERVER_DIR/startserver.sh" && { ARCGIS_UNIT="$_u"; break; }
+  done
+fi
+if [ -n "$ARCGIS_UNIT" ]; then RESTART_CMD="sudo systemctl restart $ARCGIS_UNIT"
+else RESTART_CMD="sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"; fi
 echo
 
 # --- auto-detect a prebuilt .cdpk ----------------------------------------------
@@ -652,7 +665,7 @@ else
       echo "   Rollback — restore the pre-update copy from the backup tarball, then restart:"
       echo "       sudo -u arcgis rm -rf '$PROVIDER_DIR'"
       echo "       sudo -u arcgis tar xzf '$BACKUP_FILE' -C '$(dirname "$PROVIDER_DIR")'"
-      echo "       sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+      echo "       $RESTART_CMD"
     else
       echo "       Re-run with a correct package to restore service."
     fi
@@ -665,21 +678,27 @@ echo
 
 # --- restart + verify -----------------------------------------------------------
 echo "-- Restart --"
-echo "  ArcGIS Server must restart to load the ${ACTION}ed provider."
-echo "  Commands: $SERVER_DIR/stopserver.sh  then  $SERVER_DIR/startserver.sh  (as the arcgis user)"
+echo "  ArcGIS Server must restart to load the ${ACTION%e}ed provider."
+echo "  Command: $RESTART_CMD"
 # setup.sh's full first-time setup sets CDF_RESTART_DEFAULT=y: the next step (publish) needs the restart.
 if [ "${CDF_RESTART_DEFAULT:-n}" = "y" ]; then ask "  Restart ArcGIS Server now? (Y/n)" "y" DORESTART
 else ask "  Restart ArcGIS Server now? (y/N)" "n" DORESTART; fi
 RESTARTED=0
 case "$DORESTART" in
   y|Y|yes|YES)
-    echo "-> stopping..."; run_as_arcgis "$SERVER_DIR/stopserver.sh" || echo "   [warn] stopserver returned nonzero."
-    echo "-> starting (this can take 1-2 minutes)..."; run_as_arcgis "$SERVER_DIR/startserver.sh" || echo "   [warn] startserver returned nonzero."
+    if [ -n "$ARCGIS_UNIT" ]; then
+      echo "-> restarting through systemd ($ARCGIS_UNIT, this can take 1-2 minutes)..."
+      if [ "$(id -u)" = 0 ]; then systemctl restart "$ARCGIS_UNIT"; else sudo systemctl restart "$ARCGIS_UNIT"; fi \
+        || echo "   [warn] systemctl restart $ARCGIS_UNIT returned nonzero."
+    else
+      echo "-> stopping..."; run_as_arcgis "$SERVER_DIR/stopserver.sh" || echo "   [warn] stopserver returned nonzero."
+      echo "-> starting (this can take 1-2 minutes)..."; run_as_arcgis "$SERVER_DIR/startserver.sh" || echo "   [warn] startserver returned nonzero."
+    fi
     RESTARTED=1
     ;;
   *)
-    echo "  (not restarted — the provider is uploaded and ${ACTION}ed but WON'T be active until you"
-    echo "   restart: $SERVER_DIR/stopserver.sh then $SERVER_DIR/startserver.sh)"
+    echo "  (not restarted — the provider is uploaded and ${ACTION%e}ed but WON'T be active until you"
+    echo "   restart: $RESTART_CMD)"
     ;;
 esac
 echo
@@ -739,11 +758,11 @@ echo
 echo "============================================================"
 if [ "$RESTARTED" != "1" ]; then
   echo " ${ACTION^} uploaded — NOT active yet. Restart to load it:"
-  echo "   sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+  echo "   $RESTART_CMD"
   RC=0
 else
   case "$VERIFIED" in
-    yes)     echo " Done — provider '$PROVIDER_NAME' ${ACTION}ed and verified active."; RC=0 ;;
+    yes)     echo " Done — provider '$PROVIDER_NAME' ${ACTION%e}ed and verified active."; RC=0 ;;
     pending) echo " ${ACTION^} + restart done — server still starting; provider NOT yet confirmed."; RC=2 ;;
     no)      echo " ${ACTION^} done but '$PROVIDER_NAME' is NOT in the provider list — check the server log."; RC=2 ;;
     *)       echo " ${ACTION^} done — verification INCONCLUSIVE (couldn't read the provider list)."; RC=2 ;;
@@ -754,7 +773,7 @@ echo " Credentials: the publish form asks only for a workspace-profile NAME. The
 echo "   the .env inside the package (it reaches every machine; ArcGIS keeps copies in its config store"
 echo "   and backups). A same-named profile in this machine's .databrickscfg overrides it; the"
 echo "   DATABRICKS_* env vars serve only the default workspace. After changing any of them, RESTART:"
-echo "      sudo -u arcgis $SERVER_DIR/stopserver.sh && sudo -u arcgis $SERVER_DIR/startserver.sh"
+echo "      $RESTART_CMD"
 echo
 echo " Next: publish tables against it with publish-service.sh."
 echo "============================================================"

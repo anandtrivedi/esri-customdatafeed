@@ -228,7 +228,7 @@ if [ "$have_404" = "1" ] && { [ "$have_ok" = "1" ] || [ "$have_500" = "1" ]; }; 
   echo "   web adaptor then 404s ~half the requests. Machines that returned [404] need attention."
   echo "   -> FIX on each 404 machine: the registered package is distributed site-wide, so first"
   echo "      RESTART ArcGIS Server on THAT machine so it reloads it:"
-  echo "        sudo -u <arcgis-user> <install>/server/stopserver.sh && .../startserver.sh"
+  echo "        sudo systemctl restart arcgisserver  (or, without the systemd unit, as arcgis: stopserver.sh then startserver.sh)"
   echo "      Credentials: rely on the .env inside the package, or put the same .databrickscfg on that"
   echo "      machine. Still 404 after a restart? UPDATE the provider with the correct .cdpk"
   echo "      (sudo bash register-provider.sh — it's a site-wide update)."

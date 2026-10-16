@@ -159,7 +159,7 @@ In **ArcGIS Server Manager** (`https://<server>:6443/arcgis/manager`), go to **S
 <details>
 <summary><b>How to restart, upgrading, and cleaning up the upload</b></summary>
 
-- **Restart:** on Windows, use the *Services* app → **ArcGIS Server** → *Restart*. On Linux, run `sudo systemctl restart arcgisserver` (the unit may be named `arcgis-server`), or, as the `arcgis` user, `stopserver.sh` then `startserver.sh` from the install folder. The provider reads its code and credentials at startup.
+- **Restart:** on Windows, use the *Services* app → **ArcGIS Server** → *Restart*. On Linux, run `sudo systemctl restart arcgisserver` (the unit may be named `arcgis-server`), or, only when no systemd unit runs the server, as the `arcgis` user, `stopserver.sh` then `startserver.sh` from the install folder (with the unit active, a script restart runs outside it and systemd then stops the server). The provider reads its code and credentials at startup.
 - **Upgrading:** use the provider's **update** in the same place instead of Add.
 - **File picker:** it sees only the machine your browser runs on, so have the `.cdpk` there.
 - **Clean up:** delete the upload so no extra copy of your credentials is kept: Server Administrator (`https://<server>:6443/arcgis/admin`) → *uploads* → the item → *delete*.
