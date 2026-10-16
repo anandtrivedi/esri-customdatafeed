@@ -72,7 +72,6 @@ else
   ask "Admin username" "siteadmin" ADMINUSER
   if ! read -rs -p "  Admin password: " PW; then echo; echo "!! Input closed (EOF) — aborting." >&2; exit 130; fi; echo
 fi
-ask "Service name (use folder/name if it's in a folder)" "TEST_FeatureService_Databricks" SVC
 echo
 
 # --- mint admin (requestip) + query (referer) tokens ----------------------------
@@ -99,6 +98,34 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 echo "[ok] admin token minted"
+echo
+
+# --- pick the service: list this server's CDF (CUSTOMDATA) FeatureServers, all folders ----
+_svcs=()
+_fl=$("${CURL[@]}" "$SERVER/$CTX/admin/services" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+for _f in "" $(jget "$_fl" '" ".join(f for f in d.get("folders",[]) if f and f!="/" and f not in ("System","Utilities"))'); do
+  _r=$("${CURL[@]}" "$SERVER/$CTX/admin/services${_f:+/$_f}" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+  for _n in $(jget "$_r" '" ".join(x["serviceName"] for x in d.get("services",[]) if x.get("type")=="FeatureServer")'); do
+    _p="${_f:+$_f/}$_n"
+    _d=$("${CURL[@]}" "$SERVER/$CTX/admin/services/$_p.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+    [ "$(jget "$_d" 'd.get("provider") or ""')" = "CUSTOMDATA" ] && _svcs+=("$_p")
+  done
+done
+echo "-- Custom Data Feed services on this server --"
+if [ ${#_svcs[@]} -eq 0 ]; then
+  echo "  (none found — none published yet, or the admin user can't list them)"
+  ask "Service name (use folder/name if it's in a folder)" "" SVC
+else
+  for _i in "${!_svcs[@]}"; do printf "  %3d) %s\n" $((_i+1)) "${_svcs[$_i]}"; done
+  ask "Service to check: number or name (folder/name if in a folder)" "1" SVC
+  case "$SVC" in *[!0-9]*|"") ;; *)
+    if [ "$SVC" -ge 1 ] && [ "$SVC" -le ${#_svcs[@]} ]; then SVC="${_svcs[$((SVC-1))]}"
+    else echo "!! no service number $SVC (1-${#_svcs[@]})."; exit 1; fi;;
+  esac
+fi
+[ -n "$SVC" ] || { echo "!! no service name given."; exit 1; }
+SVC="${SVC%.FeatureServer}"
+echo "  checking: $SVC"
 echo
 
 # --- federation detection -------------------------------------------------------
