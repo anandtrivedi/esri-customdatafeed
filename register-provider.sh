@@ -270,6 +270,17 @@ for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist" "$NODEJS_DIR"; do
   [ -n "$_d" ] || continue
   if [ -f "$_d/$CDPK_CANON" ]; then DETECTED_CDPK="$_d/$CDPK_CANON"; DETECTED_TRUSTED=1; break; fi
 done
+if [ -z "$DETECTED_CDPK" ]; then   # the repo's prebuilt cdpk/12.x or cdpk/11.x, matching the installed ArcGIS
+  _ags_ver=$(sed -n 's/^Z_REAL_VERSION=//p' "$ARCGIS_ROOT"/.ESRI.properties.* \
+    "$(getent passwd arcgis 2>/dev/null | cut -d: -f6)"/.ESRI.properties.* 2>/dev/null | head -1)
+  case "$_ags_ver" in 11.*) _pkg_dirs="11.x";; 12.*) _pkg_dirs="12.x 11.x";; *) _pkg_dirs="11.x";; esac
+  for _v in $_pkg_dirs; do
+    if [ -f "$SCRIPT_DIR/cdpk/$_v/$CDPK_CANON" ]; then
+      DETECTED_CDPK="$SCRIPT_DIR/cdpk/$_v/$CDPK_CANON"; DETECTED_TRUSTED=1
+      echo "  [ok]   ArcGIS ${_ags_ver:-version unknown} -> prebuilt cdpk/$_v"; break
+    fi
+  done
+fi
 if [ -z "$DETECTED_CDPK" ]; then   # a single stray *.cdpk in a trusted dir also counts as trusted
   for _d in "$SCRIPT_DIR" "$SCRIPT_DIR/dist"; do
     [ -n "$_d" ] || continue
