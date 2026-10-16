@@ -175,6 +175,14 @@ describe('connectionPool', () => {
       await cp.shutdownPool();
     });
 
+    it('a burst of concurrent 403s shares one REST lookup', async () => {
+      const { cp, pool, calls } = forbiddenPool({ status: 403, body: { message: 'Source IP address: 1.2.3.4 is blocked by Databricks IP ACL' } });
+      const errs = await Promise.all(Array.from({ length: 8 }, () => pool.acquire().then(() => null, (e) => e)));
+      expect(calls).to.have.lengthOf(1); // was 8
+      for (const e of errs) expect(e.message).to.include('blocked by Databricks IP ACL');
+      await cp.shutdownPool();
+    });
+
     it('does not call client.connect at all when min: 0', async () => {
       connectionPool.getPool(
         { workspaceAlias: 'A', hostname: 'a.example.com', authType: 'pat', token: 'x' },
@@ -272,6 +280,43 @@ describe('connectionPool', () => {
       await new Promise((r) => setTimeout(r, 50)); // warm-up settles
       expect(opened).to.equal(4); // was 6: 2 uncounted warm-up opens + 4 for the acquires
       for (const g of got) if (g.status === 'fulfilled') pool.release(g.value);
+      await cp.shutdownPool();
+    });
+  });
+
+  describe('warm-up connections serve requests that queued meanwhile', () => {
+    it('with min == max, acquires that arrive during warm-up get the warm-up connections instead of timing out', async () => {
+      let opened = 0;
+      const SlowClient = class {
+        async connect() { await new Promise((r) => setTimeout(r, 30)); }
+        async openSession() { opened++; return { close: async () => {} }; }
+        async close() {}
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: SlowClient } });
+      const ws = { workspaceAlias: 'M', hostname: 'm.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/m', { min: 3, max: 3, connectionTimeout: 400 });
+      const t0 = Date.now();
+      const got = await Promise.allSettled(Array.from({ length: 5 }, () => pool.acquire()));
+      const ok = got.filter((g) => g.status === 'fulfilled').map((g) => g.value);
+      expect(opened).to.equal(3);
+      expect(ok).to.have.lengthOf(3); // was 0: all five timed out with 3 idle connections in the pool
+      expect(new Set(ok.map((c) => c.id)).size).to.equal(3); // each connection handed out once
+      expect(ok.every((c) => c.inUse)).to.equal(true);
+      expect(pool.activeConnections).to.equal(3);
+      expect(got.filter((g) => g.status === 'rejected').map((g) => g.reason.message)).to.deep.equal(['Connection acquisition timeout', 'Connection acquisition timeout']);
+      expect(Date.now() - t0).to.be.below(1000);
+      for (const c of ok) pool.release(c);
+      expect(pool.activeConnections).to.equal(0);
+      await cp.shutdownPool();
+    });
+
+    it('a warm-up connection with no one waiting stays idle in the pool', async () => {
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: class {
+        async connect() {} async openSession() { return { close: async () => {} }; } async close() {} } } });
+      const pool = cp.getPool({ workspaceAlias: 'I', hostname: 'i.example.com', authType: 'pat', token: 'x' }, '/p', { min: 2, max: 4 });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(pool.pool.map((c) => c.inUse)).to.deep.equal([false, false]);
+      expect(pool.activeConnections).to.equal(0);
       await cp.shutdownPool();
     });
   });

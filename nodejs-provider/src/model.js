@@ -85,7 +85,7 @@ const config = {
     maxReturnIds: (() => {
       const raw = process.env.DATABRICKS_MAX_RETURN_IDS;
       if (raw === undefined || raw === '') return 500000;
-      const n = parseInt(raw, 10);
+      const n = Number(raw.trim()); // not parseInt: it read "1e6" as 1 and "30s" as 30, with no warning
       if (!Number.isInteger(n) || n < 0) {
         console.warn(`[CDF] Invalid DATABRICKS_MAX_RETURN_IDS="${raw}"; using default 500000 (a non-negative integer; 0 disables the ceiling).`);
         return 500000;
@@ -98,7 +98,7 @@ const config = {
     maxDistinctRows: (() => {
       const raw = process.env.DATABRICKS_MAX_DISTINCT_ROWS;
       if (raw === undefined || raw === '') return 1000000;
-      const n = parseInt(raw, 10);
+      const n = Number(raw.trim()); // not parseInt: it read "1e6" as 1 and "30s" as 30, with no warning
       if (!Number.isInteger(n) || n < 0) {
         console.warn(`[CDF] Invalid DATABRICKS_MAX_DISTINCT_ROWS="${raw}"; using default 1000000 (a non-negative integer; 0 disables the cap).`);
         return 1000000;
@@ -107,6 +107,32 @@ const config = {
     })()
   }
 };
+
+/**
+ * returnIdsOnly / returnDistinctValues matched more rows than the ceiling: a 400 the client can act on.
+ */
+function tooManyRowsError(distinct, ceiling) {
+  const err = new Error(
+    (distinct
+      ? `returnDistinctValues matched more than the configured maximum of ${ceiling} rows. `
+      : `returnIdsOnly matched more than the configured maximum of ${ceiling} object ids. `) +
+    `Narrow the request with where / time / geometry filters, or raise the ` +
+    `${distinct ? 'DATABRICKS_MAX_DISTINCT_ROWS' : 'DATABRICKS_MAX_RETURN_IDS'} ` +
+    `environment variable on the server (set it to 0 to disable the ceiling).`
+  );
+  err.code = 400; // client should narrow the query — a 4xx, not a generic server error
+  return err;
+}
+
+/**
+ * Edit attributes keyed the way Postgres sees them: unquoted identifiers fold to lowercase, and the idField and
+ * geometry column are lowercased to match, so a client sending OBJECTID (the configured spelling) still hits objectid.
+ */
+function lowerKeys(attributes) {
+  const out = {};
+  for (const [k, v] of Object.entries(attributes || {})) out[k.toLowerCase()] = v;
+  return out;
+}
 
 /**
  * applyEdits `deletes` arrives the way the REST parameter does: a single id (number), a comma-separated string
@@ -840,17 +866,8 @@ class Model {
           // set is larger than the ceiling; return an actionable error rather than a silently-truncated (wrong) set.
           const idCeiling = geoserviceParams.returnIdsOnly ? config.databricks.maxReturnIds : config.databricks.maxDistinctRows;
           if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
-            this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
-            const tooMany = new Error(
-              (geoserviceParams.returnIdsOnly
-                ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. `
-                : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
-              `Narrow the request with where / time / geometry filters, or raise the ` +
-              `${geoserviceParams.returnIdsOnly ? 'DATABRICKS_MAX_RETURN_IDS' : 'DATABRICKS_MAX_DISTINCT_ROWS'} ` +
-              `environment variable on the server (set it to 0 to disable the ceiling).`
-            );
-            tooMany.code = 400; // client should narrow the query — a 4xx, not a generic server error
-            return respond(tooMany);
+            this.logger.warn(`Query ${requestCounter}: ${geoserviceParams.returnIdsOnly ? 'returnIdsOnly' : 'returnDistinctValues'} exceeded the ${idCeiling}-row ceiling`);
+            return respond(tooManyRowsError(!geoserviceParams.returnIdsOnly, idCeiling));
           }
 
           // Initialize GeoJSON response
@@ -1160,16 +1177,7 @@ class Model {
         const idCeiling = config.databricks.maxReturnIds;
         if (geoserviceParams.returnIdsOnly && !returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
           this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
-          const tooMany = new Error(
-            (geoserviceParams.returnIdsOnly
-              ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. `
-              : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
-            `Narrow the request with where / time / geometry filters, or raise the ` +
-            `${geoserviceParams.returnIdsOnly ? 'DATABRICKS_MAX_RETURN_IDS' : 'DATABRICKS_MAX_DISTINCT_ROWS'} ` +
-            `environment variable on the server (set it to 0 to disable the ceiling).`
-          );
-          tooMany.code = 400;
-          return respond(tooMany);
+          return respond(tooManyRowsError(false, idCeiling));
         }
 
         let geojson = { type: 'FeatureCollection', features: [] };
@@ -1313,7 +1321,7 @@ class Model {
         // Process adds
         for (const feature of adds) {
           try {
-            const attributes = feature.attributes || feature.properties || {};
+            const attributes = lowerKeys(feature.attributes || feature.properties);
             const geometry = feature.geometry || null;
             const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
             const result = await query(sql, params);
@@ -1336,7 +1344,7 @@ class Model {
         // Process updates
         for (const feature of updates) {
           try {
-            const attributes = feature.attributes || feature.properties || {};
+            const attributes = lowerKeys(feature.attributes || feature.properties);
             const geometry = feature.geometry || null;
             const oid = Number(attributes[rawIdField]);
             if (!Number.isInteger(oid)) {
@@ -1356,7 +1364,7 @@ class Model {
             }
           } catch (error) {
             this.logger.error(`Edit update failed: ${error.message}`);
-            const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
+            const oid = Number(lowerKeys(feature.attributes || feature.properties)[rawIdField]);
             updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
           }
         }
@@ -1499,3 +1507,4 @@ class Model {
 
 module.exports = Model;
 module.exports._extentCache = extentCache; // tests reset it between cases
+module.exports._config = config; // tests check the env parsing

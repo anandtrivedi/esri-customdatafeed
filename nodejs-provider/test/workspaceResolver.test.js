@@ -413,6 +413,40 @@ host = a.example.com
       expect(resolver.resolveWorkspace('WEST')).to.include({ hostname: 'west.example.com', token: 'dapi-q' });
     });
 
+    it('fails only the profile with the bad line, not every workspace on the box', () => {
+      writeConfig('[GOOD]\nhost = g.example.com\ntoken = dapi-g\n\n[BAD]\nhost = b.example.com\nthis is not a setting\ntoken = dapi-b\n');
+      writeEnv('[WEST]\nhost = w.example.com\ntoken = dapi-w\n');
+      expect(resolver.resolveWorkspace('GOOD')).to.include({ hostname: 'g.example.com', token: 'dapi-g' });
+      expect(resolver.resolveWorkspace('WEST')).to.include({ token: 'dapi-w' });
+      let err; try { resolver.resolveWorkspace('BAD'); } catch (e) { err = e; }
+      expect(err && err.message).to.match(/Unrecognized line 7 of /);
+      expect(err.code).to.equal(400);
+      expect(err.message).to.not.include('dapi-b');
+    });
+
+    it('a mistyped header fails the profile it would merge into, and only that one', () => {
+      writeEnv('[A]\nhost = a.example.com\ntoken = dapi-a\n\n[B] - prod\ntoken = dapi-SECRET\n\n[C]\nhost = c.example.com\ntoken = dapi-c\n');
+      expect(() => resolver.resolveWorkspace('A')).to.throw(/Malformed section header on line 5/); // not silently B's token
+      expect(resolver.resolveWorkspace('C')).to.include({ token: 'dapi-c' });
+    });
+
+    it('a stray line above the first section fails that file\'s profiles only (its env-var part ends there)', () => {
+      writeEnv('POOL=3\nKEY: value\n\n[ENVP]\nhost = e.example.com\ntoken = dapi-e\n');
+      writeConfig('[CFGP]\nhost = c.example.com\ntoken = dapi-c\n');
+      expect(() => resolver.resolveWorkspace('ENVP')).to.throw(/Unrecognized line 2 of .*\.env/);
+      expect(resolver.resolveWorkspace('CFGP')).to.include({ token: 'dapi-c' });
+    });
+
+    it('reads an indented continuation line (configparser style) as part of the value', () => {
+      writeConfig('[SP]\nhost = s.example.com\nclient_id = id-s\nclient_secret = sec-s\nscopes = sql,\n    postgres\n');
+      expect(resolver.resolveWorkspace('SP')).to.include({ authType: 'oauth-m2m', clientId: 'id-s' });
+      expect(resolver._internal.parseIni('[X]\nscopes = sql,\n  postgres\n').X.scopes).to.equal('sql,\npostgres');
+    });
+
+    it('still reads indented key = value lines as separate keys', () => {
+      expect(resolver._internal.parseIni('[X]\n  host = h.example.com\n  token = dapi-x\n').X).to.deep.equal({ host: 'h.example.com', token: 'dapi-x' });
+    });
+
     it("lists profiles from both the .env and .databrickscfg when a workspace is found nowhere", () => {
       writeEnv(ENV_TEXT);
       writeConfig('[FILE_ONE]\nhost = f.example.com\ntoken = t\n');

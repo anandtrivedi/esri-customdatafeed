@@ -70,6 +70,7 @@ class DatabricksConnectionPool {
     this.waitQueue = [];
     this.shuttingDown = false;
     this.forbiddenExplained = null; // { at, text } — one REST lookup per minute while connections keep failing
+    this.forbiddenLookup = null; // the lookup in flight, shared by concurrent failures
 
     console.log(`[Pool ${this.poolLabel()}] Initialized (min: ${this.minConnections}, max: ${this.maxConnections})`);
 
@@ -78,15 +79,21 @@ class DatabricksConnectionPool {
 
   async explainForbidden() {
     if (this.forbiddenExplained && Date.now() - this.forbiddenExplained.at < EXPLAIN_TTL_MS) return this.forbiddenExplained.text;
-    let text = FORBIDDEN_HINT;
-    try {
-      const ws = this.workspaceConfig;
-      const token = ws.authType === 'oauth-m2m' ? await getOAuthToken(ws, 'sql') : ws.token;
-      const reason = token && await restReason(ws.hostname, this.httpPath, token);
-      if (reason) text = ` (Databricks: ${reason})`;
-    } catch (e) { /* keep the generic hint */ }
-    this.forbiddenExplained = { at: Date.now(), text };
-    return text;
+    // One lookup for a burst of failing connections (every acquire awaits it), not one each.
+    if (!this.forbiddenLookup) {
+      this.forbiddenLookup = (async () => {
+        let text = FORBIDDEN_HINT;
+        try {
+          const ws = this.workspaceConfig;
+          const token = ws.authType === 'oauth-m2m' ? await getOAuthToken(ws, 'sql') : ws.token;
+          const reason = token && await restReason(ws.hostname, this.httpPath, token);
+          if (reason) text = ` (Databricks: ${reason})`;
+        } catch (e) { /* keep the generic hint */ }
+        this.forbiddenExplained = { at: Date.now(), text };
+        return text;
+      })().finally(() => { this.forbiddenLookup = null; });
+    }
+    return this.forbiddenLookup;
   }
 
   poolLabel() {
@@ -100,7 +107,8 @@ class DatabricksConnectionPool {
       for (let i = 0; i < this.minConnections; i++) {
         // Counted in `creating` like acquire()'s opens, so concurrent first requests can't open past max meanwhile.
         this.creating++;
-        promises.push(this.createConnection().finally(() => { this.creating--; }));
+        // A request that queued while warm-up held every slot (min == max) is served here; nothing else would wake it.
+        promises.push(this.createConnection().then((conn) => this.handToWaiter(conn)).finally(() => { this.creating--; }));
       }
       await Promise.all(promises);
       console.log(`[Pool ${this.poolLabel()}] Warmed up with ${this.minConnections} connections`);
@@ -218,16 +226,19 @@ class DatabricksConnectionPool {
 
     connection.inUse = false;
     connection.lastUsed = Date.now();
-
-    if (this.waitQueue.length > 0) {
-      const { resolve, timeoutId } = this.waitQueue.shift();
-      clearTimeout(timeoutId);
-      connection.inUse = true;
-      this.activeConnections++;
-      resolve(connection);
-    }
+    this.handToWaiter(connection);
 
     this.cleanupIdleConnections();
+  }
+
+  // Give an idle connection to the oldest queued acquire(), if any.
+  handToWaiter(connection) {
+    if (connection.inUse || this.waitQueue.length === 0) return;
+    const { resolve, timeoutId } = this.waitQueue.shift();
+    clearTimeout(timeoutId);
+    connection.inUse = true;
+    this.activeConnections++;
+    resolve(connection);
   }
 
   // After a connection is destroyed, create a replacement for the next waiter

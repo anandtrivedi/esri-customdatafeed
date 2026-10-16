@@ -116,12 +116,26 @@ function checkWhereClauseSafety(clause, { backslashEscapes = false } = {}) {
         else quote = null;
       }
     } else if (ch === "'" || ch === '"' || ch === '`') {
+      // String forms whose escaping this scanner doesn't follow, so a ( or ) it counts as code could really be
+      // inside a string, or the reverse: Databricks raw strings r'...' (backslash is literal) and Postgres E'...'
+      // (backslash escapes). A prefix only counts at a word start: name'x' is not a prefix.
+      const prefix = /[A-Za-z0-9_$]/.test(clause[i - 2] || '') ? '' : (clause[i - 1] || '');
+      if (ch !== '`' && /[rR]/.test(prefix)) throw new Error('Raw string literals (r\'...\') are not allowed in WHERE clause');
+      if (ch === "'" && /[eE]/.test(prefix)) throw new Error('Escape string literals (E\'...\') are not allowed in WHERE clause');
       quote = ch;
+    } else if (ch === '$' && !/[A-Za-z0-9_$]/.test(clause[i - 1] || '') && /^\$[A-Za-z_]*\$/.test(clause.slice(i))) {
+      // Postgres dollar quoting ($$...$$, $tag$...$tag$): a string the scanner would read as code. Right after a name
+      // character the $ is part of the identifier (a$b$c), as in Postgres.
+      throw new Error('Dollar-quoted strings ($$...$$) are not allowed in WHERE clause');
     } else if (ch === '(') {
       depth++;
     } else if (ch === ')') {
       if (--depth < 0) break;
     }
+  }
+  if (quote) {
+    // The scanner and the database disagree about where the string ends, so its parenthesis count can't be trusted.
+    throw new Error('Unterminated string or quoted identifier in WHERE clause');
   }
   if (depth !== 0) {
     throw new Error('Unbalanced parentheses in WHERE clause');

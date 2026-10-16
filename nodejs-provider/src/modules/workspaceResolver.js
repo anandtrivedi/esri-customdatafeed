@@ -82,29 +82,53 @@ const SECTION_RE = /^\[([^\]]+)\]\s*(?:[#;].*)?$/;
 // A line allowed above the first section: blank, a # or ; comment, or a single-line [export ]KEY=value setting.
 const isSettingLine = (line) => { const t = line.trim(); return !t || /^[#;]/.test(t) || /^(?:export\s+)?[\w.-]+\s*=/.test(t); };
 
-function parseIni(contents, source = 'the credentials file') {
+// A bad line fails only the profiles it can affect (they throw when resolved), not every service on the box. Kept
+// non-enumerable so a profile still compares and lists like plain key/values.
+const PARSE_ERROR = Symbol('parseError');
+const markBroken = (profile, message) => {
+  if (!profile[PARSE_ERROR]) Object.defineProperty(profile, PARSE_ERROR, { value: message, enumerable: false });
+};
+
+function parseIni(contents, source = 'the credentials file', warn = () => {}) {
   // No prototype: a [__proto__] or [constructor] section must not touch Object.prototype or shadow a lookup.
   const profiles = Object.create(null);
   let currentSection = null;
+  let lastKey = null;
+  let preambleError = null;
   const lines = contents.split(/\r?\n/);
+  // Inside a section, the keys after a bad line would land in this profile, so it fails. Above the first section, the
+  // .env's env-var part ends at that line (envVarsPart), so every profile in this file fails.
+  const fail = (message) => {
+    warn(message);
+    if (currentSection) markBroken(profiles[currentSection], message);
+    else if (!preambleError) preambleError = message;
+    lastKey = null;
+  };
 
   for (const [i, rawLine] of lines.entries()) {
     const line = rawLine.trim(); // also drops a leading BOM
-    if (line === '' || line.startsWith('#') || line.startsWith(';')) continue;
+    if (line === '' || line.startsWith('#') || line.startsWith(';')) { lastKey = null; continue; }
 
     const sectionMatch = line.match(SECTION_RE);
     if (sectionMatch) {
       currentSection = sectionMatch[1].trim();
       if (!profiles[currentSection]) profiles[currentSection] = Object.create(null);
+      lastKey = null;
       continue;
     }
     // A mistyped header ("[WEST] - prod") would otherwise be skipped and its keys merged into the previous profile.
-    if (line.startsWith('[')) throw configError(`Malformed section header on line ${i + 1} of ${source}: expected [NAME]`);
+    if (line.startsWith('[')) { fail(`Malformed section header on line ${i + 1} of ${source}: expected [NAME]`); continue; }
 
     if (!currentSection) {
       // Above the first section only settings belong (the .env's env-var part, which envVarsPart ends at the same line).
-      if (isSettingLine(line)) continue;
-      throw configError(`Unrecognized line ${i + 1} of ${source}: expected KEY=value, [NAME] or a # comment`);
+      if (!isSettingLine(line)) fail(`Unrecognized line ${i + 1} of ${source}: expected KEY=value, [NAME] or a # comment`);
+      continue;
+    }
+
+    // An indented line without "=" continues the previous value (Python configparser: scopes = sql,\n  postgres).
+    if (lastKey && /^\s/.test(rawLine) && !line.includes('=')) {
+      profiles[currentSection][lastKey] += `\n${line}`;
+      continue;
     }
 
     const kvMatch = line.match(/^([^=]+?)\s*=\s*(.*)$/);
@@ -112,12 +136,14 @@ function parseIni(contents, source = 'the credentials file') {
       const key = kvMatch[1].trim();
       const value = kvMatch[2].trim().replace(/^(["'])(.*)\1$/, '$2'); // token = "dapi…" as in a .env
       profiles[currentSection][key] = value;
+      lastKey = key;
       continue;
     }
     // Anything else inside a section (e.g. "WEST] - prod") would silently fold the next keys into this profile.
-    throw configError(`Unrecognized line ${i + 1} of ${source}: expected [NAME], key = value or a # comment`);
+    fail(`Unrecognized line ${i + 1} of ${source}: expected [NAME], key = value or a # comment`);
   }
 
+  if (preambleError) for (const name of Object.keys(profiles)) markBroken(profiles[name], preambleError);
   return profiles;
 }
 
@@ -139,7 +165,7 @@ function readProfilesFrom(filePath) {
   } catch (err) {
     throw configError(`Failed to read Databricks credentials file ${filePath}: ${err.message}`);
   }
-  return parseIni(contents, filePath);
+  return parseIni(contents, filePath, (m) => console.warn(`[CDF] ${m} (only the profiles it affects fail)`));
 }
 
 function loadProfiles() {
@@ -168,6 +194,7 @@ function configError(message) {
 }
 
 function buildProfileFromIni(alias, raw, source = getConfigFilePath()) {
+  if (raw[PARSE_ERROR]) throw configError(raw[PARSE_ERROR]);
   if (!raw.host) {
     throw configError(`Profile [${alias}] in ${source} is missing required "host"`);
   }
