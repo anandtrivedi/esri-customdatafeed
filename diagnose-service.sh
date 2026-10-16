@@ -549,20 +549,25 @@ else
     echo " * NOTE: provider is '$PROVIDER', not CUSTOMDATA — this may not be a Databricks CDF"
     echo "        service, so some of the advice below may not apply."
   fi
-  # min=0 -> POSSIBLE intermittent-404 cause; escalate only when corroborated (multi-machine)
+  # min/max = 0/0 is the shared instance pool: what Server Manager / Portal publishing creates, and
+  # healthy (verified live: 0/0 services serve fine). min=0 matters only on a multi-machine site or
+  # when the "404, works on refresh" symptom is seen; max=0 with min>=1 is a contradiction.
+  SIZING_FIX="setup.sh option 7, or Server Manager > the service > Pooling"
   if [ "$MININST" = "0" ]; then
     if [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
       echo " * minInstancesPerNode=0 on a MULTI-machine site ($MACHINE_COUNT) -> a plausible intermittent-"
       echo "     404 cause: a round-robin node with no resident instance can 404 while another serves."
       echo "     Confirm against the live query above / the per-machine lines / the log before changing it."
-      echo "     -> If corroborated: minInstancesPerNode=1, maxInstancesPerNode>=2 (a warm instance per node)."
+      echo "     -> If corroborated: min=1, max>=2 (a warm instance per node) via $SIZING_FIX."
       PROBLEMS=$((PROBLEMS+1))
+    elif [ "$MAXINST" = "0" ]; then
+      echo " * min/max instances 0/0 = the shared instance pool (the default when publishing from"
+      echo "     Server Manager or Portal). Normal: shared instances serve it on demand, so the zero"
+      echo "     instance counts above are expected. Only if you see '404, then works on refresh' under"
+      echo "     load: set min=1, max=2 via $SIZING_FIX."
     else
-      echo " * minInstancesPerNode=0 -> no instance is kept resident. This CAN cause intermittent"
-      echo "     '404, works on refresh' UNDER shared-pool pressure (many min=0 services vs pool size),"
-      echo "     but on a quiet single-machine box it may be perfectly healthy."
-      echo "     -> If you see that symptom, set min=1/max>=2; also check the shared-instance pool size"
-      echo "        vs how many services use it. Don't 'fix' this if you aren't seeing the symptom."
+      echo " * minInstancesPerNode=0 -> no instance is kept warm; the first request after idle starts one."
+      echo "     Fine on a quiet box. Only if you see '404, then works on refresh': set min=1 via $SIZING_FIX."
     fi
   # multi-machine with min>=1 = healthy topology (informational, NOT a problem)
   elif [ "$MACHINE_COUNT" != "1" ] && [ "$MACHINE_COUNT" != "?" ]; then
@@ -570,18 +575,14 @@ else
     echo "     -> Just confirm the service is started on ALL nodes (each per-machine line above"
     echo "        should show instances); a node stuck at 0 would 404 via round-robin."
   fi
-  # maxInstancesPerNode=0 -> its own, distinct misconfiguration (independent of min). For a CDF
-  # (CUSTOMDATA) dedicated-instance service this means NO instance is guaranteed resident on a
-  # node, which can 404 requests outright — often a harder problem than min=0 and easy to miss
-  # because the min=0 message above doesn't cover it.
-  if [ "$MAXINST" = "0" ]; then
-    echo " * maxInstancesPerNode=0 -> the service can't guarantee a resident instance on any node."
-    echo "     For a CDF (CUSTOMDATA) dedicated-instance service this is a misconfiguration that can"
-    echo "     404 requests. -> set maxInstancesPerNode>=2 (with minInstancesPerNode>=1)."
+  if [ "$MAXINST" = "0" ] && [ -n "$MININST" ] && [ "$MININST" != "0" ]; then
+    echo " * minInstancesPerNode=$MININST but maxInstancesPerNode=0 -> contradictory sizing; ArcGIS can't"
+    echo "     start the warm instance you asked for. -> set max>=2 via $SIZING_FIX."
     PROBLEMS=$((PROBLEMS+1))
   fi
   # STARTED but zero live instances right now (arms the log-tail advice for the init-failure case)
-  if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" = "0" ]; then
+  # (Not for the shared pool: its instances are never counted against the service.)
+  if [ "$STATS_NUM" = "1" ] && [ "$FREE_TOTAL" = "0" ] && [ "$BUSY_TOTAL" = "0" ] && ! { [ "$MININST" = "0" ] && [ "$MAXINST" = "0" ]; }; then
     echo " * No instance is running right now (free=0, busy=0)."
     echo "     -> Normal for a min=0 service that's idle. BUT if requests are actively 404ing, the"
     echo "        provider is failing to INITIALIZE (Databricks auth/connectivity, wrong table/column)"

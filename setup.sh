@@ -393,7 +393,8 @@ edit_sizing() {
   cmin=$(jget "$cur" 'd.get("minInstancesPerNode")'); cmax=$(jget "$cur" 'd.get("maxInstancesPerNode")'); cidle=$(jget "$cur" 'd.get("maxIdleTime")')
   echo "  current: minInstancesPerNode=$cmin  maxInstancesPerNode=$cmax  maxIdleTime=${cidle}s"
   ask_int "new min instances per node (0 = shared pool; 1+ keeps a warm instance)" "${cmin:-1}" nmin 0 50 || return
-  while :; do ask_int "new max instances per node (>= min, at least 1)" "${cmax:-2}" nmax 1 100 || return; [ "$nmax" -ge "$nmin" ] && break; echo "   !! max must be >= min ($nmin)."; done
+  while :; do ask_int "new max instances per node (>= min; 0 with min 0 = shared pool)" "${cmax:-2}" nmax 0 100 || return
+    { [ "$nmax" -ge "$nmin" ] && { [ "$nmax" -ge 1 ] || [ "$nmin" = "0" ]; }; } && break; echo "   !! max must be >= min ($nmin), and at least 1 unless min is 0."; done
   ask_int "maxIdleTime seconds (how long a warm instance survives idle)" "${cidle:-1800}" nidle 60 86400 || return
   # Modify the FULL service JSON and POST it back to /edit (the endpoint replaces the definition).
   newjson=$(CUR="$cur" NMIN="$nmin" NMAX="$nmax" NIDLE="$nidle" python3 -c "
@@ -404,16 +405,44 @@ for k in ('status','permissions','iteminfo'):    # drop read-only echoes the edi
 d['minInstancesPerNode']=int(os.environ['NMIN']); d['maxInstancesPerNode']=int(os.environ['NMAX']); d['maxIdleTime']=int(os.environ['NIDLE'])
 print(json.dumps(d))" 2>/dev/null)
   [ -n "$newjson" ] || { echo "  !! could not build the edited definition."; return; }
-  echo "  note: applying this usually restarts '$svc' (a brief interruption for its users)."
+  local wasst
+  wasst=$(jget "$("${CURL[@]}" --max-time 30 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/status" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")" 'd.get("realTimeState") or ""')
+  echo "  note: applying this restarts '$svc' (a brief interruption for its users)."
   echo "  applying: min=$nmin max=$nmax maxIdleTime=${nidle}s ..."
-  resp=$("${CURL[@]}" --max-time 60 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/edit" \
-    --data-urlencode "service=$newjson" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
-  st=$(jget "$resp" 'd.get("status") or ""')
+  # A service published before a provider parameter existed (e.g. minScale) is refused with
+  # "missing a required customdata service-parameter 'X'": add X empty (= unused) and retry.
+  local _try _miss
+  for _try in 1 2 3 4 5 6 7 8 9 10; do
+    resp=$("${CURL[@]}" --max-time 60 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/edit" \
+      --data-urlencode "service=$newjson" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
+    st=$(jget "$resp" 'd.get("status") or ""')
+    _miss=$(printf '%s' "$resp" | sed -n "s/.*missing a required customdata service-parameter '\([A-Za-z0-9_]*\)'.*/\1/p")
+    [ "$st" != "success" ] && [ -n "$_miss" ] || break
+    echo "  (service predates the '$_miss' parameter — adding it empty, as publishing does)"
+    newjson=$(CUR="$newjson" MISS="$_miss" python3 -c "
+import os,json
+d=json.loads(os.environ['CUR'])
+d.setdefault('jsonProperties',{}).setdefault('customDataProviderInfo',{}).setdefault('serviceParameters',{})[os.environ['MISS']]=''
+print(json.dumps(d))" 2>/dev/null) || break
+  done
   if [ "$st" = "success" ]; then
     # read back to confirm the change took (the edit usually restarts the service to apply it)
     local vr
     vr=$("${CURL[@]}" --max-time 30 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
     echo "  [ok] edited — now: min=$(jget "$vr" 'd.get("minInstancesPerNode")') max=$(jget "$vr" 'd.get("maxInstancesPerNode")') maxIdleTime=$(jget "$vr" 'd.get("maxIdleTime")')s"
+    # A CDF service's /edit leaves it STOPPED (every request 404s): start it again if it was running.
+    if [ "$wasst" = "STARTED" ]; then
+      local i now=""
+      for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        now=$(jget "$("${CURL[@]}" --max-time 30 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/status" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")" 'd.get("realTimeState") or ""')
+        [ "$now" = "STARTED" ] && break
+        [ "$now" = "STOPPED" ] && "${CURL[@]}" --max-time 60 "$ADMIN_URL/$ADMIN_CTX/admin/services/$svc.FeatureServer/start" \
+          --data-urlencode "token=$TOKEN" --data-urlencode "f=json" >/dev/null
+        sleep 5
+      done
+      if [ "$now" = "STARTED" ]; then echo "  [ok] '$svc' is running again."
+      else echo "  !! '$svc' is ${now:-in an unknown state}, not STARTED — start it in Server Manager (Services > $svc > Start)."; fi
+    fi
     echo "  (identity/URL/Portal item are unchanged — no republish needed.)"
   else
     echo "  !! edit did not succeed (status='${st:-error}'): $(printf '%s' "$resp" | head -c 300)"
