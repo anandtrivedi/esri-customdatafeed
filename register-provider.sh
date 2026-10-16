@@ -642,7 +642,7 @@ if [ "$ACTION" = "update" ] && [ -d "$PROVIDER_DIR" ]; then
 fi
 
 # --- register or update ----------------------------------------------------------
-echo "-> ${ACTION}ing the provider..."
+echo "-> ${ACTION%e}ing the provider..."
 RESP=$("${CURL[@]}" --max-time 120 "$SERVER/$CTX/admin/services/types/customdataproviders/$ACTION" \
   --data-urlencode "id=$ITEMID" --data-urlencode "token=$TOKEN" --data-urlencode "f=json")
 STATUS=$(printf '%s' "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status','') )" 2>/dev/null)

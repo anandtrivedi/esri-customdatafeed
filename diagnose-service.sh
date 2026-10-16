@@ -470,9 +470,15 @@ echo "============================================================"
 echo " ASSESSMENT — likely problem(s) and what to do"
 echo "============================================================"
 if [ -n "$ACCESS_ERR" ]; then
-  echo "  * Databricks access ($ACCESS_ERR): the identity in the workspace profile needs the \"Databricks SQL access\""
-  echo "    entitlement (plus \"Workspace access\" for Lakebase), CAN USE on the warehouse, and token/secret scopes \"sql\""
-  echo "    (plus \"postgres\" for Lakebase). After fixing, restart ArcGIS Server (sudo systemctl restart arcgisserver, or stopserver/startserver)."
+  case ",$ACCESS_ERR," in *,ipacl,*)
+    echo "  * Databricks IP access list: the workspace blocks this server's public IP (the log line names it). Add that"
+    echo "    IP (or the NAT/egress range) to the workspace's IP access list; no ArcGIS restart is needed for this one.";;
+  esac
+  case ",$ACCESS_ERR," in *,entitlement,*|*,scope,*|*,403,*)
+    echo "  * Databricks access ($ACCESS_ERR): the identity in the workspace profile needs the \"Databricks SQL access\""
+    echo "    entitlement (plus \"Workspace access\" for Lakebase), CAN USE on the warehouse, and token/secret scopes \"sql\""
+    echo "    (plus \"postgres\" for Lakebase). After fixing, restart ArcGIS Server (sudo systemctl restart arcgisserver, or stopserver/startserver).";;
+  esac
 fi
 PROBLEMS=0
 
