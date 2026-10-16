@@ -122,6 +122,7 @@ DATABRICKS_POOL_MAX=20
 host          = dod-fe.cloud.databricks.com
 client_id     = <service-principal-client-id>
 client_secret = <service-principal-secret>
+scopes        = sql, postgres
 
 # Personal access token
 [WEST]
@@ -272,7 +273,7 @@ They serve only services published without a workspace name, and only when no `[
 **Service principal setup** (Databricks account console):
 1. Create the SP and assign it to the workspace.
 2. Give it the **Databricks SQL access** entitlement (plus **Workspace access** for Lakebase).
-3. Generate an OAuth secret (`client_id` / `client_secret`). It can be limited to the `sql` scope (`sql`, `postgres` with Lakebase).
+3. Generate an OAuth secret (`client_id` / `client_secret`). It can be limited to the `sql` scope (`sql`, `postgres` with Lakebase). Add `scopes = sql, postgres` to the profile: the provider ignores it, but the Databricks CLI (used by the helper scripts) otherwise asks for `all-apis`, which a limited secret refuses. List the scopes the secret has (`sql` alone for a Lakehouse-only secret).
 4. Grant `CAN USE` on the warehouse, plus Lakebase access if used.
 
 Each profile uses **one** auth mode and gets its own connection pool. For a service principal the provider exchanges `client_id`/`client_secret` at `/oidc/v1/token` for tokens limited to the scope each backend needs (`sql` for the warehouse, `postgres` for the Lakebase APIs), then mints Lakebase tokens, refreshing each about 5 minutes before it expires. Ref: [OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m).

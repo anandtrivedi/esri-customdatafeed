@@ -275,7 +275,8 @@ while out and not out[-1].strip():
     out.pop()
 block = ["", "[%s]" % prof, "host = %s" % g("HOST")]
 if g("AUTH") == "oauth":
-    block += ["client_id = %s" % g("CLIENT_ID"), "client_secret = %s" % g("CLIENT_SECRET")]
+    # scopes: the Databricks CLI asks for all-apis unless told otherwise, which a least-privilege secret refuses
+    block += ["client_id = %s" % g("CLIENT_ID"), "client_secret = %s" % g("CLIENT_SECRET"), "scopes = sql, postgres"]
 else:
     block += ["token = %s" % g("TOKEN")]
 with open(g("OUT"), "w", encoding="utf-8") as f:
@@ -358,11 +359,11 @@ prof = g("PROFILE")
 if not cfg.has_section(prof):
     cfg.add_section(prof)
 sect = cfg[prof]
-for k in ("token", "client_id", "client_secret"):   # clear prior auth so PAT<->OAuth can't mix
+for k in ("token", "client_id", "client_secret", "scopes"):   # clear prior auth so PAT<->OAuth can't mix
     if k in sect: del sect[k]
 sect["host"] = g("HOST")
 if g("AUTH") == "oauth":
-    sect["client_id"] = g("CLIENT_ID"); sect["client_secret"] = g("CLIENT_SECRET")
+    sect["client_id"] = g("CLIENT_ID"); sect["client_secret"] = g("CLIENT_SECRET"); sect["scopes"] = "sql, postgres"
 else:
     sect["token"] = g("TOKEN")
 with open(g("OUT"), "w") as f:
