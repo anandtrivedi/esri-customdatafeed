@@ -84,7 +84,7 @@ const config = {
     // ceiling (fail-open), which would reintroduce the very OOM risk this guards against.
     maxReturnIds: (() => {
       const raw = process.env.DATABRICKS_MAX_RETURN_IDS;
-      if (raw === undefined || raw === '') return 500000;
+      if (raw === undefined || raw.trim() === '') return 500000; // unset or blank: the default (Number(' ') is 0 = disabled)
       const n = Number(raw.trim()); // not parseInt: it read "1e6" as 1 and "30s" as 30, with no warning
       if (!Number.isInteger(n) || n < 0) {
         console.warn(`[CDF] Invalid DATABRICKS_MAX_RETURN_IDS="${raw}"; using default 500000 (a non-negative integer; 0 disables the ceiling).`);
@@ -97,7 +97,7 @@ const config = {
     // unbounded distinct can't pull a whole huge table into the process. Same fail-safe parse; 0 disables.
     maxDistinctRows: (() => {
       const raw = process.env.DATABRICKS_MAX_DISTINCT_ROWS;
-      if (raw === undefined || raw === '') return 1000000;
+      if (raw === undefined || raw.trim() === '') return 1000000; // unset or blank: the default (Number(' ') is 0 = disabled)
       const n = Number(raw.trim()); // not parseInt: it read "1e6" as 1 and "30s" as 30, with no warning
       if (!Number.isInteger(n) || n < 0) {
         console.warn(`[CDF] Invalid DATABRICKS_MAX_DISTINCT_ROWS="${raw}"; using default 1000000 (a non-negative integer; 0 disables the cap).`);

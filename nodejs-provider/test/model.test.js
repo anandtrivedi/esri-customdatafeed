@@ -1675,6 +1675,9 @@ describe("row-cap env parsing", () => {
   });
   it("keeps 0 (disabled) and the defaults when unset", () => {
     expect(load({ DATABRICKS_MAX_RETURN_IDS: "0" }).maxReturnIds).to.equal(0);
+    const blank = load({ DATABRICKS_MAX_RETURN_IDS: "  ", DATABRICKS_MAX_DISTINCT_ROWS: " " }); // not 0 (= disabled)
+    expect(blank.maxReturnIds).to.equal(500000);
+    expect(blank.maxDistinctRows).to.equal(1000000);
     const c = load({});
     expect(c.maxReturnIds).to.equal(500000);
     expect(c.maxDistinctRows).to.equal(1000000);

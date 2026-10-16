@@ -123,7 +123,7 @@ function checkWhereClauseSafety(clause, { backslashEscapes = false } = {}) {
       if (ch !== '`' && /[rR]/.test(prefix)) throw new Error('Raw string literals (r\'...\') are not allowed in WHERE clause');
       if (ch === "'" && /[eE]/.test(prefix)) throw new Error('Escape string literals (E\'...\') are not allowed in WHERE clause');
       quote = ch;
-    } else if (ch === '$' && !/[A-Za-z0-9_$]/.test(clause[i - 1] || '') && /^\$[A-Za-z_]*\$/.test(clause.slice(i))) {
+    } else if (ch === '$' && !/[A-Za-z0-9_$]/.test(clause[i - 1] || '') && /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.test(clause.slice(i))) {
       // Postgres dollar quoting ($$...$$, $tag$...$tag$): a string the scanner would read as code. Right after a name
       // character the $ is part of the identifier (a$b$c), as in Postgres.
       throw new Error('Dollar-quoted strings ($$...$$) are not allowed in WHERE clause');

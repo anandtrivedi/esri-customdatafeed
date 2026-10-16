@@ -147,6 +147,8 @@ describe("sanitize", () => {
       expect(() => checkWhereClauseSafety("a = e'x'")).to.throw(/Escape string literals/);
       expect(() => checkWhereClauseSafety("$$($$ = $$($$ ) OR (1=1 AND b = $$)$$")).to.throw(/Dollar-quoted/);
       expect(() => checkWhereClauseSafety("a = $q$x$q$")).to.throw(/Dollar-quoted/);
+      expect(() => checkWhereClauseSafety("name = $t1$($t1$) OR 1=1")).to.throw(/Dollar-quoted/); // digits in the tag
+      expect(checkWhereClauseSafety("a = $1")).to.equal("a = $1"); // $1 is a parameter, not a quote
       expect(() => checkWhereClauseSafety("a = 'x", lh)).to.throw(/Unterminated/);
       expect(() => checkWhereClauseSafety("a = 'x\\'", lh)).to.throw(/Unterminated/); // Databricks: \' doesn't close it
       expect(() => checkWhereClauseSafety('"col = 1')).to.throw(/Unterminated/);
