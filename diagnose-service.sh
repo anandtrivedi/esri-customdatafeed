@@ -439,8 +439,17 @@ if [ -z "${LOGS// /}" ]; then
   done
 fi
 ACCESS_ERR=""
+# Only the last 15 minutes: an error that was fixed (e.g. the IP was then allowed) must not outlive the fix. Log
+# times are the server's local time, ISO-formatted, so a string comparison works. No GNU date -> no filter.
+_since=$(date -d '15 minutes ago' +%Y-%m-%dT%H:%M 2>/dev/null || true)
+if [ -n "${LOGS// /}" ] && [ -n "$_since" ]; then
+  _recent=$(mktemp)
+  # shellcheck disable=SC2086
+  cat $LOGS 2>/dev/null | awk -v s="$_since" 'match($0, /time="[^"]+"/) { t = substr($0, RSTART + 6, 16) } t >= s' > "$_recent"
+  LOGS="$_recent"
+fi
 if [ -n "${LOGS// /}" ]; then
-  echo "-- Databricks access errors (recent server logs, any service) --"
+  echo "-- Databricks access errors (server logs, last 15 minutes, any service) --"
   # shellcheck disable=SC2086
   if grep -qiE 'without the [a-z, -]*entitlement' $LOGS 2>/dev/null; then
     ACCESS_ERR="entitlement"
@@ -464,6 +473,7 @@ if [ -n "${LOGS// /}" ]; then
   [ -z "$ACCESS_ERR" ] && echo "  (none found)"
   echo
 fi
+[ -n "${_recent:-}" ] && rm -f "$_recent"
 
 # --- ASSESSMENT -----------------------------------------------------------------
 echo "============================================================"
