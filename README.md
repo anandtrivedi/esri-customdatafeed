@@ -569,7 +569,7 @@ Provider init failed silently. Tail the server log for `Custom_data_feeds` lines
 <details>
 <summary><b>Intermittent 404 "works on refresh" / no data / OBJECTID issues / editing / slow queries</b></summary>
 
-- **404 that recovers on refresh:** `minInstancesPerNode=0` keeps no warm instance — set `min=1`, `max≥2` (per service; `setup.sh` option 7 does it in place, or Server Manager > the service > Pooling).
+- **404 that recovers on refresh:** `minInstancesPerNode=0` keeps no warm instance — set `min=1`, `max≥2` (per service; `setup.sh` option 7 does it in place). Server Manager has no Pooling tab for CDF services; by hand, use the Administrator Directory: `https://<server>:6443/arcgis/admin` > services > the service > **edit**, change `minInstancesPerNode`/`maxInstancesPerNode`, add `"minScale": ""` to `serviceParameters` if the save says it's missing, **Save Edits**, then **start** the service (the edit leaves it stopped).
 - **Updated `.databrickscfg` but change ignored:** the provider caches it at first read — **restart ArcGIS Server** after any edit.
 - **No data:** verify the fully-qualified table name + geometry column; test the warehouse independently.
 - **OBJECTID:** `idField` must be a unique integer ≤ 2,147,483,647 (see [Known Limitations](#known-limitations) for larger ids). `diagnose-service.sh` checks the range for any service.
