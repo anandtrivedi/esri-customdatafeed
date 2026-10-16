@@ -573,11 +573,32 @@ if [ "$_pkg_env" != "yes" ]; then
   if [ -r "$SCRIPT_DIR/.env" ]; then _def_env="$SCRIPT_DIR/.env"
   elif [ "$ACTION" = "update" ] && [ -r "$PROVIDER_DIR/.env" ]; then _def_env="$PROVIDER_DIR/.env"; fi
 fi
+_live_env=""; [ "$ACTION" = "update" ] && [ -r "$PROVIDER_DIR/.env" ] && _live_env="$PROVIDER_DIR/.env"
 echo "-- Credentials in the package (.env) --"
-[ "$_pkg_env" = "yes" ] && echo "  The package already contains a .env (Enter keeps it; a path replaces it)."
-[ "$_def_env" = "$PROVIDER_DIR/.env" ] && echo "  [!] The live provider has a .env and this package doesn't — without one, the update removes it."
+echo "  A .env holds [NAME] workspace profiles inside the provider. Looked for one in:"
+for _p in "$SCRIPT_DIR/.env" "$PROVIDER_DIR/.env"; do
+  if [ -r "$_p" ]; then echo "    found     $_p"; else echo "    not found $_p"; fi
+done
+if [ "$_pkg_env" = "yes" ]; then
+  echo "  The package already contains a .env: Enter keeps it, a path replaces it."
+elif [ -n "$_def_env" ]; then
+  [ "$_def_env" = "$SCRIPT_DIR/.env" ] && echo "  Enter puts $_def_env (from configure-databricks.sh) in the package."
+  [ "$_def_env" = "$_live_env" ] && echo "  Enter copies the provider's current .env into the new package, so it keeps working."
+  [ -n "$_live_env" ] && [ "$_def_env" != "$_live_env" ] && echo "  (The provider's current .env is replaced by it; type $_live_env to keep that one instead.)"
+else
+  echo "  None found, so Enter uploads no .env: credentials then come from a .databrickscfg"
+  echo "  (DATABRICKS_CONFIG_FILE in init_user_param.sh, or ~arcgis/.databrickscfg) or env vars."
+  echo "  If your profiles are in a .env somewhere else, type its full path."
+fi
 ask "Path to a .env to put inside the package ('none' for no .env)" "$_def_env" ENV_SRC
-case "$ENV_SRC" in none|NONE|-) ENV_SRC="";; esac
+case "$ENV_SRC" in none|NONE|-) ENV_SRC=""
+  if [ -n "$_live_env" ] && [ "$_pkg_env" != "yes" ]; then
+    echo "  [!] The update replaces the provider folder, so $_live_env is DELETED and services"
+    echo "      that use its [NAME] profiles stop working (it stays in the pre-update backup)."
+    ask "Upload with no .env anyway? (y/N)" "N" _noenv_ok
+    case "$_noenv_ok" in y|Y|yes|YES) ;; *) echo "  Keeping it: using $_live_env."; ENV_SRC="$_live_env";; esac
+  fi;;
+esac
 if [ -n "$ENV_SRC" ]; then
   { [ -f "$ENV_SRC" ] && [ -r "$ENV_SRC" ]; } || { echo "!! '$ENV_SRC' is not a readable file."; exit 1; }
   grep -qE '^[[:space:]]*(\[[^]]+\]|(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*=)' "$ENV_SRC" \
