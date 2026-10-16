@@ -124,19 +124,55 @@ describe('connectionPool', () => {
       expect(tokenRequests).to.deep.equal([{ clientId: 'sp-bbb', scope: 'sql' }]);
     });
 
-    it('adds the entitlement/scope hint to a 403 connection failure', async () => {
-      const failing = proxyquire('../src/modules/connectionPool', {
+    // A driver that always fails with the bare Thrift 403, and an https whose GET answers from `rest` (null = unreachable).
+    function forbiddenPool(rest, auth = { authType: 'pat', token: 'pat-x' }) {
+      const calls = [];
+      const fakeHttps = { get(opts, onRes) {
+        const { EventEmitter } = require('events');
+        const req = new EventEmitter();
+        req.setTimeout = () => req; req.destroy = () => {};
+        calls.push(opts);
+        setImmediate(() => {
+          if (!rest) return req.emit('error', new Error('ECONNREFUSED'));
+          const res = new EventEmitter(); res.statusCode = rest.status;
+          onRes(res); res.emit('data', JSON.stringify(rest.body)); res.emit('end');
+        });
+        return req;
+      } };
+      const cp = proxyquire('../src/modules/connectionPool', {
+        https: fakeHttps,
         '@databricks/sql': { DBSQLClient: class {
           async connect() {}
           async openSession() { throw new Error('Received a response with a bad HTTP status code: 403'); }
           async close() {}
         } },
-        './oauthToken': { getOAuthToken: async () => 't' },
+        './oauthToken': { getOAuthToken: async (ws, scope) => `tok-${scope}` },
       });
-      const pool = failing.getPool({ workspaceAlias: 'C', hostname: 'c.example.com', authType: 'pat', token: 'x' }, '/p', { min: 0 });
+      const pool = cp.getPool({ workspaceAlias: 'C', hostname: 'c.example.com', ...auth }, '/sql/1.0/warehouses/wh1', { min: 0 });
+      return { cp, pool, calls };
+    }
+
+    it("explains a 403 with Databricks' own REST message (IP access list)", async () => {
+      const { cp, pool, calls } = forbiddenPool({ status: 403, body: { error_code: 403,
+        message: 'Source IP address: 1.2.3.4 is blocked by Databricks IP ACL for workspace: 7 [ReqId: abc]' } },
+      { authType: 'oauth-m2m', clientId: 'sp', clientSecret: 's' });
       const err = await pool.acquire().then(() => null, (e) => e);
-      expect(err.message).to.include('bad HTTP status code: 403').and.include('Databricks SQL access').and.include('"sql" scope');
-      await failing.shutdownPool();
+      expect(err.message).to.include('bad HTTP status code: 403').and.include('blocked by Databricks IP ACL for workspace: 7');
+      expect(err.message).to.not.include('ReqId').and.not.include('entitlement');
+      expect(calls[0].path).to.equal('/api/2.0/sql/warehouses/wh1');
+      expect(calls[0].headers.Authorization).to.equal('Bearer tok-sql');
+      await cp.shutdownPool();
+    });
+
+    it('falls back to the generic hint when REST gives no reason, and asks REST once per minute', async () => {
+      const { cp, pool, calls } = forbiddenPool(null);
+      for (let i = 0; i < 2; i++) {
+        const err = await pool.acquire().then(() => null, (e) => e);
+        expect(err.message).to.include('IP access list').and.include('Databricks SQL access').and.include('"sql" scope');
+      }
+      expect(calls).to.have.lengthOf(1);
+      expect(calls[0].headers.Authorization).to.equal('Bearer pat-x');
+      await cp.shutdownPool();
     });
 
     it('does not call client.connect at all when min: 0', async () => {

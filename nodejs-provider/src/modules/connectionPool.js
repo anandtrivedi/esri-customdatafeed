@@ -14,15 +14,41 @@
  *                 (oauthToken.js mints a sql-scoped token and refreshes it)
  */
 
+const https = require('https');
 const { DBSQLClient } = require('@databricks/sql');
 const { userAgentTag } = require('./version');
 const { getOAuthToken } = require('./oauthToken');
 
-// The driver reports a refused connection only as "bad HTTP status code: 403". Seen live: the identity lacked the
-// Databricks SQL access entitlement (every scope fails the same way), or a PAT was created without the sql scope.
+// The driver reports a refused connection only as "bad HTTP status code: 403". Seen live: the workspace's IP access
+// list blocked the server, the identity lacked the Databricks SQL access entitlement (every scope fails the same way),
+// or a PAT was created without the sql scope. The REST API names the cause, so explainForbidden() asks it once.
 const FORBIDDEN_HINT =
-  ' (Databricks refused the connection: the user or service principal needs the "Databricks SQL access" entitlement ' +
-  'and CAN USE on the warehouse; a scoped token needs the "sql" scope)';
+  ' (Databricks refused the connection: check the workspace IP access list allows this server, that the user or ' +
+  'service principal has the "Databricks SQL access" entitlement and CAN USE on the warehouse, and that a scoped ' +
+  'token has the "sql" scope)';
+const EXPLAIN_TTL_MS = 60000;
+const EXPLAIN_TIMEOUT_MS = 5000;
+
+// GET the warehouse with the same token; Databricks' error message (e.g. "Source IP address: ... is blocked by
+// Databricks IP ACL") replaces the generic hint. Never throws.
+function restReason(hostname, httpPath, token) {
+  const id = String(httpPath).split('/').filter(Boolean).pop();
+  return new Promise((resolve) => {
+    const req = https.get({ hostname, path: `/api/2.0/sql/warehouses/${encodeURIComponent(id)}`,
+      headers: { Authorization: `Bearer ${token}` } }, (res) => {
+      let body = '';
+      res.on('data', (c) => { if (body.length < 4096) body += c; });
+      res.on('end', () => {
+        if (res.statusCode < 400) return resolve(null);
+        let msg = null;
+        try { msg = JSON.parse(body).message; } catch (e) { /* not JSON */ }
+        resolve(msg ? String(msg).replace(/\s*\[ReqId:[^\]]*\]\s*$/, '') : null);
+      });
+    });
+    req.setTimeout(EXPLAIN_TIMEOUT_MS, () => req.destroy());
+    req.on('error', () => resolve(null));
+  });
+}
 
 function statementTimeoutSeconds() {
   const ms = parseInt(process.env.DATABRICKS_QUERY_TIMEOUT) || 120000;
@@ -43,10 +69,24 @@ class DatabricksConnectionPool {
     this.creating = 0; // connections being opened (connect + openSession awaited) that aren't in this.pool yet
     this.waitQueue = [];
     this.shuttingDown = false;
+    this.forbiddenExplained = null; // { at, text } — one REST lookup per minute while connections keep failing
 
     console.log(`[Pool ${this.poolLabel()}] Initialized (min: ${this.minConnections}, max: ${this.maxConnections})`);
 
     this.warmUp();
+  }
+
+  async explainForbidden() {
+    if (this.forbiddenExplained && Date.now() - this.forbiddenExplained.at < EXPLAIN_TTL_MS) return this.forbiddenExplained.text;
+    let text = FORBIDDEN_HINT;
+    try {
+      const ws = this.workspaceConfig;
+      const token = ws.authType === 'oauth-m2m' ? await getOAuthToken(ws, 'sql') : ws.token;
+      const reason = token && await restReason(ws.hostname, this.httpPath, token);
+      if (reason) text = ` (Databricks: ${reason})`;
+    } catch (e) { /* keep the generic hint */ }
+    this.forbiddenExplained = { at: Date.now(), text };
+    return text;
   }
 
   poolLabel() {
@@ -116,8 +156,8 @@ class DatabricksConnectionPool {
       console.log(`[Pool ${this.poolLabel()}] Connection ${connection.id} created (pool size: ${this.pool.length})`);
       return connection;
     } catch (error) {
-      if (/bad HTTP status code: 403\b/.test(error.message || '') && !error.message.includes(FORBIDDEN_HINT)) {
-        error.message += FORBIDDEN_HINT;
+      if (/bad HTTP status code: 403\b/.test(error.message || '') && !/ \(Databricks[ :]/.test(error.message)) {
+        error.message += await this.explainForbidden();
       }
       console.error(`[Pool ${this.poolLabel()}] Failed to create connection:`, error.message);
       // connect() may have already succeeded before openSession() threw (e.g. a bad STATEMENT_TIMEOUT or a transient
