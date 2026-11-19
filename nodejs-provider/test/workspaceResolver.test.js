@@ -4,6 +4,7 @@ const { expect } = require('chai');
 
 const TMP_DIR = path.join(__dirname, '_tmp_workspace_resolver');
 const TMP_CFG = path.join(TMP_DIR, '.databrickscfg');
+const TMP_ENV = path.join(TMP_DIR, '.env'); // stands in for the provider's packaged .env
 
 describe('workspaceResolver', () => {
   let resolver;
@@ -21,7 +22,9 @@ describe('workspaceResolver', () => {
 
   after(() => {
     if (fs.existsSync(TMP_CFG)) fs.unlinkSync(TMP_CFG);
+    if (fs.existsSync(TMP_ENV)) fs.unlinkSync(TMP_ENV);
     if (fs.existsSync(TMP_DIR)) fs.rmdirSync(TMP_DIR);
+    resolver._internal.setProviderEnvFile(path.join(__dirname, '..', '.env')); // back to the real location
 
     if (originalConfigEnv === undefined) delete process.env.DATABRICKS_CONFIG_FILE;
     else process.env.DATABRICKS_CONFIG_FILE = originalConfigEnv;
@@ -34,6 +37,8 @@ describe('workspaceResolver', () => {
   beforeEach(() => {
     process.env.DATABRICKS_CONFIG_FILE = TMP_CFG;
     if (fs.existsSync(TMP_CFG)) fs.unlinkSync(TMP_CFG);
+    if (fs.existsSync(TMP_ENV)) fs.unlinkSync(TMP_ENV);
+    resolver._internal.setProviderEnvFile(TMP_ENV); // never the developer's real nodejs-provider/.env
     delete process.env.DATABRICKS_SERVER_HOSTNAME;
     delete process.env.DATABRICKS_ACCESS_TOKEN;
     delete process.env.DATABRICKS_HOST;
@@ -92,6 +97,12 @@ host = orphan.example.com
 host = a.example.com
 `);
       expect(result).to.deep.equal({ A: { host: 'a.example.com' } });
+    });
+
+    it('keeps a [__proto__] section from leaking keys into other profiles', () => {
+      const result = resolver._internal.parseIni('[__proto__]\nhost = attacker.example.com\n[PROD]\ntoken = dapi\n');
+      expect(result.PROD.host).to.equal(undefined);
+      expect({}.host).to.equal(undefined); // Object.prototype untouched
     });
 
     it('preserves = in values (e.g. base64 secrets)', () => {
@@ -285,6 +296,165 @@ client_secret = ss
 host = a.example.com
 `);
       expect(() => resolver.resolveWorkspace('A')).to.throw(/no credentials/);
+    });
+  });
+
+  describe("resolveWorkspace — [PROFILE] sections in the provider's .env (no .databrickscfg needed)", () => {
+    const ENV_TEXT = [
+      'DATABRICKS_POOL_MAX=10            # plain env vars above the first section',
+      'LAKEBASE_PASSWORD=not-a-profile',
+      '',
+      '[DOD_FE]',
+      'host          = https://dod-fe.example.com/',
+      'client_id     = id-d',
+      'client_secret = secret-d',
+      '',
+      '[WEST]',
+      'host  = west.example.com',
+      'token = dapi-w',
+      '',
+    ].join('\n');
+    const writeEnv = (text) => { fs.writeFileSync(TMP_ENV, text); resolver.clearProfileCache(); };
+
+    it('resolves several workspaces from .env sections', () => {
+      writeEnv(ENV_TEXT);
+      expect(resolver.resolveWorkspace('DOD_FE')).to.deep.equal({
+        workspaceAlias: 'DOD_FE', hostname: 'dod-fe.example.com', authType: 'oauth-m2m', clientId: 'id-d', clientSecret: 'secret-d',
+      });
+      expect(resolver.resolveWorkspace('WEST')).to.deep.equal({
+        workspaceAlias: 'WEST', hostname: 'west.example.com', authType: 'pat', token: 'dapi-w',
+      });
+    });
+
+    it('does not treat the plain env lines above the first section as a profile, and vice versa', () => {
+      writeEnv(ENV_TEXT);
+      expect(() => resolver.resolveWorkspace('LAKEBASE_PASSWORD')).to.throw(/not found/);
+      const envPart = resolver.envVarsPart(ENV_TEXT);
+      expect(envPart).to.include('LAKEBASE_PASSWORD=not-a-profile');
+      expect(envPart).to.not.include('dapi-w');      // section keys never become process env vars
+      expect(envPart).to.not.include('secret-d');
+      expect(resolver.envVarsPart('A=1\nB=2\n')).to.equal('A=1\nB=2\n'); // a .env without sections is unchanged
+    });
+
+    it('lets a .databrickscfg profile with the same name win over the .env section', () => {
+      writeEnv(ENV_TEXT);
+      writeConfig('[WEST]\nhost = file.example.com\ntoken = dapi-file\n');
+      expect(resolver.resolveWorkspace('WEST')).to.include({ hostname: 'file.example.com', token: 'dapi-file' });
+      expect(resolver.resolveWorkspace('DOD_FE')).to.include({ hostname: 'dod-fe.example.com' }); // others still from .env
+    });
+
+    it('uses a [DEFAULT] section in the .env for services with no workspace', () => {
+      writeEnv('[DEFAULT]\nhost = default.example.com\ntoken = dapi-default\n');
+      process.env.DATABRICKS_SERVER_HOSTNAME = 'env.example.com';
+      process.env.DATABRICKS_ACCESS_TOKEN = 'dapi-env';
+      expect(resolver.resolveWorkspace()).to.include({ hostname: 'default.example.com', token: 'dapi-default' });
+    });
+
+    it('names the .env in errors about a broken section, without values', () => {
+      writeEnv('[WEST]\nclient_id = id-only-value\nhost = west.example.com\n');
+      let err;
+      try { resolver.resolveWorkspace('WEST'); } catch (e) { err = e; }
+      expect(err.message).to.match(/incomplete: OAuth M2M requires both/);
+      expect(err.message).to.include(TMP_ENV); // which file to fix
+      expect(err.message).to.not.include('id-only-value');
+      expect(err.code).to.equal(400);
+      writeEnv('[WEST]\ntoken = dapi-w\n');
+      expect(() => resolver.resolveWorkspace('WEST')).to.throw(new RegExp(`missing required "host"`));
+      try { resolver.resolveWorkspace('WEST'); } catch (e) { expect(e.message).to.include(TMP_ENV); }
+    });
+
+    it('parses the README example verbatim (comments after a section header)', () => {
+      const readme = fs.readFileSync(path.join(__dirname, '..', '..', 'README.md'), 'utf8');
+      const block = readme.split('Full <code>.env</code> example')[1].split('```ini')[1].split('```')[0];
+      writeEnv(block);
+      expect(resolver.resolveWorkspace('DOD_FE')).to.include({ authType: 'oauth-m2m' });
+      expect(resolver.resolveWorkspace('WEST')).to.include({ authType: 'pat' });
+      expect(resolver.resolveWorkspace()).to.include({ authType: 'pat' }); // [DEFAULT]
+    });
+
+    it('keeps section secrets out of the env vars for BOM, CRLF and commented-header files (real dotenv)', () => {
+      const dotenv = require('dotenv');
+      const files = [
+        '\uFEFF[WEST]\r\nhost = west.example.com\r\ntoken = dapi-SECRET\r\n',     // Notepad: BOM + CRLF, no settings
+        'POOL=3\r\n[WEST]   # comment\r\nhost = w\r\ntoken = dapi-SECRET\r\n',
+      ];
+      for (const text of files) {
+        const vars = dotenv.parse(resolver.envVarsPart(text));
+        expect(Object.values(vars).join(' '), JSON.stringify(text)).to.not.include('dapi-SECRET');
+        expect(vars).to.not.have.any.keys('host', 'token');
+        writeEnv(text);
+        expect(resolver.resolveWorkspace('WEST')).to.include({ authType: 'pat', token: 'dapi-SECRET' });
+      }
+      expect(dotenv.parse(resolver.envVarsPart(files[1]))).to.deep.equal({ POOL: '3' });
+    });
+
+    it('rejects a mistyped header instead of leaking or merging its keys', () => {
+      const text = '[DOD_FE]\nhost = d.example.com\ntoken = dapi-d\n\n[WEST] - prod\nhost = w.example.com\ntoken = dapi-SECRET\n';
+      // Above the mistyped header: no settings, so nothing (and certainly no token) reaches the env vars.
+      expect(require('dotenv').parse(resolver.envVarsPart('POOL=3\n[WEST] - prod\ntoken = dapi-SECRET\n'))).to.deep.equal({ POOL: '3' });
+      writeEnv(text);
+      let err;
+      try { resolver.resolveWorkspace('DOD_FE'); } catch (e) { err = e; } // DOD_FE must not silently get WEST's token
+      expect(err && err.message).to.match(/Malformed section header on line 5 of .*\.env/);
+      expect(err.code).to.equal(400);
+    });
+
+    it('rejects a header missing its opening bracket instead of merging or leaking (WEST] - prod)', () => {
+      writeEnv('[EAST]\nhost = e.example.com\ntoken = dapi-east\n\nWEST] - prod\nhost = w.example.com\ntoken = dapi-SECRET\n');
+      expect(() => resolver.resolveWorkspace('EAST')).to.throw(/Unrecognized line 5 of .*\.env/); // not silently WEST's token
+      const pre = 'POOL=3\nWEST] - prod\nhost = w.example.com\ntoken = dapi-SECRET\n\n[DOD_FE]\nhost = d\ntoken = t\n';
+      expect(require('dotenv').parse(resolver.envVarsPart(pre))).to.deep.equal({ POOL: '3' }); // stops at the stray line
+      writeEnv(pre); // ...and the same line is reported, so the settings after it aren't dropped silently
+      expect(() => resolver.resolveWorkspace('DOD_FE')).to.throw(/Unrecognized line 2 of .*\.env/);
+    });
+
+    it('strips quotes around section values (token = "dapi…" as people write in a .env)', () => {
+      writeEnv('[WEST]\nhost = "west.example.com"\ntoken = \'dapi-q\'\n');
+      expect(resolver.resolveWorkspace('WEST')).to.include({ hostname: 'west.example.com', token: 'dapi-q' });
+    });
+
+    it('fails only the profile with the bad line, not every workspace on the box', () => {
+      writeConfig('[GOOD]\nhost = g.example.com\ntoken = dapi-g\n\n[BAD]\nhost = b.example.com\nthis is not a setting\ntoken = dapi-b\n');
+      writeEnv('[WEST]\nhost = w.example.com\ntoken = dapi-w\n');
+      expect(resolver.resolveWorkspace('GOOD')).to.include({ hostname: 'g.example.com', token: 'dapi-g' });
+      expect(resolver.resolveWorkspace('WEST')).to.include({ token: 'dapi-w' });
+      let err; try { resolver.resolveWorkspace('BAD'); } catch (e) { err = e; }
+      expect(err && err.message).to.match(/Unrecognized line 7 of /);
+      expect(err.code).to.equal(400);
+      expect(err.message).to.not.include('dapi-b');
+    });
+
+    it('a mistyped header fails the profile it would merge into, and only that one', () => {
+      writeEnv('[A]\nhost = a.example.com\ntoken = dapi-a\n\n[B] - prod\ntoken = dapi-SECRET\n\n[C]\nhost = c.example.com\ntoken = dapi-c\n');
+      expect(() => resolver.resolveWorkspace('A')).to.throw(/Malformed section header on line 5/); // not silently B's token
+      expect(resolver.resolveWorkspace('C')).to.include({ token: 'dapi-c' });
+    });
+
+    it('a stray line above the first section fails that file\'s profiles only (its env-var part ends there)', () => {
+      writeEnv('POOL=3\nKEY: value\n\n[ENVP]\nhost = e.example.com\ntoken = dapi-e\n');
+      writeConfig('[CFGP]\nhost = c.example.com\ntoken = dapi-c\n');
+      expect(() => resolver.resolveWorkspace('ENVP')).to.throw(/Unrecognized line 2 of .*\.env/);
+      expect(resolver.resolveWorkspace('CFGP')).to.include({ token: 'dapi-c' });
+    });
+
+    it('reads an indented continuation line (configparser style) as part of the value', () => {
+      writeConfig('[SP]\nhost = s.example.com\nclient_id = id-s\nclient_secret = sec-s\nscopes = sql,\n    postgres\n');
+      expect(resolver.resolveWorkspace('SP')).to.include({ authType: 'oauth-m2m', clientId: 'id-s' });
+      expect(resolver._internal.parseIni('[X]\nscopes = sql,\n  postgres\n').X.scopes).to.equal('sql,\npostgres');
+    });
+
+    it('still reads indented key = value lines as separate keys', () => {
+      expect(resolver._internal.parseIni('[X]\n  host = h.example.com\n  token = dapi-x\n').X).to.deep.equal({ host: 'h.example.com', token: 'dapi-x' });
+    });
+
+    it("lists profiles from both the .env and .databrickscfg when a workspace is found nowhere", () => {
+      writeEnv(ENV_TEXT);
+      writeConfig('[FILE_ONE]\nhost = f.example.com\ntoken = t\n');
+      let msg = '';
+      try { resolver.resolveWorkspace('EAST'); } catch (e) { msg = e.message; }
+      expect(msg).to.match(/not found .* or in the provider's \.env/);
+      for (const name of ['DOD_FE', 'WEST', 'FILE_ONE']) expect(msg).to.include(name);
+      expect(msg).to.not.include('dapi-w');
     });
   });
 

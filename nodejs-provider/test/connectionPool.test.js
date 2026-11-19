@@ -5,6 +5,7 @@ describe('connectionPool', () => {
   let connectionPool;
   let connectCallLog;
   let sessionLog;
+  let tokenRequests;
 
   beforeEach(() => {
     // New array each test. Capture it locally so old test pools (from a
@@ -26,8 +27,10 @@ describe('connectionPool', () => {
       async close() {}
     };
 
+    tokenRequests = [];
     connectionPool = proxyquire('../src/modules/connectionPool', {
       '@databricks/sql': { DBSQLClient: DBSQLClientStub },
+      './oauthToken': { getOAuthToken: async (ws, scope) => { tokenRequests.push({ clientId: ws.clientId, scope }); return `tok-${scope}`; } },
     });
   });
 
@@ -96,7 +99,7 @@ describe('connectionPool', () => {
       expect(connectCallLog[0].oauthClientId).to.be.undefined;
     });
 
-    it('passes OAuth M2M creds with authType: databricks-oauth', async () => {
+    it('OAuth M2M: authenticates with our own sql-scoped token, not the driver M2M flow (which asks all-apis)', async () => {
       connectionPool.getPool(
         {
           workspaceAlias: 'B',
@@ -112,14 +115,72 @@ describe('connectionPool', () => {
       await new Promise((r) => setImmediate(r));
 
       expect(connectCallLog).to.have.lengthOf(1);
-      expect(connectCallLog[0]).to.include({
-        host: 'b.example.com',
-        path: '/sql/1.0/warehouses/xyz',
-        authType: 'databricks-oauth',
-        oauthClientId: 'sp-bbb',
-        oauthClientSecret: 'secret-bbb',
+      const opts = connectCallLog[0];
+      expect(opts).to.include({ host: 'b.example.com', path: '/sql/1.0/warehouses/xyz', authType: 'custom' });
+      expect(opts.oauthClientId).to.be.undefined;
+      expect(opts.oauthClientSecret).to.be.undefined;
+      expect(opts.token).to.be.undefined;
+      expect(await opts.provider.authenticate()).to.deep.equal({ Authorization: 'Bearer tok-sql' });
+      expect(tokenRequests).to.deep.equal([{ clientId: 'sp-bbb', scope: 'sql' }]);
+    });
+
+    // A driver that always fails with the bare Thrift 403, and an https whose GET answers from `rest` (null = unreachable).
+    function forbiddenPool(rest, auth = { authType: 'pat', token: 'pat-x' }) {
+      const calls = [];
+      const fakeHttps = { get(opts, onRes) {
+        const { EventEmitter } = require('events');
+        const req = new EventEmitter();
+        req.setTimeout = () => req; req.destroy = () => {};
+        calls.push(opts);
+        setImmediate(() => {
+          if (!rest) return req.emit('error', new Error('ECONNREFUSED'));
+          const res = new EventEmitter(); res.statusCode = rest.status;
+          onRes(res); res.emit('data', JSON.stringify(rest.body)); res.emit('end');
+        });
+        return req;
+      } };
+      const cp = proxyquire('../src/modules/connectionPool', {
+        https: fakeHttps,
+        '@databricks/sql': { DBSQLClient: class {
+          async connect() {}
+          async openSession() { throw new Error('Received a response with a bad HTTP status code: 403'); }
+          async close() {}
+        } },
+        './oauthToken': { getOAuthToken: async (ws, scope) => `tok-${scope}` },
       });
-      expect(connectCallLog[0].token).to.be.undefined;
+      const pool = cp.getPool({ workspaceAlias: 'C', hostname: 'c.example.com', ...auth }, '/sql/1.0/warehouses/wh1', { min: 0 });
+      return { cp, pool, calls };
+    }
+
+    it("explains a 403 with Databricks' own REST message (IP access list)", async () => {
+      const { cp, pool, calls } = forbiddenPool({ status: 403, body: { error_code: 403,
+        message: 'Source IP address: 1.2.3.4 is blocked by Databricks IP ACL for workspace: 7 [ReqId: abc]' } },
+      { authType: 'oauth-m2m', clientId: 'sp', clientSecret: 's' });
+      const err = await pool.acquire().then(() => null, (e) => e);
+      expect(err.message).to.include('bad HTTP status code: 403').and.include('blocked by Databricks IP ACL for workspace: 7');
+      expect(err.message).to.not.include('ReqId').and.not.include('entitlement');
+      expect(calls[0].path).to.equal('/api/2.0/sql/warehouses/wh1');
+      expect(calls[0].headers.Authorization).to.equal('Bearer tok-sql');
+      await cp.shutdownPool();
+    });
+
+    it('falls back to the generic hint when REST gives no reason, and asks REST once per minute', async () => {
+      const { cp, pool, calls } = forbiddenPool(null);
+      for (let i = 0; i < 2; i++) {
+        const err = await pool.acquire().then(() => null, (e) => e);
+        expect(err.message).to.include('IP access list').and.include('Databricks SQL access').and.include('"sql" scope');
+      }
+      expect(calls).to.have.lengthOf(1);
+      expect(calls[0].headers.Authorization).to.equal('Bearer pat-x');
+      await cp.shutdownPool();
+    });
+
+    it('a burst of concurrent 403s shares one REST lookup', async () => {
+      const { cp, pool, calls } = forbiddenPool({ status: 403, body: { message: 'Source IP address: 1.2.3.4 is blocked by Databricks IP ACL' } });
+      const errs = await Promise.all(Array.from({ length: 8 }, () => pool.acquire().then(() => null, (e) => e)));
+      expect(calls).to.have.lengthOf(1); // was 8
+      for (const e of errs) expect(e.message).to.include('blocked by Databricks IP ACL');
+      await cp.shutdownPool();
     });
 
     it('does not call client.connect at all when min: 0', async () => {
@@ -219,6 +280,43 @@ describe('connectionPool', () => {
       await new Promise((r) => setTimeout(r, 50)); // warm-up settles
       expect(opened).to.equal(4); // was 6: 2 uncounted warm-up opens + 4 for the acquires
       for (const g of got) if (g.status === 'fulfilled') pool.release(g.value);
+      await cp.shutdownPool();
+    });
+  });
+
+  describe('warm-up connections serve requests that queued meanwhile', () => {
+    it('with min == max, acquires that arrive during warm-up get the warm-up connections instead of timing out', async () => {
+      let opened = 0;
+      const SlowClient = class {
+        async connect() { await new Promise((r) => setTimeout(r, 30)); }
+        async openSession() { opened++; return { close: async () => {} }; }
+        async close() {}
+      };
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: SlowClient } });
+      const ws = { workspaceAlias: 'M', hostname: 'm.example.com', authType: 'pat', token: 'x' };
+      const pool = cp.getPool(ws, '/sql/1.0/warehouses/m', { min: 3, max: 3, connectionTimeout: 400 });
+      const t0 = Date.now();
+      const got = await Promise.allSettled(Array.from({ length: 5 }, () => pool.acquire()));
+      const ok = got.filter((g) => g.status === 'fulfilled').map((g) => g.value);
+      expect(opened).to.equal(3);
+      expect(ok).to.have.lengthOf(3); // was 0: all five timed out with 3 idle connections in the pool
+      expect(new Set(ok.map((c) => c.id)).size).to.equal(3); // each connection handed out once
+      expect(ok.every((c) => c.inUse)).to.equal(true);
+      expect(pool.activeConnections).to.equal(3);
+      expect(got.filter((g) => g.status === 'rejected').map((g) => g.reason.message)).to.deep.equal(['Connection acquisition timeout', 'Connection acquisition timeout']);
+      expect(Date.now() - t0).to.be.below(1000);
+      for (const c of ok) pool.release(c);
+      expect(pool.activeConnections).to.equal(0);
+      await cp.shutdownPool();
+    });
+
+    it('a warm-up connection with no one waiting stays idle in the pool', async () => {
+      const cp = proxyquire('../src/modules/connectionPool', { '@databricks/sql': { DBSQLClient: class {
+        async connect() {} async openSession() { return { close: async () => {} }; } async close() {} } } });
+      const pool = cp.getPool({ workspaceAlias: 'I', hostname: 'i.example.com', authType: 'pat', token: 'x' }, '/p', { min: 2, max: 4 });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(pool.pool.map((c) => c.inUse)).to.deep.equal([false, false]);
+      expect(pool.activeConnections).to.equal(0);
       await cp.shutdownPool();
     });
   });

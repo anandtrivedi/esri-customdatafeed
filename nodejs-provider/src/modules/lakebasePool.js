@@ -11,7 +11,8 @@
  * authenticated using the resolved workspace profile:
  *   - PAT profiles:        Authorization: Bearer <pat>
  *   - OAuth M2M profiles:  exchange client_id+client_secret at /oidc/v1/token
- *                          for a workspace API token, then use as Bearer.
+ *                          for a workspace API token limited to the postgres scope
+ *                          (oauthToken.js), then use as Bearer.
  *
  * Falls back to LAKEBASE_PASSWORD env var if set explicitly (skips token
  * generation entirely; useful for static test creds).
@@ -20,6 +21,7 @@
 const { Pool } = require('pg');
 const https = require('https');
 const { applicationName } = require('./version');
+const { getOAuthToken } = require('./oauthToken');
 
 // Map of serviceKey -> { pool, tokenExpiry, workspaceConfig }
 const pools = {};
@@ -37,8 +39,6 @@ const API_TIMEOUT_MS = parseInt(process.env.LAKEBASE_API_TIMEOUT_MS) || 30000;
 const instanceNameCache = {};
 
 // Cache of workspaceAlias -> { token, expiry } for OAuth M2M workspace API tokens
-const workspaceApiTokenCache = {};
-
 // Token buffer: refresh 5 minutes before expiry
 const TOKEN_BUFFER_MS = 5 * 60 * 1000;
 
@@ -65,84 +65,15 @@ function instanceCacheKey(workspaceAlias, host) {
 }
 
 /**
- * Mint an OAuth M2M workspace API token via /oidc/v1/token.
- * Uses the Client Credentials grant. Tokens cached per workspaceAlias.
- */
-function mintWorkspaceApiToken(workspaceConfig) {
-  return new Promise((resolve, reject) => {
-    const credentials = Buffer.from(
-      `${workspaceConfig.clientId}:${workspaceConfig.clientSecret}`
-    ).toString('base64');
-
-    const body = 'grant_type=client_credentials&scope=all-apis';
-
-    const options = {
-      hostname: workspaceConfig.hostname,
-      port: 443,
-      path: '/oidc/v1/token',
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${credentials}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body),
-      },
-      rejectUnauthorized: apiTlsVerify(),
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try {
-            const parsed = JSON.parse(data);
-            if (!parsed.access_token) {
-              reject(new Error(`OAuth M2M response missing access_token: ${data.substring(0, 200)}`));
-              return;
-            }
-            const expiresInMs = (parsed.expires_in || 3600) * 1000;
-            resolve({ token: parsed.access_token, expiry: Date.now() + expiresInMs });
-          } catch (e) {
-            reject(new Error(`Failed to parse OAuth M2M response: ${e.message}`));
-          }
-        } else {
-          reject(new Error(`OAuth M2M token endpoint returned ${res.statusCode}: ${data.substring(0, 300)}`));
-        }
-      });
-    });
-
-    // A blackholed workspace API must fail, not hang: the pool's single-flight creation awaits this call.
-    req.setTimeout(API_TIMEOUT_MS, () => req.destroy(new Error(`timed out after ${API_TIMEOUT_MS} ms`)));
-    req.on('error', (err) => {
-      reject(new Error(`OAuth M2M token request failed: ${err.message}`));
-    });
-
-    req.write(body);
-    req.end();
-  });
-}
-
-/**
  * Get a workspace API bearer token for the given workspace profile.
- * For PAT profiles, returns the static token. For OAuth M2M profiles,
- * mints (and caches) a short-lived workspace token.
+ * For PAT profiles, returns the static token. For OAuth M2M profiles, a short-lived token limited to the postgres
+ * scope (which covers /api/2.0/database/* and /api/2.0/postgres/*), minted and cached by oauthToken.js.
  */
 async function getWorkspaceApiToken(workspaceConfig) {
   if (workspaceConfig.authType === 'pat') {
     return workspaceConfig.token;
   }
-
-  const alias = workspaceConfig.workspaceAlias;
-  const cached = workspaceApiTokenCache[alias];
-  if (cached && Date.now() < (cached.expiry - TOKEN_BUFFER_MS)) {
-    return cached.token;
-  }
-
-  console.log(`[LakebasePool] Minting OAuth M2M workspace token for "${alias}"...`);
-  const fresh = await mintWorkspaceApiToken(workspaceConfig);
-  workspaceApiTokenCache[alias] = fresh;
-  console.log(`[LakebasePool] Workspace token cached for "${alias}", expires in ${Math.round((fresh.expiry - Date.now()) / 60000)}m`);
-  return fresh.token;
+  return getOAuthToken(workspaceConfig, 'postgres', { timeoutMs: API_TIMEOUT_MS, tlsVerify: apiTlsVerify() });
 }
 
 /**

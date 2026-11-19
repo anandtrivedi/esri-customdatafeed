@@ -325,8 +325,24 @@ function getExtentFromGeoJson(geoJsonPolygon, dbWKID) {
   };
 }
 
+// Whole-world envelope per coordinate system, used when a table's real extent couldn't be computed in time. Only
+// systems where "the world" is well defined: projecting it into a local grid (State Plane, UTM) would be meaningless.
+const WEB_MERCATOR_MAX = 20037508.342789244;
+const WORLD_EXTENTS = {
+  4326: [-180, -90, 180, 90],
+  3857: [-WEB_MERCATOR_MAX, -WEB_MERCATOR_MAX, WEB_MERCATOR_MAX, WEB_MERCATOR_MAX],
+};
+WORLD_EXTENTS[102100] = WORLD_EXTENTS[102113] = WORLD_EXTENTS[900913] = WORLD_EXTENTS[3857];
+
+/** World extent in `wkid`, or null when the coordinate system has no meaningful world box. */
+function getWorldExtent(wkid) {
+  const box = WORLD_EXTENTS[Number(wkid)];
+  return box ? { xmin: box[0], ymin: box[1], xmax: box[2], ymax: box[3], spatialReference: { wkid: Number(wkid) } } : null;
+}
+
 module.exports = {
   getGeometryQuery,
   getExtentFromGeoJson,
+  getWorldExtent,
   looksProjectedGeometry,
 };

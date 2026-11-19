@@ -10,82 +10,82 @@
       {
         "key": "workspace",
         "label": "1. Common - Databricks Workspace Profile",
-        "description": "BOTH backends. Name of a profile that ALREADY EXISTS in the server's .databrickscfg (set up separately via configure-databricks.sh / README Step 3 - registering the .cdpk does NOT install credentials), e.g. DEFAULT or SP. Enter - to use the default profile."
+        "description": "[NAME] in the .env or .databrickscfg, e.g. DOD_FE. Enter - for DEFAULT."
       },
       {
         "key": "geometryColumn",
         "label": "2. Common - Geometry Column",
-        "description": "BOTH backends. Name of the column that holds the geometry, e.g. geom or shape. Required."
+        "description": "Column holding the geometry, e.g. geom. Required."
       },
       {
         "key": "idField",
         "label": "3. Common - ID Field",
-        "description": "BOTH backends. A unique integer id column (not a UUID), e.g. objectid. Required. Esri OBJECTIDs are 32-bit (max 2147483647): larger ids worked in our own testing but are not supported by Esri, so use them at your own risk. Above 9007199254740991 selection, identify and editing hit the wrong features."
+        "description": "Unique integer column, e.g. objectid. Esri max 2147483647; larger at your own risk."
       },
       {
         "key": "srid",
         "label": "4. Common - Spatial Reference ID / SRID (default 4326)",
-        "description": "BOTH backends. EPSG code of the stored geometry, e.g. 4326 (WGS84). Enter - for the default (4326)."
+        "description": "EPSG code, e.g. 4326. Enter - for the default."
       },
       {
         "key": "maxRecordCount",
         "label": "5. Common - Max Record Count (default 2000)",
-        "description": "BOTH backends. Maximum rows returned per page, e.g. 2000. Enter - for the default (2000)."
+        "description": "Rows per page. Enter - for the default."
       },
       {
         "key": "warehouseHttpPath",
         "label": "6. Lakehouse - SQL Warehouse HTTP Path",
-        "description": "LAKEHOUSE only. The warehouse's full HTTP path, e.g. /sql/1.0/warehouses/a1b2c3d4e5f6a7b8. Enter - for a Lakebase service."
+        "description": "e.g. /sql/1.0/warehouses/a1b2c3d4e5f6a7b8. Enter - for Lakebase."
       },
       {
         "key": "tableName",
         "label": "7. Lakehouse - Table (catalog.schema.table)",
-        "description": "LAKEHOUSE only. 3-part Unity Catalog name, e.g. main.geospatial.us_cell_towers. Enter - for a Lakebase service."
+        "description": "e.g. main.geo.cell_towers. Enter - for Lakebase."
       },
       {
         "key": "geometryFormat",
         "label": "8. Lakehouse - Geometry Format",
-        "description": "LAKEHOUSE only, optional. One of WKT, WKB, GEOJSON, GEOMETRY. Enter - to auto-detect from the column (also enter - for a Lakebase service)."
+        "description": "WKT, WKB, GEOJSON or GEOMETRY. Enter - to auto-detect."
       },
       {
         "key": "timeColumn",
         "label": "9. Lakehouse - Time Column",
-        "description": "LAKEHOUSE only. STRONGLY RECOMMENDED for any table with more than one record per place over time (tracks, sensor readings, daily aggregates). Without it the layer isn't time-enabled: Map Viewer and other clients request every date in each tile, a full scan on large multi-year tables. With it, clients get a time slider over the data's range (computed automatically) and query one interval at a time. Enter - only if the table has no time dimension (also enter - for a Lakebase service)."
+        "description": "Strongly recommended for data over time. Enter - if none (or Lakebase)."
       },
       {
         "key": "lakebaseHost",
         "label": "10. Lakebase - Host",
-        "description": "LAKEBASE only. e.g. instance-name.database.<region>.cloud.databricks.com. Enter - for a Lakehouse service."
+        "description": "e.g. ep-name.database.<region>.cloud.databricks.com. Enter - for Lakehouse."
       },
       {
         "key": "lakebasePort",
         "label": "11. Lakebase - Port (default 5432)",
-        "description": "LAKEBASE only, e.g. 5432. Enter - for the default (5432). For a Lakehouse service, enter - too."
+        "description": "Enter - for the default (also for Lakehouse)."
       },
       {
         "key": "lakebaseDatabase",
         "label": "12. Lakebase - Database",
-        "description": "LAKEBASE only. e.g. databricks_postgres. Enter - for a Lakehouse service."
+        "description": "e.g. databricks_postgres. Enter - for Lakehouse."
       },
       {
         "key": "lakebaseSchema",
         "label": "13. Lakebase - Schema (default public)",
-        "description": "LAKEBASE only, e.g. geo_demo. Enter - for the default (public). For a Lakehouse service, enter - too."
+        "description": "Enter - for the default (also for Lakehouse)."
       },
       {
         "key": "lakebaseTable",
         "label": "14. Lakebase - Table",
-        "description": "LAKEBASE only. e.g. cases_editable. Enter - for a Lakehouse service."
+        "description": "e.g. cases_editable. Enter - for Lakehouse."
       },
       {
         "key": "editingEnabled",
         "label": "15. Lakebase - Enable Editing",
-        "description": "LAKEBASE only. Enter true to allow add/update/delete. Enter - for read-only (or for a Lakehouse service)."
+        "description": "true to allow edits. Enter - for read-only (or Lakehouse)."
       },
       {
         "key": "minScale",
-        "label": "16. Common - Minimum Scale (don't draw when zoomed out)",
-        "description": "Optional. The most zoomed-out view at which clients draw this layer: a scale (577791) or a zoom level (zoom 10). Map Viewer, Pro and the JS SDK stop requesting features further out, so a huge point table isn't queried for a whole continent. Rule of thumb by row count: under 10 million rows, enter -; 10 million to 1 billion, zoom 8 (about 1:2,311,000, a metro region); over 1 billion and clients send a time window, zoom 8-10; over 1 billion and clients may not send one (a layer opened straight from its URL), zoom 11 or 12 (about 1:289,000-1:144,000, a harbor). Polygon/H3 density layers usually need none. Enter - for no limit."
+        "label": "16. Common - Minimum Scale",
+        "description": "Hide when zoomed out past a scale (577791) or zoom 10. Enter - for none."
       }
     ]
   },

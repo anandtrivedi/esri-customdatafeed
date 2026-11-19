@@ -24,6 +24,21 @@ Server default) and **PowerShell 7+**, with no bash, Python, or WSL required.
 
 ## Usage
 
+**Simplest: credentials in the package.** Write a `.env` with your `[NAME]` workspace
+profiles (format in the [root README](../README.md#2-add-your-databricks-connection-env)) and
+register with `-EnvFile`; the script adds it to a temporary copy of the package, uploads
+that, and deletes the upload afterwards. ArcGIS then copies it to every machine, so no
+`configure-databricks.ps1` is needed:
+
+```powershell
+.\register-provider.ps1 -CdpkPath .\databricks-geospatial-provider.cdpk -EnvFile .\.env -Restart yes
+```
+
+Pass the same `-EnvFile` on every upgrade: an update replaces the provider folder with
+the uploaded package.
+
+**Or a `.databrickscfg` on each machine** (keeps secrets out of the package):
+
 Run on the box, against the local admin endpoint. Configure **first**, so the
 provider sees your credentials the moment the register step restarts the server.
 Both scripts prompt for anything not passed (admin password, tokens, secrets —
@@ -112,4 +127,5 @@ match the profile name you configured above.
 - **Multi-machine:** run `configure-databricks.ps1` on **every node** (a shared
   `-ConfigFile` path all nodes can read, or a local copy each), then restart each node.
   The provider **code** and service definitions propagate automatically via the shared
-  config-store — credentials do not.
+  config-store; a `.databrickscfg` does not. (A `.env` added with `-EnvFile` travels with
+  the package, and a profile in a machine's `.databrickscfg` overrides the same-named one.)

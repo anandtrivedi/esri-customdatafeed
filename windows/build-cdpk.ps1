@@ -137,8 +137,8 @@ $cdconfigPath = Join-Path $NodeDir 'cdconfig.json'
 $pkgPath      = Join-Path $NodeDir 'package.json'
 if (-not (Test-Path -LiteralPath $cdconfigPath)) { throw "$cdconfigPath not found - pass -RepoRoot <repo>." }
 
-$cdconfig = Get-Content -LiteralPath $cdconfigPath -Raw | ConvertFrom-Json
-$pkg      = Get-Content -LiteralPath $pkgPath -Raw | ConvertFrom-Json
+$cdconfig = Get-Content -LiteralPath $cdconfigPath -Raw -Encoding UTF8 | ConvertFrom-Json   # PS 5.1 reads BOM-less files as ANSI otherwise
+$pkg      = Get-Content -LiteralPath $pkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $providerName = $cdconfig.name
 $cdpkName     = if ($cdconfig.fileName) { $cdconfig.fileName } else { "$providerName.cdpk" }
 $version      = $pkg.version
@@ -156,7 +156,7 @@ if (-not $gitSha) { $gitSha = 'unknown' }
 # editors (and PowerShell 5.1's Out-File -Encoding UTF8) add a BOM silently, so we ALWAYS repackage
 # cdconfig.json as UTF-8 without a BOM, whatever it looks like on disk.
 $bom = [char]0xFEFF   # U+FEFF, referenced by code point so this script stays pure ASCII
-$cdconfigContent = (Get-Content -LiteralPath $cdconfigPath -Raw) -replace ('^' + $bom), ''
+$cdconfigContent = (Get-Content -LiteralPath $cdconfigPath -Raw -Encoding UTF8) -replace ('^' + $bom), ''
 $effectiveArcgis = $cdconfig.arcgisVersion
 if ($ArcgisVersion) {
   # Validate the shape before injecting into JSON (a stray quote could corrupt the manifest).
@@ -199,7 +199,10 @@ Write-Host "============================================================"
 Write-Host " Build .cdpk (Windows) - $providerName v$version"
 Write-Host "============================================================"
 Write-Host "  git: $gitSha"
-Write-Host "  node: $(& node -v 2>$null)   npm: $(& npm -v 2>$null)"
+# A missing command is a terminating error under EAP=Stop (2>$null doesn't help), so probe with Get-Command first.
+$nodeV = if (Get-Command node -ErrorAction SilentlyContinue) { & node -v 2>$null } else { 'not found' }
+$npmV  = if (Get-Command npm  -ErrorAction SilentlyContinue) { & npm -v 2>$null }  else { 'not found' }
+Write-Host "  node: $nodeV   npm: $npmV"
 Write-Host ""
 
 # --- reproducible install ---------------------------------------------------------------------
@@ -306,13 +309,15 @@ $manifest = Join-Path $OutDir "MANIFEST-v$version.txt"
   "size:            $sizeMB"
   "git:             $gitSha"
   "built (UTC):     $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
-  "node used:       $(& node -v 2>$null)"
+  "node used:       $nodeV"
   "arcgis target:   $effectiveArcgis   (cdconfig.json BOM: $cdconfigBom)"
   "govcloud oauth:  allowlist includes .mil/.us -> $pkgGov"
   "native modules:  none required (lz4 optional, not compiled; falls back to pure JS)"
   "built on:        PowerShell $($PSVersionTable.PSVersion)"
   "install:         copy the .cdpk to the ArcGIS Server host, verify sha256, then"
-  "                 register-provider.ps1 -CdpkPath <file>  (or Server Manager > Add Custom Data Provider)."
+  "                 register-provider.ps1 -CdpkPath <file> [-EnvFile <.env>]  (or Server Manager > Add Custom Data Provider)."
+  "credentials:     none in this package - add a .env with your [NAME] profiles first (README step 2),"
+  "                 or configure a .databrickscfg on each machine (configure-databricks.ps1)."
 ) | Set-Content -LiteralPath $manifest -Encoding UTF8
 
 Write-Host "   [ok] $cdpkName ($sizeMB)"
@@ -325,6 +330,7 @@ Write-Host "   $cdpkName"
 Write-Host "   $cdpkName.sha256"
 Write-Host "   $(Split-Path -Leaf $manifest)"
 Write-Host ""
-Write-Host " Next: copy $cdpkName to the ArcGIS Server host and register it:"
-Write-Host "   .\register-provider.ps1 -CdpkPath .\$cdpkName"
+Write-Host " Next: copy $cdpkName to the ArcGIS Server host and register it with your credentials:"
+Write-Host "   .\register-provider.ps1 -CdpkPath .\$cdpkName -EnvFile .\.env"
+Write-Host "   (the package carries no credentials; see README step 2, or use configure-databricks.ps1 instead of -EnvFile)"
 Write-Host "============================================================"

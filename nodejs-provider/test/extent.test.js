@@ -20,6 +20,9 @@ const releases = [];               // { id, destroy } — what the pool got back
 const sqlByConn = new Map();       // conn id -> [sql...] — proves which statements ran on which connection
 const point = '{"type":"Point","coordinates":[-77,38]}';
 const extentPolygon = '{"type":"Polygon","coordinates":[[[-80,30],[-70,30],[-70,40],[-80,40],[-80,30]]]}';
+let extentEmpty = false;           // the aggregate answers NULL (no geometries): a known-empty extent, not an unknown one
+// Advertised instead of nothing when the extent timed out or failed (the runtime would otherwise derive it from the rows).
+const WORLD_4326 = { xmin: -180, ymin: -90, xmax: 180, ymax: 90, spatialReference: { wkid: 4326 } };
 
 const connectionPoolStub = {
   getPool: () => ({
@@ -46,7 +49,7 @@ const connectionPoolStub = {
                 if (isExtent) {
                   if (extentHangs) return hang; // settles only when cancelled
                   if (extentSlowMs) await new Promise((r) => setTimeout(r, extentSlowMs));
-                  return [{ extent: extentPolygon }];
+                  return [{ extent: extentEmpty ? null : extentPolygon }];
                 }
                 return [{ id: 1, geometry: point }];
               },
@@ -84,9 +87,9 @@ const workspaceResolverStub = {
 
 describe("Lakehouse metadata extent", function () {
   let Model;
-  const req = (table) => ({
-    query: { f: "json" },
-    params: { tableName: table, geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY" },
+  const req = (table, params = {}, query = {}) => ({
+    query: { f: "json", ...query },
+    params: { tableName: table, geometryColumn: "geometry", idField: "id", geometryFormat: "GEOMETRY", ...params },
     ip: "127.0.0.1",
   });
   const getData = (model, r) => new Promise((resolve, reject) => model.getData(r, (err, res) => (err ? reject(err) : resolve(res))));
@@ -109,7 +112,7 @@ describe("Lakehouse metadata extent", function () {
 
   beforeEach(() => {
     extentCalls = 0; cancelCalls = 0; closeCalls = 0; extentHangs = false; extentRejectsOnCancel = false;
-    extentSlowMs = 0; cleanupSlowMs = 0; acquireSlowMs = 0; execSlowMs = 0; closeFails = false; cancelFails = false; connSeq = 0;
+    extentSlowMs = 0; cleanupSlowMs = 0; acquireSlowMs = 0; execSlowMs = 0; closeFails = false; cancelFails = false; extentEmpty = false; connSeq = 0;
     releases.length = 0; sqlByConn.clear();
     Model._extentCache.clear();
   });
@@ -123,6 +126,22 @@ describe("Lakehouse metadata extent", function () {
     expect(extentCalls).to.equal(1);
     expect(a.metadata.extent).to.deep.equal(b.metadata.extent);
     expect(a.metadata.extent).to.include({ xmin: -80, xmax: -70 });
+  });
+
+  it("treats a layer-info request carrying a token as metadata (secured/federated servers)", async () => {
+    // Map Viewer and the JS SDK send ?f=json&token=... for layer info. Counting `token` as a query parameter made it
+    // a data request: a full page fetched, no extent computed, and the runtime derived the extent from those rows.
+    const model = new Model();
+    const res = await getData(model, req("catalog.schema.t1", {}, { token: "abc", callback: "cb", _: "1760000000", _ts: "1760000000", returnUpdates: "true", returnAdvancedSymbols: "false" }));
+    expect(extentCalls).to.equal(1);
+    expect(res.metadata.extent).to.include({ xmin: -80, xmax: -70 });
+    expect(res.features).to.have.lengthOf(1);
+  });
+
+  it("still treats a query with a token as a data request", async () => {
+    const model = new Model();
+    await getData(model, req("catalog.schema.t1", {}, { token: "abc", where: "1=1" }));
+    expect(extentCalls).to.equal(0);
   });
 
   it("keeps separate cache entries per table", async () => {
@@ -139,7 +158,7 @@ describe("Lakehouse metadata extent", function () {
     const res = await getData(model, req("catalog.schema.huge"));
     expect(Date.now() - t0).to.be.below(2000);
     expect(cancelCalls).to.equal(1);
-    expect(res.metadata).to.not.have.property("extent");
+    expect(res.metadata.extent).to.deep.equal(WORLD_4326);
     expect(res.features).to.have.lengthOf(1);
   });
 
@@ -164,13 +183,72 @@ describe("Lakehouse metadata extent", function () {
       const model = new Model();
       const res = await getData(model, req("catalog.schema.huge"));
       await new Promise((r) => setTimeout(r, 50)); // let the post-cancel rejection fire if it's going to
-      expect(res.metadata).to.not.have.property("extent");
+      expect(res.metadata.extent).to.deep.equal(WORLD_4326);
       expect(res.features).to.have.lengthOf(1);
       expect(cancelCalls).to.equal(1);
       expect(unhandled).to.have.lengthOf(0);
     } finally {
       process.removeListener("unhandledRejection", onUnhandled);
     }
+  });
+
+  it("keeps advertising the world extent while the timeout is negatively cached", async () => {
+    extentHangs = true;
+    const model = new Model();
+    await getData(model, req("catalog.schema.huge"));
+    const again = await getData(model, req("catalog.schema.huge"));
+    expect(extentCalls).to.equal(1); // served from the negative cache, not re-run
+    expect(again.metadata.extent).to.deep.equal(WORLD_4326);
+  });
+
+  it("advertises the Web Mercator world box for a 3857/102100 table whose extent timed out", async () => {
+    extentHangs = true;
+    const model = new Model();
+    const m = 20037508.342789244;
+    for (const srid of ["3857", "102100"]) {
+      const res = await getData(model, req("catalog.schema.huge", { srid }));
+      expect(res.metadata.extent).to.deep.equal({ xmin: -m, ymin: -m, xmax: m, ymax: m, spatialReference: { wkid: Number(srid) } });
+    }
+  });
+
+  it("advertises no extent for a projected local system (no meaningful world box), as before", async () => {
+    extentHangs = true;
+    const model = new Model();
+    const res = await getData(model, req("catalog.schema.huge", { srid: "2263" }));
+    expect(res.metadata).to.not.have.property("extent");
+  });
+
+  it("advertises no extent when the table's extent is known to be empty (not a fallback case)", async () => {
+    extentEmpty = true;
+    const model = new Model();
+    const res = await getData(model, req("catalog.schema.t1"));
+    expect(extentCalls).to.equal(1);
+    expect(res.metadata).to.not.have.property("extent");
+  });
+
+  it("never puts an extent (real or world) on non-metadata (query) responses", async () => {
+    const model = new Model();
+    const query = { where: "1=1", outFields: "*" };
+    // Same table: the metadata request carries the computed extent, a query doesn't — so the query was really
+    // treated as non-metadata, not just missing an extent for some other reason.
+    expect((await getData(model, req("catalog.schema.t1"))).metadata.extent).to.include({ xmin: -80, xmax: -70 });
+    expect((await getData(model, req("catalog.schema.t1", {}, query))).metadata).to.not.have.property("extent");
+    extentHangs = true;
+    expect((await getData(model, req("catalog.schema.huge"))).metadata.extent).to.deep.equal(WORLD_4326);
+    expect((await getData(model, req("catalog.schema.huge", {}, query))).metadata).to.not.have.property("extent");
+  });
+
+  it("logs the world-extent fallback once per table, not on every metadata request", async () => {
+    extentHangs = true;
+    const model = new Model();
+    const warns = [];
+    const orig = model.logger.warn;
+    model.logger.warn = (m) => { warns.push(m); };
+    try {
+      await getData(model, req("catalog.schema.warnonce"));
+      await getData(model, req("catalog.schema.warnonce"));
+    } finally { model.logger.warn = orig; }
+    expect(warns.filter((w) => /advertising the whole world/.test(w))).to.have.lengthOf(1);
   });
 
   it("de-dupes concurrent cold-cache metadata requests into a single extent query", async () => {
@@ -209,7 +287,7 @@ describe("Lakehouse metadata extent", function () {
     const res = await getData(model, req("catalog.schema.huge"));
     expect(Date.now() - t0).to.be.below(200); // ~the 50 ms budget, not 50 + 600
     expect(cancelCalls).to.equal(1); // invoked immediately — its completion is not awaited
-    expect(res.metadata).to.not.have.property("extent");
+    expect(res.metadata.extent).to.deep.equal(WORLD_4326);
     expect(res.features).to.have.lengthOf(1);
     await new Promise((r) => setTimeout(r, 1000)); // let the detached cleanup (2×300 ms) settle with margin
     expect(closeCalls).to.equal(1);
@@ -223,7 +301,7 @@ describe("Lakehouse metadata extent", function () {
     const t0 = Date.now();
     const res = await getData(model, req("catalog.schema.huge"));
     expect(Date.now() - t0).to.be.below(180); // answered at the budget, not after the acquire
-    expect(res.metadata).to.not.have.property("extent");
+    expect(res.metadata.extent).to.deep.equal(WORLD_4326);
     await new Promise((r) => setTimeout(r, 350)); // the late borrow settles
     expect(extentCalls).to.equal(0); // the statement was never even opened — the result was already negatively cached
     expect(releases.some((r) => r.id === "test-conn-2"), "the late-borrowed connection was returned").to.be.true;
@@ -243,7 +321,7 @@ describe("Lakehouse metadata extent", function () {
     const t0 = Date.now();
     const res = await getData(model, req("catalog.schema.huge"));
     expect(Date.now() - t0).to.be.below(180); // answered at the budget
-    expect(res.metadata).to.not.have.property("extent");
+    expect(res.metadata.extent).to.deep.equal(WORLD_4326);
     expect(cancelCalls).to.equal(0); // nothing to cancel yet — the statement hadn't opened
     await new Promise((r) => setTimeout(r, 300)); // the open lands at ~100 ms
     expect(cancelCalls).to.equal(1); // cancelled as soon as it OPENED, not after the (hanging) fetch
@@ -312,8 +390,8 @@ describe("Lakehouse metadata extent", function () {
       const r1 = await getData(model, req("catalog.schema.flaky"));
       await new Promise((r) => setTimeout(r, 5)); // let the 1 ms error TTL elapse
       const r2 = await getData(model, req("catalog.schema.flaky"));
-      expect(r1.metadata).to.not.have.property("extent");
-      expect(r2.metadata).to.not.have.property("extent");
+      expect(r1.metadata.extent).to.deep.equal(WORLD_4326); // a failed query is "unknown", like a timeout
+      expect(r2.metadata.extent).to.deep.equal(WORLD_4326);
       expect(extentCalls).to.equal(2); // short TTL (=0) elapsed, so it retried rather than serving a stale negative
     } finally {
       delete process.env.CDF_EXTENT_ERROR_RETRY_MS;

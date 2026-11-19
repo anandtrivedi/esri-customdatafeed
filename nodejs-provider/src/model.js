@@ -15,15 +15,21 @@
  * Routing: if req.params.lakebaseHost is set → Lakebase, otherwise → Lakehouse.
  */
 
-// Load environment variables from .env file
-// Use explicit path since CDF runtime's working directory differs from provider directory
-try { require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }); } catch (e) { /* dotenv not available in CDF runtime */ }
+// Load the provider's .env (explicit path: the CDF runtime's working directory isn't the provider directory). Only the
+// lines above its first [SECTION] are env vars; [SECTION]s are workspace profiles, read by workspaceResolver. Variables
+// already set in the environment win.
+try {
+  const text = require('fs').readFileSync(require('path').join(__dirname, '..', '.env'), 'utf8');
+  const vars = require('dotenv').parse(require('./modules/workspaceResolver').envVarsPart(text));
+  for (const [k, v] of Object.entries(vars)) if (!(k in process.env)) process.env[k] = v;
+} catch (e) { /* no .env, or dotenv not available */ }
 
 const {
   translateToGeoJSON,
   buildSqlQuery,
   generateFiltersApplied,
   getExtentFromGeoJson,
+  getWorldExtent,
   getAuditLogger,
   getGeometryFieldExpression,
   resolveGeometryFormat,
@@ -78,8 +84,8 @@ const config = {
     // ceiling (fail-open), which would reintroduce the very OOM risk this guards against.
     maxReturnIds: (() => {
       const raw = process.env.DATABRICKS_MAX_RETURN_IDS;
-      if (raw === undefined || raw === '') return 500000;
-      const n = parseInt(raw, 10);
+      if (raw === undefined || raw.trim() === '') return 500000; // unset or blank: the default (Number(' ') is 0 = disabled)
+      const n = Number(raw.trim()); // not parseInt: it read "1e6" as 1 and "30s" as 30, with no warning
       if (!Number.isInteger(n) || n < 0) {
         console.warn(`[CDF] Invalid DATABRICKS_MAX_RETURN_IDS="${raw}"; using default 500000 (a non-negative integer; 0 disables the ceiling).`);
         return 500000;
@@ -91,8 +97,8 @@ const config = {
     // unbounded distinct can't pull a whole huge table into the process. Same fail-safe parse; 0 disables.
     maxDistinctRows: (() => {
       const raw = process.env.DATABRICKS_MAX_DISTINCT_ROWS;
-      if (raw === undefined || raw === '') return 1000000;
-      const n = parseInt(raw, 10);
+      if (raw === undefined || raw.trim() === '') return 1000000; // unset or blank: the default (Number(' ') is 0 = disabled)
+      const n = Number(raw.trim()); // not parseInt: it read "1e6" as 1 and "30s" as 30, with no warning
       if (!Number.isInteger(n) || n < 0) {
         console.warn(`[CDF] Invalid DATABRICKS_MAX_DISTINCT_ROWS="${raw}"; using default 1000000 (a non-negative integer; 0 disables the cap).`);
         return 1000000;
@@ -101,6 +107,32 @@ const config = {
     })()
   }
 };
+
+/**
+ * returnIdsOnly / returnDistinctValues matched more rows than the ceiling: a 400 the client can act on.
+ */
+function tooManyRowsError(distinct, ceiling) {
+  const err = new Error(
+    (distinct
+      ? `returnDistinctValues matched more than the configured maximum of ${ceiling} rows. `
+      : `returnIdsOnly matched more than the configured maximum of ${ceiling} object ids. `) +
+    `Narrow the request with where / time / geometry filters, or raise the ` +
+    `${distinct ? 'DATABRICKS_MAX_DISTINCT_ROWS' : 'DATABRICKS_MAX_RETURN_IDS'} ` +
+    `environment variable on the server (set it to 0 to disable the ceiling).`
+  );
+  err.code = 400; // client should narrow the query — a 4xx, not a generic server error
+  return err;
+}
+
+/**
+ * Edit attributes keyed the way Postgres sees them: unquoted identifiers fold to lowercase, and the idField and
+ * geometry column are lowercased to match, so a client sending OBJECTID (the configured spelling) still hits objectid.
+ */
+function lowerKeys(attributes) {
+  const out = {};
+  for (const [k, v] of Object.entries(attributes || {})) out[k.toLowerCase()] = v;
+  return out;
+}
 
 /**
  * applyEdits `deletes` arrives the way the REST parameter does: a single id (number), a comma-separated string
@@ -211,7 +243,7 @@ let requestSeq = 0;
 // Layer extent for metadata responses, per table. ST_Envelope_Agg is a full-table aggregate, so on a multi-billion-row
 // table it runs for minutes and every metadata request (ArcGIS asks after each restart) piled one more onto the
 // warehouse and onto the connection pool. Computed once, cached; if it doesn't finish inside the wait budget it's
-// cancelled, the metadata goes out without an extent (clients fall back to the data's own bounds), and the table is
+// cancelled, the metadata advertises a whole-world extent for 4326/Web Mercator tables (otherwise none), and the table is
 // remembered as too big to try again for a while. Concurrent cold-cache callers share one in-flight query (see
 // getLayerExtent) so a burst of metadata requests doesn't fire N full scans.
 const EXTENT_CACHE_MS = parseInt(process.env.CDF_EXTENT_CACHE_MS) || 24 * 3600 * 1000;
@@ -224,8 +256,13 @@ const EXTENT_TIMED_OUT = Symbol("extent-timed-out");
 // running in the background (capped here), filling the cache for the next metadata request.
 const TIME_EXTENT_BG_MS = parseInt(process.env.CDF_TIME_EXTENT_BG_MS) || 120 * 1000;
 const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: ms }
-const extentInFlight = new Map(); // key -> Promise<object|null> — in-flight compute, de-dupes concurrent callers
+const extentInFlight = new Map(); // key -> Promise<{ extent, unknown }> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
+const warnedWorldExtent = new Set(); // tables already warned about advertising the world-extent fallback
+// Request parameters that say nothing about which features to return: output format, auth, JSONP, cache-busters, and
+// the layer-info-only returnUpdates (refresh extent/time) and returnAdvancedSymbols. The runtime gives getData the same
+// params for layer info and /query, so a /query carrying only these is answered as metadata (as bare ?f=json always was).
+const NON_QUERY_PARAMS = new Set(["f", "token", "callback", "_", "_ts", "returnUpdates", "returnAdvancedSymbols"]);
 
 // [min,max] epoch-ms from the time-extent query rows, or null if the table is empty / the column is all-NULL /
 // values are non-finite. Guard against SQL NULL first: an empty table or all-NULL column makes min/max return NULL,
@@ -334,12 +371,13 @@ class Model {
   /**
    * Resolve the layer extent for a metadata request: serve a fresh value from the cache if one is valid, otherwise
    * compute it (de-duping concurrent cold-cache callers so a burst of metadata requests shares a single query).
-   * Always resolves to an extent object or null — never rejects — so callers can serve metadata either way.
+   * Always resolves to { extent, unknown } — never rejects — so callers can serve metadata either way. `unknown` means
+   * the extent query timed out or failed (as opposed to answering "no geometries"), so the bounds aren't known.
    */
   async getLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter) {
     const cached = extentCache.get(cacheKey);
     if (cached && Date.now() - cached.at < cached.ttl) {
-      return cached.extent;
+      return { extent: cached.extent, unknown: Boolean(cached.unknown) };
     }
     let inflight = extentInFlight.get(cacheKey);
     if (!inflight) {
@@ -544,12 +582,13 @@ class Model {
         ? EXTENT_TIMED_OUT
         : await Promise.race([opened.fetchP, timedOut]); // fetch vs whatever is left of the budget
       if (extentRows === EXTENT_TIMED_OUT) {
-        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelling in the background; serving metadata without it (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
+        this.logger.warn(`Query ${requestCounter}: extent of ${sourceConfig.tableName} not ready in ${EXTENT_WAIT_MS} ms — cancelling in the background; serving metadata without the computed extent (retry in ${Math.round(EXTENT_RETRY_MS / 60000)} min)`);
         // A slow FETCH means the table genuinely may be too big — retry in 1 h. But if the budget expired while still
         // BORROWING/opening, the table itself was never the problem (pool contention is transient) — retry in a minute.
         const timedOutWhileOpening = !handles.op;
         extentCache.set(cacheKey, {
           extent: null,
+          unknown: true, // not computed (vs. computed as empty): metadata advertises a world extent meanwhile
           at: Date.now(),
           ttl: timedOutWhileOpening ? EXTENT_ERROR_RETRY_MS : EXTENT_RETRY_MS,
         });
@@ -564,7 +603,7 @@ class Model {
         } else {
           work.catch(() => {}).then(() => this._releaseExtentConnection(pool, handles.conn, handles.op, true));
         }
-        return null;
+        return { extent: null, unknown: true };
       }
       let extent = null;
       if (extentRows.length > 0 && extentRows[0].extent) {
@@ -572,15 +611,15 @@ class Model {
       }
       extentCache.set(cacheKey, { extent, at: Date.now(), ttl: EXTENT_CACHE_MS });
       this._releaseExtentConnection(pool, handles.conn, handles.op, false);
-      return extent;
+      return { extent, unknown: false };
     } catch (error) {
       this.logger.warn(`Query ${requestCounter}: Failed to calculate extent for ${sourceConfig.tableName}: ${error.message}`);
       // Negatively cache non-timeout failures too (short TTL — they're often transient) so a persistent error doesn't
       // re-run the full-table scan on every metadata request.
-      extentCache.set(cacheKey, { extent: null, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
+      extentCache.set(cacheKey, { extent: null, unknown: true, at: Date.now(), ttl: EXTENT_ERROR_RETRY_MS });
       // If the statement never opened, the session's state is unknown — destroy instead of recycle.
       this._releaseExtentConnection(pool, handles.conn, handles.op, false, !handles.op);
-      return null;
+      return { extent: null, unknown: true };
     } finally {
       clearTimeout(timer); // always clear — every path lands here
     }
@@ -657,11 +696,10 @@ class Model {
       return callback(new Error(`Invalid table name format: expected catalog.schema.table`));
     }
 
-    // Check if this is a metadata-only request
-    const isMetadataRequest =
-      (Object.keys(geoserviceParams).length === 1 &&
-        geoserviceParams.hasOwnProperty("f")) ||
-      Object.keys(geoserviceParams).length === 0;
+    // Check if this is a metadata-only request. Transport parameters don't count: on a secured or federated server
+    // Map Viewer and the JS SDK send layer info as ?f=json&token=..., which used to be treated as a data request
+    // (a full page fetched, no extent computed, the runtime deriving the extent from those rows).
+    const isMetadataRequest = Object.keys(geoserviceParams).every((k) => NON_QUERY_PARAMS.has(k));
 
     // Set fetch size (1 for metadata, capped to configured max for data)
     const fetchSize = isMetadataRequest
@@ -763,6 +801,7 @@ class Model {
             this.logger.warn(`${sourceConfig.tableName}: no timeColumn configured — the layer isn't time-enabled, so clients (Map Viewer) request every date in each tile. Set timeColumn for any table with more than one record per place over time.`);
           }
           let dbExtent = null;
+          let extentUnknown = false; // the extent query timed out or failed, so we don't know the table's bounds
           // timeInfo goes out on every response; outside metadata requests use whatever is cached, never compute
           const timeKey = `${pool.poolLabel()}|${sourceConfig.tableName}|time|${sourceConfig.timeColumn}`;
           const cachedTime = sourceConfig.timeColumn ? extentCache.get(timeKey) : null;
@@ -778,13 +817,14 @@ class Model {
             // 20 s+ on a cold cache, and each timeout added awaited cancel()/close() round-trips before the metadata
             // response could go out (15–21 s observed live). De-duped per cache key, so a burst of cold metadata
             // requests still shares one query per extent — at most one extra connection per extent per table.
-            const [computedExtent, computedTimeExtent] = await Promise.all([
+            const [layerExtent, computedTimeExtent] = await Promise.all([
               this.getLayerExtent(pool, cacheKey, geomExpression, sourceConfig, requestCounter),
               sourceConfig.timeColumn
                 ? this.getLayerTimeExtent(pool, timeKey, sourceConfig, requestCounter)
                 : null,
             ]);
-            dbExtent = computedExtent;
+            dbExtent = layerExtent.extent;
+            extentUnknown = layerExtent.unknown;
             dbTimeExtent = sourceConfig.timeColumn ? computedTimeExtent : dbTimeExtent;
           }
 
@@ -826,17 +866,8 @@ class Model {
           // set is larger than the ceiling; return an actionable error rather than a silently-truncated (wrong) set.
           const idCeiling = geoserviceParams.returnIdsOnly ? config.databricks.maxReturnIds : config.databricks.maxDistinctRows;
           if ((geoserviceParams.returnIdsOnly || geoserviceParams.returnDistinctValues) && !geoserviceParams.returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
-            this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
-            const tooMany = new Error(
-              (geoserviceParams.returnIdsOnly
-                ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. `
-                : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
-              `Narrow the request with where / time / geometry filters, or raise the ` +
-              `${geoserviceParams.returnIdsOnly ? 'DATABRICKS_MAX_RETURN_IDS' : 'DATABRICKS_MAX_DISTINCT_ROWS'} ` +
-              `environment variable on the server (set it to 0 to disable the ceiling).`
-            );
-            tooMany.code = 400; // client should narrow the query — a 4xx, not a generic server error
-            return respond(tooMany);
+            this.logger.warn(`Query ${requestCounter}: ${geoserviceParams.returnIdsOnly ? 'returnIdsOnly' : 'returnDistinctValues'} exceeded the ${idCeiling}-row ceiling`);
+            return respond(tooManyRowsError(!geoserviceParams.returnIdsOnly, idCeiling));
           }
 
           // Initialize GeoJSON response
@@ -875,6 +906,15 @@ class Model {
             sourceConfig.geometryColumn
           );
 
+          // Without an extent the runtime derives one from the few rows in this response (seen live: a single point in
+          // Hawaii for a global 28B-row table), and clients zoom there. A world box is merely too wide.
+          const worldExtent = !dbExtent && extentUnknown ? getWorldExtent(sourceConfig.dbWKID) : null;
+          const worldWarnKey = `${pool.poolLabel()}|${sourceConfig.tableName}`;
+          if (worldExtent && !warnedWorldExtent.has(worldWarnKey)) {
+            warnedWorldExtent.add(worldWarnKey);
+            this.logger.warn(`${sourceConfig.tableName}: extent not available yet — advertising the whole world (WKID ${sourceConfig.dbWKID}) until it computes`);
+          }
+
           // Add metadata
           geojson.metadata = {
             name: sourceConfig.name,
@@ -886,7 +926,7 @@ class Model {
             idField: sourceConfig.idField,
             inputCrs: sourceConfig.dbWKID,
             fields: this.extractFields(rows, sourceConfig.geometryColumn, sourceConfig.idField),
-            ...(dbExtent && { extent: dbExtent }),
+            ...((dbExtent || worldExtent) && { extent: dbExtent || worldExtent }),
             ...(sourceConfig.timeColumn && {
               timeInfo: {
                 startTimeField: sourceConfig.timeColumn,
@@ -1137,16 +1177,7 @@ class Model {
         const idCeiling = config.databricks.maxReturnIds;
         if (geoserviceParams.returnIdsOnly && !returnCountOnly && idCeiling > 0 && rows.length > idCeiling) {
           this.logger.warn(`Query ${requestCounter}: returnIdsOnly exceeded the ${idCeiling}-id ceiling`);
-          const tooMany = new Error(
-            (geoserviceParams.returnIdsOnly
-              ? `returnIdsOnly matched more than the configured maximum of ${idCeiling} object ids. `
-              : `returnDistinctValues matched more than the configured maximum of ${idCeiling} rows. `) +
-            `Narrow the request with where / time / geometry filters, or raise the ` +
-            `${geoserviceParams.returnIdsOnly ? 'DATABRICKS_MAX_RETURN_IDS' : 'DATABRICKS_MAX_DISTINCT_ROWS'} ` +
-            `environment variable on the server (set it to 0 to disable the ceiling).`
-          );
-          tooMany.code = 400;
-          return respond(tooMany);
+          return respond(tooManyRowsError(false, idCeiling));
         }
 
         let geojson = { type: 'FeatureCollection', features: [] };
@@ -1290,7 +1321,7 @@ class Model {
         // Process adds
         for (const feature of adds) {
           try {
-            const attributes = feature.attributes || feature.properties || {};
+            const attributes = lowerKeys(feature.attributes || feature.properties);
             const geometry = feature.geometry || null;
             const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
             const result = await query(sql, params);
@@ -1313,7 +1344,7 @@ class Model {
         // Process updates
         for (const feature of updates) {
           try {
-            const attributes = feature.attributes || feature.properties || {};
+            const attributes = lowerKeys(feature.attributes || feature.properties);
             const geometry = feature.geometry || null;
             const oid = Number(attributes[rawIdField]);
             if (!Number.isInteger(oid)) {
@@ -1333,7 +1364,7 @@ class Model {
             }
           } catch (error) {
             this.logger.error(`Edit update failed: ${error.message}`);
-            const oid = Number((feature.attributes || feature.properties || {})[rawIdField]);
+            const oid = Number(lowerKeys(feature.attributes || feature.properties)[rawIdField]);
             updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: error.message } });
           }
         }
@@ -1476,3 +1507,4 @@ class Model {
 
 module.exports = Model;
 module.exports._extentCache = extentCache; // tests reset it between cases
+module.exports._config = config; // tests check the env parsing
