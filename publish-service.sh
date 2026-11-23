@@ -644,7 +644,7 @@ check_id_range() {
   IFS=. read -r cat sch tbl <<<"$TABLE"
   for p in "$cat" "$sch" "$tbl"; do printf '%s' "$p" | grep -qE '^[A-Za-z0-9_-]+$' || return 0; done
   echo "  (checking the range of '$ID_FIELD'...)"
-  local stmt="SELECT CAST(MIN(\`$ID_FIELD\`) AS STRING), CAST(MAX(\`$ID_FIELD\`) AS STRING) FROM \`$cat\`.\`$sch\`.\`$tbl\`"
+  local stmt="SELECT CAST(MIN(\`$ID_FIELD\`) AS STRING), CAST(MAX(\`$ID_FIELD\`) AS STRING), CAST(COUNT_IF(\`$ID_FIELD\` IS NULL) AS STRING) FROM \`$cat\`.\`$sch\`.\`$tbl\`"
   local body out
   body=$(python3 -c "import json,sys;print(json.dumps({'warehouse_id':sys.argv[1],'statement':sys.argv[2],'wait_timeout':'30s','on_wait_timeout':'CANCEL'}))" "$wid" "$stmt")
   out=$(timeout 45 databricks api post /api/2.0/sql/statements --profile "${WORKSPACE:-DEFAULT}" --json "$body" 2>/dev/null \
@@ -653,10 +653,15 @@ import sys,json
 try:
     d=json.load(sys.stdin)
     if (d.get('status') or {}).get('state')!='SUCCEEDED': raise SystemExit
-    lo,hi=d['result']['data_array'][0]
+    lo,hi,nulls=d['result']['data_array'][0]
+    nulls=int(nulls or 0)
+    if lo is None and nulls: print('low', 'NULL', 'NULL', nulls); sys.exit()
     lo,hi=int(lo),int(hi)
 except (Exception, SystemExit): print('?'); sys.exit()
-print('over53' if max(abs(lo),abs(hi))>9007199254740991 else 'over32' if hi>2147483647 or lo<0 else 'ok', lo, hi)
+# 'low' wins over 'over32': rows with id <= 0 or NULL don't draw at all (the CDF runtime rejects a response
+# containing a 0 or NULL id, so the provider leaves them out).
+cls='over53' if max(abs(lo),abs(hi))>9007199254740991 else 'low' if lo<=0 or nulls else 'over32' if hi>2147483647 else 'ok'
+print(cls, lo, hi, nulls)
 " 2>/dev/null)
   set -- $out
   case "${1:-?}" in
@@ -664,8 +669,13 @@ print('over53' if max(abs(lo),abs(hi))>9007199254740991 else 'over32' if hi>2147
       echo "   !! '$ID_FIELD' ranges $2..$3 — beyond 2^53 - 1 (9,007,199,254,740,991). ArcGIS can't carry these ids"
       echo "      exactly: neighbouring ids merge, so selection, identify and edits hit the wrong features (drawing still"
       echo "      works). Strongly consider a unique integer column below 2,147,483,647. Continuing — your call." ;;
+    low)
+      echo "   !! '$ID_FIELD' ranges $2..$3 with $4 NULL(s). Rows with an id of 0 or NULL won't draw: ArcGIS rejects a whole"
+      echo "      response containing one, so the provider leaves them out (negative ids are outside Esri's range too)."
+      echo "      Ids from monotonically_increasing_id() or row_number() - 1 start at 0 — use a unique integer >= 1."
+      echo "      Continuing — your call." ;;
     over32)
-      echo "   !! '$ID_FIELD' ranges $2..$3 — outside Esri's 32-bit OBJECTID range (0..2,147,483,647). Larger ids worked"
+      echo "   !! '$ID_FIELD' ranges $2..$3 — outside Esri's 32-bit OBJECTID range (1..2,147,483,647). Larger ids worked"
       echo "      in our own testing (drawing, selection, identify), but Esri doesn't support them — use at your own risk." ;;
     ok) echo "   ok — '$ID_FIELD' ranges $2..$3 (within the 32-bit OBJECTID range)." ;;
     *)  echo "   (couldn't check the id range — not a whole-number column, no access, or it took >30s; skipped)" ;;
@@ -764,7 +774,7 @@ while true; do
     case "$GF" in
       1) GEOM_FORMAT=WKT;; 2) GEOM_FORMAT=WKB;; 3) GEOM_FORMAT=GEOJSON;; 4) GEOM_FORMAT=GEOMETRY;; *) GEOM_FORMAT="";;
     esac
-    while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "$SUG_ID" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    while :; do ask "ID field (UNIQUE integer 1..2147483647; not a UUID)" "$SUG_ID" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
     check_id_range
     ask_int "SRID (EPSG code)" "4326" SRID 1 999999
     # Strongly recommended: without a time column the layer isn't time-enabled, and Map Viewer and other clients
@@ -786,7 +796,7 @@ while true; do
     ask "Lakebase schema" "public" LB_SCHEMA
     while :; do ask "Lakebase table name" "" LB_TABLE; [ -n "$LB_TABLE" ] && break; echo "   !! Table name is required."; done
     while :; do ask "Geometry column" "" GEOM_COL; [ -n "$GEOM_COL" ] && break; echo "   !! Geometry column is required."; done
-    while :; do ask "ID field (UNIQUE integer <= 2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
+    while :; do ask "ID field (UNIQUE integer 1..2147483647; not a UUID)" "" ID_FIELD; [ -n "$ID_FIELD" ] && break; echo "   !! ID field is required."; done
     ask_int "SRID (EPSG code)" "4326" SRID 1 999999
     ask "Enable editing (add / update / delete)? (y/n)" "y" ED
     case "$ED" in y|Y|yes|YES) EDITING="true"; CAPABILITIES="Query,Editing";; *) EDITING="false"; CAPABILITIES="Query";; esac

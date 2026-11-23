@@ -8,6 +8,7 @@
 // log under tile load (seen: ~8,900 warnings per view) and slowing the response.
 const warnedInvalidId = new Set();
 const warnedUnsafeId = new Set();
+const warnedDroppedId = new Set();
 
 function translateToGeoJSON(data, config) {
   if (!data || data.length === 0) {
@@ -20,11 +21,24 @@ function translateToGeoJSON(data, config) {
   const columns = Object.keys(data[0]);
   // Throttle the invalid-id warning per table+field (not just field) so two services sharing an idField name both warn.
   const warnKey = `${config.tableName || config.name || ""}|${config.idField}`;
+  let features = data.map((row) =>
+    formatFeature(row, columns, config.idField, config.geometryColumn, config.dbWKID, warnKey)
+  );
+  // The CDF runtime (winnow transformToEsriProperties) checks `!properties[idField]` and fails the WHOLE response
+  // when any feature's id is falsy: one row with id 0 (ids from monotonically_increasing_id() or row_number() - 1
+  // start there), NULL or a non-number left a hole in every page and tile containing it. Drop those rows so the rest
+  // draws. Only when the id column is in the result (distinct values and statistics leave it out).
+  if (config.idField && columns.includes(config.idField)) {
+    const kept = features.filter((f) => f.properties[config.idField]);
+    if (kept.length < features.length && !warnedDroppedId.has(warnKey)) {
+      warnedDroppedId.add(warnKey);
+      console.error(`idField "${config.idField}" of ${config.tableName || config.name || "this table"} has rows with id 0, NULL or a non-number; ArcGIS rejects a whole response containing one, so those rows are left out (${features.length - kept.length} in this response). Publish with a unique integer idField >= 1. Logged once per table.`);
+    }
+    features = kept;
+  }
   return {
     type: "FeatureCollection",
-    features: data.map((row) =>
-      formatFeature(row, columns, config.idField, config.geometryColumn, config.dbWKID, warnKey)
-    ),
+    features,
   };
 }
 
@@ -57,9 +71,9 @@ function formatFeature(values, columns, idField, geometryField, dbWKID, warnKey 
           warnedUnsafeId.add(warnKey);
           console.error(`idField "${idField}" has values above 2^53 - 1 (9007199254740991), e.g. ${value}. ArcGIS can't represent them exactly: selection, identify and editing will hit the wrong features (drawing is unaffected). Publish with a unique integer column below that limit.`);
         }
-      } else if (!isValidId(intValue) && !warnedInvalidId.has(warnKey)) {
+      } else if (intValue && !isValidId(intValue) && !warnedInvalidId.has(warnKey)) { // falsy ids are dropped (and logged) by translateToGeoJSON
         warnedInvalidId.add(warnKey);
-        console.warn(`Invalid ID value for idField "${idField}" (e.g. ${value}): outside the 32-bit OBJECTID range (0..2147483647) or non-integer. Use a 32-bit-fitting unique integer idField. Suppressing further per-feature warnings for this field.`);
+        console.warn(`Invalid ID value for idField "${idField}" (e.g. ${value}): outside the 32-bit OBJECTID range (1..2147483647) or non-integer. Use a 32-bit-fitting unique integer idField. Suppressing further per-feature warnings for this field.`);
       }
       feature.properties[columns[i]] = intValue;
     } else {
@@ -111,7 +125,7 @@ function normalizeAntimeridian(geometry, dbWKID) {
 // https://koopjs.github.io/docs/usage/provider#setting-provider-metadata-in-getdata
 function isValidId(value) {
   const parsedValue = parseInt(value);
-  return 0 <= parsedValue && parsedValue <= 2147483647;
+  return 1 <= parsedValue && parsedValue <= 2147483647;
 }
 
 module.exports = {

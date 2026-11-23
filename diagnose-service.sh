@@ -396,6 +396,7 @@ fi
 # but that is outside what Esri supports. Above 2^53 - 1 they can't be carried exactly: neighbouring ids merge, so
 # selection, identify and edits hit the wrong features. Works for any service, however it was published.
 ID_RANGE=""   # "" unknown | ok | over32 | over53
+ID_LOW=""     # "" unknown | yes: ids of 0, NULL or non-numbers (the CDF runtime rejects any response with one)
 if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
   echo "-- idField range ('$IDFIELD') --"
   # 1) What the provider has already logged for this idField (free, and definitive once the layer has been used).
@@ -414,6 +415,9 @@ if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
     else
       echo "  (no id-range messages for '$IDFIELD' in the recent server logs)"
     fi
+    if grep -qF "idField \"$IDFIELD\" of " $LOGS 2>/dev/null && grep -F "idField \"$IDFIELD\" of " $LOGS 2>/dev/null | grep -qF "id 0, NULL"; then
+      ID_LOW="yes"; echo "  [PROBLEM] the provider logged rows with id 0, NULL or a non-number for idField '$IDFIELD' (left out of responses)."
+    fi
     echo "  (log messages name the idField, not the service — another service with the same idField name could be the source)"
   else
     echo "  (server logs not readable here — run as root or the arcgis user to include them)"
@@ -422,8 +426,23 @@ if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
   #    log-based verdict (which may come from another service with the same idField name).
   case "$SMOKE" in
     ok:*)
-      ask "Check the largest '$IDFIELD' through the service? It sorts the table: instant on Lakebase/small tables, can take minutes on billion-row tables (y/N)" "n" IDCHK
+      ask "Check the smallest and largest '$IDFIELD' through the service? It sorts the table: instant on Lakebase/small tables, can take minutes on billion-row tables (y/N)" "n" IDCHK
       case "$IDCHK" in y|Y|yes|YES)
+        R=$("${CURL[@]}" --max-time 300 -G -H "Referer: $SERVER" "$SERVER/$CTX/rest/services/$SVC/FeatureServer/0/query" \
+          --data-urlencode "where=$IDFIELD <= 0 OR $IDFIELD IS NULL" --data-urlencode "returnCountOnly=true" \
+          --data-urlencode "token=$QTOKEN" --data-urlencode "f=json")
+        LOWN=$(RESP="$R" python3 -c "
+import os,json
+try: print(int(json.loads(os.environ['RESP'])['count']))
+except Exception: print('')
+" 2>/dev/null)
+        if [ -z "$LOWN" ]; then
+          echo "  [info] couldn't count ids <= 0 / NULL (timeout or token) — inconclusive."
+        elif [ "$LOWN" -gt 0 ]; then
+          ID_LOW="yes"; echo "  [PROBLEM] $LOWN row(s) have '$IDFIELD' <= 0 or NULL."
+        else
+          echo "  [ok] no '$IDFIELD' values <= 0 or NULL."
+        fi
         R=$("${CURL[@]}" --max-time 300 -G -H "Referer: $SERVER" "$SERVER/$CTX/rest/services/$SVC/FeatureServer/0/query" \
           --data-urlencode "where=1=1" --data-urlencode "outFields=$IDFIELD" --data-urlencode "orderByFields=$IDFIELD DESC" \
           --data-urlencode "resultRecordCount=1" --data-urlencode "returnGeometry=false" \
@@ -611,6 +630,13 @@ else
       echo "     own testing (drawing, selection, identify) but are outside what Esri supports — use at your own risk."
       echo "     -> For full support, publish with a unique integer column below 2,147,483,647." ;;
   esac
+  if [ "$ID_LOW" = "yes" ]; then
+    echo " * idField '$IDFIELD' has rows with id <= 0 or NULL. ArcGIS rejects a whole response containing a 0 or NULL id,"
+    echo "     so the provider leaves those rows out (they never draw); negative ids are outside Esri's OBJECTID range."
+    echo "     Ids from monotonically_increasing_id() or row_number() - 1 start at 0."
+    echo "     -> Republish with a unique integer idField >= 1 (e.g. row_number() OVER (ORDER BY ...))."
+    PROBLEMS=$((PROBLEMS+1))
+  fi
   # idField uniqueness reminder (can't verify from here)
   if [ -n "$IDFIELD" ]; then
     echo " * idField = '$IDFIELD' — verify it is a UNIQUE integer per row (ArcGIS OBJECTID)."
