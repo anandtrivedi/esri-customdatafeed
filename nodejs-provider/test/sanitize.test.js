@@ -158,6 +158,58 @@ describe("sanitize", () => {
     });
   });
 
+  describe("checkWhereClauseSafety: extra quoted-text cases (v1.2.4, from the esri-customdatafeed review)", () => {
+    const LH = { backslashEscapes: true }; // Lakehouse (Databricks SQL); default = Lakebase (Postgres)
+    const both = (w) => { expect(checkWhereClauseSafety(w)).to.equal(w); expect(checkWhereClauseSafety(w, LH)).to.equal(w); };
+    const neither = (w, re) => { expect(() => checkWhereClauseSafety(w)).to.throw(re); expect(() => checkWhereClauseSafety(w, LH)).to.throw(re); };
+
+    it("allows SQL keywords inside string literals (they're data)", () => {
+      both("contact_name = 'X (delete me)'");
+      both("note = 'select * from x'");
+      both("note = 'DROP zone; union yard'");
+      both("name = 'it''s an update'");          // doubled quote stays inside the literal
+      both("a = 'insert' OR b = 'merge into'");
+    });
+
+    it("allows ; -- /* and (SELECT inside string literals", () => {
+      both("name = 'a;b'");
+      both("c = 'a--b'");
+      both("c = '/* not a comment */'");
+      both("c = '(select)'");
+    });
+
+    it("allows keywords in quoted identifiers", () => {
+      expect(checkWhereClauseSafety('"update" = 1')).to.equal('"update" = 1');
+      expect(checkWhereClauseSafety("`select` = 1", LH)).to.equal("`select` = 1");
+    });
+
+    it("Databricks: a backslash-escaped quote keeps the rest inside the literal", () => {
+      const w = "name = 'a\\' OR 1=1; DROP TABLE t --'";  // one string literal on Databricks
+      expect(checkWhereClauseSafety(w, LH)).to.equal(w);
+      // Postgres reads 'a\' as a complete literal, so the rest is code there and must be refused.
+      expect(() => checkWhereClauseSafety(w)).to.throw();
+    });
+
+    it("still rejects keywords, ; and comments OUTSIDE literals, even right next to one", () => {
+      neither("x = 'a' UNION SELECT 1", /dangerous SQL keyword/);
+      neither("x = 'a'UNION SELECT 1", /dangerous SQL keyword/);
+      neither("x = 'a' OR 1=1; DROP TABLE t", /dangerous SQL keyword|Multiple statements/);
+      neither("x = 'a'; x = 'b'", /Multiple statements/);
+      neither("x = 'a' -- '", /comments/);
+      neither("x = 'a' /* ' */ OR 1=1", /comments/);
+      neither("x IN (SELECT y FROM t)", /dangerous SQL keyword|Subqueries/);
+      neither("x = 'a' OR exec('y') = 1", /dangerous SQL keyword/);
+    });
+
+    it("falls back to checking the whole clause when the quoting can't be followed", () => {
+      neither("x = 'delete", undefined);                          // unterminated: rejected (as "Unterminated string")
+      neither("x = r'delete'", /dangerous SQL keyword/);         // raw string
+      expect(() => checkWhereClauseSafety("x = E'drop'")).to.throw(/dangerous SQL keyword/);
+      expect(() => checkWhereClauseSafety("x = $$drop$$")).to.throw(/dangerous SQL keyword/);
+      neither("x = 'a' ) OR ( 'b' = 'b'", /Unbalanced parentheses/);
+    });
+  });
+
   describe("checkWhereClauseSafety", () => {
     it("rejects unbalanced parentheses that would close the (where) wrapper early", () => {
       expect(() => checkWhereClauseSafety("1=1) OR (1=1")).to.throw(/Unbalanced parentheses/);

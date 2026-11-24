@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (643 tests, ~11s)
+# Run all tests (649 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -136,11 +136,11 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**643 tests across 23 files:**
+**649 tests across 23 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 135 | Auth, getData routing, editData (CRUD + transactions, date columns), field extraction (nullable), connection release |
-| `sanitize.test.js` | 73 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
+| `sanitize.test.js` | 79 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
 | `lakebaseQuery.test.js` | 59 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
 | `sql.test.js` | 43 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
 | `geometryFormat.test.js` | 40 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
