@@ -118,6 +118,46 @@ describe("sanitize", () => {
     });
   });
 
+  describe("checkWhereClauseSafety: text inside quotes is data, not SQL (v1.2.4)", () => {
+    // Seen live from ArcGIS Pro: contact_name = 'PRO EDIT TEST (delete me)' was rejected as keyword "delete".
+    const ok = [
+      "contact_name = 'PRO EDIT TEST (delete me)'",
+      "remarks = 'Exit; see -- notes /* draft */'",
+      "remarks LIKE '%select from union%'",
+      "note = 'it''s a DROP zone'",                 // doubled quote stays inside the literal
+      "\"delete\" = 1",                                // quoted identifier named like a keyword
+    ];
+    for (const w of ok) {
+      it(`allows ${w}`, () => {
+        expect(checkWhereClauseSafety(w)).to.equal(w);
+        expect(checkWhereClauseSafety(w, { backslashEscapes: true })).to.equal(w);
+      });
+    }
+    it("allows a Databricks backslash-escaped quote inside a literal", () => {
+      const w = "name = 'O\\'Neil; drop'";
+      expect(checkWhereClauseSafety(w, { backslashEscapes: true })).to.equal(w);
+    });
+    it("still blocks keywords, ; and comments outside quotes", () => {
+      expect(() => checkWhereClauseSafety("name = 'x' OR 1=1; DROP TABLE t")).to.throw(/keyword detected.*DROP/);
+      expect(() => checkWhereClauseSafety("name = 'x' UNION SELECT 1")).to.throw(/keyword detected/);
+      expect(() => checkWhereClauseSafety("name = 'x' -- trailing")).to.throw(/comments/);
+      expect(() => checkWhereClauseSafety("a = 1; b = 2")).to.throw(/Multiple statements/);
+    });
+    it("on Postgres a backslash doesn't escape, so the literal ends where Postgres ends it", () => {
+      // Postgres reads 'a\' as the whole literal, so "; DROP TABLE t" is code and must be caught.
+      expect(() => checkWhereClauseSafety("name = 'a\\'; DROP TABLE t; '")).to.throw(/keyword detected.*DROP|Multiple statements/);
+    });
+    it("keeps checking the rest of the clause after a string form it can't follow", () => {
+      expect(() => checkWhereClauseSafety("name = r'x' OR 1=1; DROP TABLE t")).to.throw(/keyword detected.*DROP/);
+      expect(() => checkWhereClauseSafety("name = r'x'")).to.throw(/Raw string literals/);
+      expect(() => checkWhereClauseSafety("1=1) OR delete_flag = 1 OR (1=1")).to.throw(/Unbalanced/);
+      expect(() => checkWhereClauseSafety("1=1) UNION SELECT (1")).to.throw(/keyword detected/);
+    });
+    it("an unterminated literal is still rejected", () => {
+      expect(() => checkWhereClauseSafety("name = 'x OR 1=1")).to.throw(/Unterminated/);
+    });
+  });
+
   describe("checkWhereClauseSafety", () => {
     it("rejects unbalanced parentheses that would close the (where) wrapper early", () => {
       expect(() => checkWhereClauseSafety("1=1) OR (1=1")).to.throw(/Unbalanced parentheses/);
