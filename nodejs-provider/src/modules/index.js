@@ -4,6 +4,7 @@
  */
 
 const { translateToGeoJSON } = require("./translate");
+const { runtimeRejectsFalsyIds } = require("./runtimeIdCheck");
 const { parseMinScale } = require("./scale");
 const { buildSqlQuery } = require("./sql");
 const { generateFiltersApplied } = require("./filters");
@@ -24,6 +25,7 @@ const { CONNECTOR_RELEASE, deploymentLabel, userAgentTag, applicationName } = re
 
 module.exports = {
   translateToGeoJSON,
+  runtimeRejectsFalsyIds,
   buildSqlQuery,
   generateFiltersApplied,
   getGeometryQuery,

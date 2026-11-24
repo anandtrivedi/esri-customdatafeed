@@ -26,6 +26,7 @@ try {
 
 const {
   translateToGeoJSON,
+  runtimeRejectsFalsyIds,
   buildSqlQuery,
   generateFiltersApplied,
   getExtentFromGeoJson,
@@ -907,7 +908,7 @@ class Model {
           if (returnCountOnly) {
             geojson.count = Number(rows[0]["count(1)"]);
           } else {
-            geojson = translateToGeoJSON(rows, sourceConfig);
+            geojson = translateToGeoJSON(rows, sourceConfig, { dropFalsyIds: !isMetadataRequest && runtimeRejectsFalsyIds() });
           }
 
           // Add filtersApplied
@@ -1209,7 +1210,9 @@ class Model {
             rows.pop();
           }
 
-          geojson = translateToGeoJSON(rows, sourceConfig);
+          // Layer info keeps every row (its first feature tells the runtime which field is the id); see translate.js.
+          const isMetadataRequest = Object.keys(geoserviceParams).every((k) => NON_QUERY_PARAMS.has(k));
+          geojson = translateToGeoJSON(rows, sourceConfig, { dropFalsyIds: !isMetadataRequest && runtimeRejectsFalsyIds() });
 
           const geometryType = this.inferGeometryType(rows, sourceConfig.geometryColumn);
           // A service published read-only (editingEnabled=false) mustn't advertise editable fields or templates.

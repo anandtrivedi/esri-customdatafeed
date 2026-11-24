@@ -10,7 +10,7 @@ const warnedInvalidId = new Set();
 const warnedUnsafeId = new Set();
 const warnedDroppedId = new Set();
 
-function translateToGeoJSON(data, config) {
+function translateToGeoJSON(data, config, { dropFalsyIds = false } = {}) {
   if (!data || data.length === 0) {
     return {
       type: "FeatureCollection",
@@ -24,11 +24,14 @@ function translateToGeoJSON(data, config) {
   let features = data.map((row) =>
     formatFeature(row, columns, config.idField, config.geometryColumn, config.dbWKID, warnKey)
   );
-  // The CDF runtime (winnow transformToEsriProperties) checks `!properties[idField]` and fails the WHOLE response
-  // when any feature's id is falsy: one row with id 0 (ids from monotonically_increasing_id() or row_number() - 1
-  // start there), NULL or a non-number left a hole in every page and tile containing it. Drop those rows so the rest
-  // draws. Only when the id column is in the result (distinct values and statistics leave it out).
-  if (config.idField && columns.includes(config.idField)) {
+  // ArcGIS 12.1's CDF runtime (winnow transformToEsriProperties) checks `!properties[idField]` and fails the WHOLE
+  // response when any feature's id is falsy: one row with id 0 (ids from monotonically_increasing_id() or
+  // row_number() - 1 start there), NULL or a non-number left a hole in every page and tile containing it. The caller
+  // opts in (dropFalsyIds) only for data requests on a runtime that has that check (runtimeIdCheck.js): 12.0 serves
+  // such rows fine, and layer info must keep its one sample row — the runtime picks the layer's id field from it and
+  // falls back to a generated OBJECTID (which the table doesn't have) when it's missing. Only when the id column is in
+  // the result (distinct values and statistics leave it out).
+  if (dropFalsyIds && config.idField && columns.includes(config.idField)) {
     const kept = features.filter((f) => f.properties[config.idField]);
     if (kept.length < features.length && !warnedDroppedId.has(warnKey)) {
       warnedDroppedId.add(warnKey);
