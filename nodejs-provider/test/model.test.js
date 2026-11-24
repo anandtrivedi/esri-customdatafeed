@@ -666,6 +666,69 @@ describe("model", () => {
       ip: "127.0.0.1",
     });
 
+    describe("id 0 / NULL rows (v1.2.3)", () => {
+      // Layer info fetches ONE row and the runtime picks the layer's id field from it; dropping it made the runtime fall
+      // back to a generated OBJECTID that the table doesn't have, so every query failed (seen live in 1.2.2).
+      const id0 = () => [{ id: 0, geometry: '{"type":"Point","coordinates":[-77,38]}' }, { id: 5, geometry: '{"type":"Point","coordinates":[-76,39]}' }];
+      const lh = (query) => ({ query, params: { tableName: "catalog.schema.ids0", geometryFormat: "GEOMETRY" }, ip: "127.0.0.1" });
+      let ol; let oe;
+      beforeEach(() => { process.env.CDF_DROP_FALSY_IDS = "true"; ol = console.log; oe = console.error; console.log = () => {}; console.error = () => {}; });
+      afterEach(() => { delete process.env.CDF_DROP_FALSY_IDS; console.log = ol; console.error = oe; });
+
+      it("Lakehouse layer info keeps an id-0 sample row even when the runtime rejects falsy ids", (done) => {
+        lakehouseQueryRows = id0().slice(0, 1);
+        new Model().getData(lh({ f: "json" }), (err, result) => {
+          try {
+            expect(err).to.be.null;
+            expect(result.features.map((f) => f.properties.id)).to.deep.equal([0]);
+            expect(result.metadata.idField).to.equal("id");
+            done();
+          } catch (e) { done(e); }
+        });
+      });
+
+      it("Lakehouse data request leaves the id-0 row out when the runtime rejects falsy ids", (done) => {
+        lakehouseQueryRows = id0();
+        new Model().getData(lh({ f: "json", where: "1=1", resultRecordCount: "5" }), (err, result) => {
+          try {
+            expect(err).to.be.null;
+            expect(result.features.map((f) => f.properties.id)).to.deep.equal([5]);
+            done();
+          } catch (e) { done(e); }
+        });
+      });
+
+      it("Lakehouse data request keeps the id-0 row on a runtime that accepts it (12.0)", (done) => {
+        process.env.CDF_DROP_FALSY_IDS = "false";
+        lakehouseQueryRows = id0();
+        new Model().getData(lh({ f: "json", where: "1=1", resultRecordCount: "5" }), (err, result) => {
+          try {
+            expect(err).to.be.null;
+            expect(result.features.map((f) => f.properties.id)).to.deep.equal([0, 5]);
+            done();
+          } catch (e) { done(e); }
+        });
+      });
+
+      it("Lakebase layer info keeps the id-0 row; a data request leaves it out", (done) => {
+        lakebaseQueryResult = { rows: id0() };
+        new Model().getData(lb(), (err, meta) => {
+          try {
+            expect(err).to.be.null;
+            expect(meta.features.map((f) => f.properties.id)).to.include(0);
+          } catch (e) { return done(e); }
+          lakebaseQueryResult = { rows: id0() };
+          new Model().getData(lb({}, { f: "json", where: "1=1", resultRecordCount: "5" }), (err2, data) => {
+            try {
+              expect(err2).to.be.null;
+              expect(data.features.map((f) => f.properties.id)).to.deep.equal([5]);
+              done();
+            } catch (e) { done(e); }
+          });
+        });
+      });
+    });
+
     it("Lakehouse: a failed close() of the main query destroys the connection instead of recycling it", (done) => {
       lakehouseQueryRows = [{ id: 1, geometry: '{"type":"Point","coordinates":[-77,38]}' }];
       lakehouseCloseError = new Error("close failed");

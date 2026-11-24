@@ -189,7 +189,7 @@ describe("translate", () => {
       console.error = () => {}; console.warn = () => {};
       let fc;
       try {
-        fc = translateToGeoJSON(rows, { idField: "id", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_keep" });
+        fc = translateToGeoJSON(rows, { idField: "id", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_keep" }, { dropFalsyIds: true });
       } finally { console.error = oe; console.warn = ow; }
       // -5 is truthy, so the runtime accepts it (it only gets the 32-bit range warning); it stays.
       expect(fc.features.map((f) => f.properties.id)).to.deep.equal([1, -5, 7]);
@@ -204,11 +204,21 @@ describe("translate", () => {
       const oe = console.error; const errors = [];
       console.error = (m) => errors.push(m);
       try {
-        translateToGeoJSON(rows, { idField: "oid", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_once" });
-        translateToGeoJSON(rows, { idField: "oid", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_once" });
+        translateToGeoJSON(rows, { idField: "oid", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_once" }, { dropFalsyIds: true });
+        translateToGeoJSON(rows, { idField: "oid", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_once" }, { dropFalsyIds: true });
       } finally { console.error = oe; }
       expect(errors).to.have.lengthOf(1);
       expect(errors[0]).to.include('"oid"').and.include("t_drop_once").and.include(">= 1");
+    });
+
+    it("keeps id-0 and NULL-id rows unless the caller opts in (12.0 runtimes and layer info need them)", () => {
+      const rows = [
+        { id: "0", geom: '{"type":"Point","coordinates":[0,0]}' },
+        { id: null, geom: '{"type":"Point","coordinates":[1,1]}' },
+        { id: "2", geom: '{"type":"Point","coordinates":[2,2]}' },
+      ];
+      const fc = translateToGeoJSON(rows, { idField: "id", geometryColumn: "geom", dbWKID: 4326, tableName: "t_keep_default" });
+      expect(fc.features.map((f) => f.properties.id)).to.deep.equal([0, 0, 2]);
     });
 
     it("leaves rows alone when the idField isn't in the result (e.g. distinct values or statistics)", () => {

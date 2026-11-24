@@ -658,8 +658,8 @@ try:
     if lo is None and nulls: print('low', 'NULL', 'NULL', nulls); sys.exit()
     lo,hi=int(lo),int(hi)
 except (Exception, SystemExit): print('?'); sys.exit()
-# 'low' wins over 'over32': rows with id <= 0 or NULL don't draw at all (the CDF runtime rejects a response
-# containing a 0 or NULL id, so the provider leaves them out).
+# 'low' wins over 'over32': on ArcGIS 12.1 rows with id 0 or NULL don't draw at all (that runtime rejects a response
+# containing one, so the provider leaves them out); negative ids are outside Esri's range everywhere.
 cls='over53' if max(abs(lo),abs(hi))>9007199254740991 else 'low' if lo<=0 or nulls else 'over32' if hi>2147483647 else 'ok'
 print(cls, lo, hi, nulls)
 " 2>/dev/null)
@@ -670,8 +670,8 @@ print(cls, lo, hi, nulls)
       echo "      exactly: neighbouring ids merge, so selection, identify and edits hit the wrong features (drawing still"
       echo "      works). Strongly consider a unique integer column below 2,147,483,647. Continuing — your call." ;;
     low)
-      echo "   !! '$ID_FIELD' ranges $2..$3 with $4 NULL(s). Rows with an id of 0 or NULL won't draw: ArcGIS rejects a whole"
-      echo "      response containing one, so the provider leaves them out (negative ids are outside Esri's range too)."
+      echo "   !! '$ID_FIELD' ranges $2..$3 with $4 NULL(s). On ArcGIS 12.1, rows with an id of 0 or NULL won't draw: its runtime"
+      echo "      rejects a whole response containing one, so the provider leaves them out. Negative ids are outside Esri's range."
       echo "      Ids from monotonically_increasing_id() or row_number() - 1 start at 0 — use a unique integer >= 1."
       echo "      Continuing — your call." ;;
     over32)

@@ -416,7 +416,7 @@ if [ "$FOUND" = "yes" ] && [ -n "$IDFIELD" ]; then
       echo "  (no id-range messages for '$IDFIELD' in the recent server logs)"
     fi
     if grep -qF "idField \"$IDFIELD\" of " $LOGS 2>/dev/null && grep -F "idField \"$IDFIELD\" of " $LOGS 2>/dev/null | grep -qF "id 0, NULL"; then
-      ID_LOW="yes"; echo "  [PROBLEM] the provider logged rows with id 0, NULL or a non-number for idField '$IDFIELD' (left out of responses)."
+      ID_LOW="yes"; echo "  [PROBLEM] the provider logged rows with id 0, NULL or a non-number for idField '$IDFIELD' (left out of responses on ArcGIS 12.1)."
     fi
     echo "  (log messages name the idField, not the service — another service with the same idField name could be the source)"
   else
@@ -631,8 +631,8 @@ else
       echo "     -> For full support, publish with a unique integer column below 2,147,483,647." ;;
   esac
   if [ "$ID_LOW" = "yes" ]; then
-    echo " * idField '$IDFIELD' has rows with id <= 0 or NULL. ArcGIS rejects a whole response containing a 0 or NULL id,"
-    echo "     so the provider leaves those rows out (they never draw); negative ids are outside Esri's OBJECTID range."
+    echo " * idField '$IDFIELD' has rows with id <= 0 or NULL. ArcGIS 12.1 rejects a whole response containing a 0 or NULL"
+    echo "     id, so on 12.1 the provider leaves those rows out (they never draw); negative ids are outside Esri's range."
     echo "     Ids from monotonically_increasing_id() or row_number() - 1 start at 0."
     echo "     -> Republish with a unique integer idField >= 1 (e.g. row_number() OVER (ORDER BY ...))."
     PROBLEMS=$((PROBLEMS+1))

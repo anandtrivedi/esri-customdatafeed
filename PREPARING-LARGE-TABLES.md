@@ -11,7 +11,7 @@ Lessons from serving 28 billion AIS position reports (10 years) through one ArcG
 **What to publish**
 - **Pre-aggregate for small scales.** Serve H3 hex tables when zoomed out, and raw points only when zoomed in.
 - **Precompute "latest per entity" as its own table.** The provider serves rows; it can't pick the newest row per vessel or asset.
-- **Keep the `idField` in Esri's range where you can.** OBJECTIDs are 32-bit, from 1 to 2,147,483,647: rows with id 0 or NULL are left out (see [Known Limitations](README.md#known-limitations)), and `monotonically_increasing_id()` starts at 0. Larger ids (needed past ~2 billion rows) worked in our testing but are outside Esri's range, so use them at your own risk; the ArcGIS runtime also logs an `Invalid ID value` warning per feature. Above 9,007,199,254,740,991 (2^53 − 1) the provider refuses edits and lookups for those ids (see [Known Limitations](README.md#known-limitations)).
+- **Keep the `idField` in Esri's range where you can.** OBJECTIDs are 32-bit, from 1 to 2,147,483,647: rows with id 0 or NULL are left out on ArcGIS 12.1 (see [Known Limitations](README.md#known-limitations)), and `monotonically_increasing_id()` starts at 0. Larger ids (needed past ~2 billion rows) worked in our testing but are outside Esri's range, so use them at your own risk; the ArcGIS runtime also logs an `Invalid ID value` warning per feature. Above 9,007,199,254,740,991 (2^53 − 1) the provider refuses edits and lookups for those ids (see [Known Limitations](README.md#known-limitations)).
 
 **Service settings**
 - **Set a `timeColumn` on anything with history.** Without it Map Viewer shows no time slider and every tile scans all of history: about 10 s per tile over 10 years, versus about 1 s for one day.
