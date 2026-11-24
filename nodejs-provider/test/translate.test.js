@@ -172,6 +172,61 @@ describe("translate", () => {
       expect(fc.features).to.have.lengthOf(2);
       expect(fc.features[1].geometry.coordinates).to.deep.equal([1, 1]);
     });
+
+    // The CDF runtime (winnow transformToEsriProperties) checks `!properties[idField]` and fails the WHOLE response
+    // when any feature's id is falsy, so one id-0 row blanked every page and tile that contained it.
+    it("drops features whose id the runtime would reject (0, NULL, non-numeric) and keeps the rest", () => {
+      const rows = [
+        { id: "0", geom: '{"type":"Point","coordinates":[0,0]}' },
+        { id: "1", geom: '{"type":"Point","coordinates":[1,1]}' },
+        { id: null, geom: '{"type":"Point","coordinates":[2,2]}' },
+        { id: "abc", geom: '{"type":"Point","coordinates":[3,3]}' },
+        { id: "", geom: '{"type":"Point","coordinates":[4,4]}' },
+        { id: "-5", geom: '{"type":"Point","coordinates":[5,5]}' },
+        { id: "7", geom: '{"type":"Point","coordinates":[7,7]}' },
+      ];
+      const oe = console.error; const ow = console.warn;
+      console.error = () => {}; console.warn = () => {};
+      let fc;
+      try {
+        fc = translateToGeoJSON(rows, { idField: "id", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_keep" });
+      } finally { console.error = oe; console.warn = ow; }
+      // -5 is truthy, so the runtime accepts it (it only gets the 32-bit range warning); it stays.
+      expect(fc.features.map((f) => f.properties.id)).to.deep.equal([1, -5, 7]);
+    });
+
+    it("logs ONE error per table+field for dropped ids, naming the field and the fix", () => {
+      const rows = [
+        { oid: "0", geom: '{"type":"Point","coordinates":[0,0]}' },
+        { oid: null, geom: '{"type":"Point","coordinates":[1,1]}' },
+        { oid: "2", geom: '{"type":"Point","coordinates":[2,2]}' },
+      ];
+      const oe = console.error; const errors = [];
+      console.error = (m) => errors.push(m);
+      try {
+        translateToGeoJSON(rows, { idField: "oid", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_once" });
+        translateToGeoJSON(rows, { idField: "oid", geometryColumn: "geom", dbWKID: 4326, tableName: "t_drop_once" });
+      } finally { console.error = oe; }
+      expect(errors).to.have.lengthOf(1);
+      expect(errors[0]).to.include('"oid"').and.include("t_drop_once").and.include(">= 1");
+    });
+
+    it("leaves rows alone when the idField isn't in the result (e.g. distinct values or statistics)", () => {
+      const rows = [{ category: "a", n: "0" }, { category: "b", n: "3" }];
+      const fc = translateToGeoJSON(rows, { idField: "id", geometryColumn: "geom", dbWKID: 4326, tableName: "t_noid" });
+      expect(fc.features).to.have.lengthOf(2);
+    });
+
+    it("the 32-bit range warning names 1 as the lowest valid id", () => {
+      const ow = console.warn; const warns = [];
+      console.warn = (m) => warns.push(m);
+      try {
+        translateToGeoJSON([{ id: "-3", geom: '{"type":"Point","coordinates":[0,0]}' }],
+          { idField: "id", geometryColumn: "geom", dbWKID: 4326, tableName: "t_range_text" });
+      } finally { console.warn = ow; }
+      expect(warns).to.have.lengthOf(1);
+      expect(warns[0]).to.include("1..2147483647");
+    });
   });
 });
 

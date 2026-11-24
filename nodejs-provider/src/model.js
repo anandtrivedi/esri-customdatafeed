@@ -111,6 +111,13 @@ const config = {
 /**
  * returnIdsOnly / returnDistinctValues matched more rows than the ceiling: a 400 the client can act on.
  */
+// Client IP for audit logs. For service-level applyEdits (Map Viewer, ArcGIS Pro) the CDF runtime passes a copy of
+// the request, and reading req.ip / req.connection on it throws "TypeError: Illegal invocation" (seen live: every
+// Map Viewer edit failed with 401 "Illegal invocation"). Never let the audit lookup fail the request.
+function clientIp(req) {
+  try { return req.ip || req.connection?.remoteAddress || 'unknown'; } catch { return 'unknown'; }
+}
+
 function tooManyRowsError(distinct, ceiling) {
   const err = new Error(
     (distinct
@@ -316,13 +323,17 @@ class Model {
     try {
       const enableUserAuth = process.env.ENABLE_USER_AUTH === 'true';
       const enableSimpleAuth = process.env.ENABLE_SIMPLE_AUTH === 'true';
-      const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
 
       // If no authentication is enabled, allow all requests
       if (!enableUserAuth && !enableSimpleAuth) {
         if (typeof callback === 'function') return callback(null, true);
         return;
       }
+
+      // Read lazily and defensively: for service-level applyEdits (Map Viewer, ArcGIS Pro) the CDF runtime hands
+      // authorize() a copy of the request, and touching req.ip / req.connection on that copy throws
+      // "TypeError: Illegal invocation", which the runtime reports as a 401 on every edit.
+      const ipAddress = clientIp(req);
 
       // Simple token authentication (for development/testing)
       if (enableSimpleAuth) {
@@ -953,7 +964,7 @@ class Model {
 
           // Log query to audit log
           const username = req._user?.username || 'anonymous';
-          const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+          const ipAddress = clientIp(req);
           auditLogger.logQuery(username, sourceConfig.tableName, geoserviceParams, recordCount, ipAddress);
 
           respond(null, geojson);
@@ -1425,7 +1436,7 @@ class Model {
 
         // Log edit to audit
         const username = req._user?.username || 'anonymous';
-        const ipAddress = req.ip || req.connection?.remoteAddress || 'unknown';
+        const ipAddress = clientIp(req);
         auditLogger.log('EDIT', {
           username,
           table: `${schema}.${table}`,

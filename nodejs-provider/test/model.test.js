@@ -181,6 +181,26 @@ describe("model", () => {
       delete process.env.SIMPLE_AUTH_TOKEN;
     });
 
+    // Service-level applyEdits (Map Viewer, ArcGIS Pro): the CDF runtime passes a copied request whose
+    // ip / connection getters throw "TypeError: Illegal invocation". That must not fail authorize().
+    it("should not fail when reading the client IP throws (copied request, v1.2.2)", async () => {
+      const copiedReq = (extra) => Object.defineProperties({ headers: {}, ...extra }, {
+        ip: { get() { throw new TypeError("Illegal invocation"); } },
+        connection: { get() { throw new TypeError("Illegal invocation"); } },
+      });
+      const model = new Model();
+      await model.authorize(copiedReq());
+
+      process.env.ENABLE_SIMPLE_AUTH = "true";
+      process.env.SIMPLE_AUTH_TOKEN = "secret123";
+      try {
+        await model.authorize(copiedReq({ headers: { authorization: "Bearer secret123" } }));
+      } finally {
+        process.env.ENABLE_SIMPLE_AUTH = "false";
+        delete process.env.SIMPLE_AUTH_TOKEN;
+      }
+    });
+
     it("should allow authenticated ArcGIS user when user auth is enabled", async () => {
       process.env.ENABLE_USER_AUTH = "true";
 

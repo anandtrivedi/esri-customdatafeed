@@ -20,7 +20,7 @@
       {
         "key": "idField",
         "label": "3. Common - ID Field",
-        "description": "Unique integer column, e.g. objectid. Esri max 2147483647; larger at your own risk."
+        "description": "Unique integer >= 1, e.g. objectid (0/NULL ids don't draw). Esri max 2147483647."
       },
       {
         "key": "srid",
