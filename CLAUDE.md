@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (625 tests, ~11s)
+# Run all tests (633 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -136,15 +136,15 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**625 tests across 23 files:**
+**633 tests across 23 files:**
 | File | Count | Tests |
 |------|-------|-------|
-| `model.test.js` | 130 | Auth, getData routing, editData (CRUD + transactions), field extraction, connection release |
-| `sanitize.test.js` | 61 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
-| `lakebaseQuery.test.js` | 54 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
-| `sql.test.js` | 42 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
-| `geometryFormat.test.js` | 39 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
-| `editSql.test.js` | 33 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization |
+| `model.test.js` | 135 | Auth, getData routing, editData (CRUD + transactions, date columns), field extraction (nullable), connection release |
+| `sanitize.test.js` | 63 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
+| `lakebaseQuery.test.js` | 59 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
+| `sql.test.js` | 43 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
+| `geometryFormat.test.js` | 40 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
+| `editSql.test.js` | 38 | INSERT/UPDATE/DELETE SQL, geometry conversion, parameterization, epoch-ms dates → timestamps |
 | `geometry.test.js` | 27 | Spatial relations, DE-9IM, Esri format conversion, CRS handling |
 | `workspaceResolver.test.js` | 45 | `.databrickscfg` and `.env` [PROFILE] resolution → workspace + auth config |
 | `translate.test.js` | 23 | Row→GeoJSON, invalid geometry handling, ID casting, opt-in drop of 0/NULL ids, antimeridian |
@@ -154,11 +154,11 @@ Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `la
 | `filters.test.js` | 15 | filtersApplied flags, distinct bypass, combined filters |
 | `clientGone.test.js` | 8 | Client-abort cancel, tile timeout, single-response guarantee |
 | `esriGeometry.test.js` | 9 | Esri geometry → GeoJSON conversion |
-| `timeExtent.test.js` | 9 | Time extent cache, parallel extents, background continuation |
+| `timeExtent.test.js` | 11 | Time extent cache, parallel extents, background continuation |
 | `version.test.js` | 10 | Provider version reporting |
 | `connectionPool.test.js` | 22 | Databricks SQL pool sizing, idle cleanup, wait queue, creation cap, warm-up serves waiters, sql-scoped SP auth, 403 cause from REST (single-flight) |
 | `scale.test.js` | 4 | minScale parameter parsing/advertising |
-| `lakebaseCredentials.test.js` | 26 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user, postgres scope |
+| `lakebaseCredentials.test.js` | 31 | Provisioned vs Autoscaling minting, pagination, caching, fallbacks, endpoint override, pg user, postgres scope |
 | `oauthToken.test.js` | 7 | SP token per scope, cache/refresh/single-flight, invalid_scope fallback, no retry on access_denied |
 | `lakebasePool.test.js` | 2 | Pool keying basics |
 | `cdconfig.test.js` | 1 | Publish-form line length (Server Manager renders each parameter on one nowrap line) |
@@ -279,6 +279,7 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 - **Lakebase identifiers are lowercased** (`model.js` Lakebase paths + `getMetadata`): SQL uses unquoted identifiers, which Postgres folds to lowercase, so result rows are keyed lowercase. An idField configured as `OBJECTID` used to break reads, adds (`objectId: NaN`) and deletes ("not found").
 - **`editingEnabled=false` is enforced** in `editData` (400) and read-only services advertise no templates/editable fields. cdconfig's provider-level `editingEnabled: true` otherwise turns editing on for every service. Unset stays editable (older services).
 - **WHERE parentheses must balance** (`sanitize.js`, outside quoted spans): `1=1) OR (1=1` would close the `(where)` wrapper and drop the ANDed filters. Backslash escapes count only on the Lakehouse path (`backslashEscapes: true`); Postgres treats `\` as a literal. String forms the scanner can't follow are rejected: Databricks raw strings `r'…'`, Postgres `E'…'` and `$$…$$`/`$tag$`, and an unterminated quote (verified live: `r'\' = r'\' ) OR (1=1 AND b = r'\'` returned 10 of 10 rows with `AND id < 0` appended).
+- **Lakebase edits from ArcGIS Pro (v1.2.4)** (`editSql.js` `toPgValue`, `model.js` `lakebaseDateColumns` + `extractFields`): Esri clients send dates as epoch ms, and Pro sends a value for every field. A bare number into a `timestamptz` parameter fails ("time zone displacement out of range"), so editData looks up the table's date/timestamp columns (information_schema, cached 10 min; a failed lookup leaves edits unchanged) and converts numeric values for them to ISO timestamps. Fields without a `nullable` flag were reported as required, so Pro filled an empty date with 1899-12-30 (-2209161600000); non-id fields are now `nullable: true`. Seen live 2026-11-24 with Pro 3.8 on 34.x `contacts_of_interest`. Map Viewer never hit it (its form leaves unset fields out).
 - **Lakebase hardening**: one response per request (`respond` guard, as Lakehouse), `SET statement_timeout` on each new client (not the startup parameter, which poolers can reject), REST socket timeouts, token refresh doesn't await the old pool's `end()`, Esri Web Mercator codes (102100/102113/900913) mapped to 3857 before `ST_Transform`, and the filter geometry's own SR (or the Mercator heuristic) used when there is no `inSR`.
 - **`resultRecordCount` is capped** to `maxRecordCountPerPage` (default 2000) in both Lakehouse and Lakebase paths. Users cannot request unbounded result sets.
 - **Lakebase SSL**: `LAKEBASE_SSL_VERIFY` defaults to `false` (accepts any cert). The Databricks API helper also skips cert verification (`rejectUnauthorized: false`). Fine for Databricks-issued certs, but be aware in custom PKI environments.
