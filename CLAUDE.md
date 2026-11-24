@@ -14,7 +14,7 @@ Two backends: **Lakehouse** (Databricks SQL Warehouse, read-only, large-scale) a
 # Install dependencies
 cd nodejs-provider && npm install
 
-# Run all tests (633 tests, ~11s)
+# Run all tests (649 tests, ~11s)
 cd nodejs-provider && npm test
 
 # Run a single test file
@@ -136,11 +136,11 @@ Each format wraps differently:
 
 Tests use mocha + chai + proxyquire. **proxyquire stubs `connectionPool` and `lakebasePool`** so tests never make real database connections.
 
-**633 tests across 23 files:**
+**649 tests across 23 files:**
 | File | Count | Tests |
 |------|-------|-------|
 | `model.test.js` | 135 | Auth, getData routing, editData (CRUD + transactions, date columns), field extraction (nullable), connection release |
-| `sanitize.test.js` | 63 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
+| `sanitize.test.js` | 79 | Field/identifier validation, SQL escaping, WHERE safety, injection vectors |
 | `lakebaseQuery.test.js` | 59 | PostGIS SQL building, parameterized queries, spatial predicates, CRS transform |
 | `sql.test.js` | 43 | Databricks SQL building, pagination, filtering, injection protection, returnIds ceiling SQL |
 | `geometryFormat.test.js` | 40 | Format detection, WKT/WKB/GeoJSON/GEOMETRY expressions |
@@ -280,6 +280,7 @@ Defined in `cdconfig.json` (16 parameters, including optional `minScale`). When 
 - **`editingEnabled=false` is enforced** in `editData` (400) and read-only services advertise no templates/editable fields. cdconfig's provider-level `editingEnabled: true` otherwise turns editing on for every service. Unset stays editable (older services).
 - **WHERE parentheses must balance** (`sanitize.js`, outside quoted spans): `1=1) OR (1=1` would close the `(where)` wrapper and drop the ANDed filters. Backslash escapes count only on the Lakehouse path (`backslashEscapes: true`); Postgres treats `\` as a literal. String forms the scanner can't follow are rejected: Databricks raw strings `r'…'`, Postgres `E'…'` and `$$…$$`/`$tag$`, and an unterminated quote (verified live: `r'\' = r'\' ) OR (1=1 AND b = r'\'` returned 10 of 10 rows with `AND id < 0` appended).
 - **Lakebase edits from ArcGIS Pro (v1.2.4)** (`editSql.js` `toPgValue`, `model.js` `lakebaseDateColumns` + `extractFields`): Esri clients send dates as epoch ms, and Pro sends a value for every field. A bare number into a `timestamptz` parameter fails ("time zone displacement out of range"), so editData looks up the table's date/timestamp columns (information_schema, cached 10 min; a failed lookup leaves edits unchanged) and converts numeric values for them to ISO timestamps. Fields without a `nullable` flag were reported as required, so Pro filled an empty date with 1899-12-30 (-2209161600000); non-id fields are now `nullable: true`. Seen live 2026-11-24 with Pro 3.8 on 34.x `contacts_of_interest`. Map Viewer never hit it (its form leaves unset fields out).
+- **WHERE safety ignores quoted text (v1.2.4)** (`sanitize.js` `checkWhereClauseSafety`): the keyword, subquery, `;` and comment checks run on the clause with string literals and quoted identifiers blanked out, using the same quote scanner as the parenthesis check (backslash escapes only on Databricks, never Postgres). Before, `contact_name = 'X (delete me)'` was rejected as keyword "delete". When the scan stops early (r'...', E'...', $$, a closing `)` past the wrapper), the rest counts as code.
 - **Lakebase hardening**: one response per request (`respond` guard, as Lakehouse), `SET statement_timeout` on each new client (not the startup parameter, which poolers can reject), REST socket timeouts, token refresh doesn't await the old pool's `end()`, Esri Web Mercator codes (102100/102113/900913) mapped to 3857 before `ST_Transform`, and the filter geometry's own SR (or the Mercator heuristic) used when there is no `inSR`.
 - **`resultRecordCount` is capped** to `maxRecordCountPerPage` (default 2000) in both Lakehouse and Lakebase paths. Users cannot request unbounded result sets.
 - **Lakebase SSL**: `LAKEBASE_SSL_VERIFY` defaults to `false` (accepts any cert). The Databricks API helper also skips cert verification (`rejectUnauthorized: false`). Fine for Databricks-issued certs, but be aware in custom PKI environments.
