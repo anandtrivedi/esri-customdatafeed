@@ -63,6 +63,25 @@ function wrapLongitudes(geojson, srid) {
 }
 
 /**
+ * Esri clients send date fields as epoch milliseconds (ArcGIS Pro sends a value for every field). Postgres can't
+ * read a bare number as a date/timestamp ("time zone displacement out of range"), so for the table's date and
+ * timestamp columns a numeric value (or numeric string) becomes an ISO-8601 timestamp. Anything else, including
+ * null and ISO strings, is passed through unchanged.
+ *
+ * @param {string} col - Column name
+ * @param {*} val - Attribute value from the client
+ * @param {Set<string>} dateColumns - Lowercase names of the table's date/timestamp columns
+ */
+function toPgValue(col, val, dateColumns) {
+  if (val === null || val === undefined || !dateColumns || !dateColumns.has(String(col).toLowerCase())) return val;
+  const n = typeof val === 'number' ? val
+    : (typeof val === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(val) ? Number(val) : NaN);
+  if (!Number.isFinite(n)) return val;
+  const d = new Date(n);
+  return Number.isNaN(d.getTime()) ? val : d.toISOString();
+}
+
+/**
  * Build a parameterized INSERT statement.
  *
  * @param {string} schema - PostgreSQL schema name
@@ -72,9 +91,10 @@ function wrapLongitudes(geojson, srid) {
  * @param {string} geometryColumn - Name of the geometry column
  * @param {string} idField - Name of the ID column (returned via RETURNING)
  * @param {number} [srid=4326] - SRID for geometry
+ * @param {Set<string>} [dateColumns] - Lowercase date/timestamp column names (epoch-ms values are converted)
  * @returns {{ sql: string, params: any[] }}
  */
-function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idField, srid = 4326) {
+function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idField, srid = 4326, dateColumns = new Set()) {
   validateIdentifier(schema);
   validateIdentifier(table);
   validateIdentifier(geometryColumn);
@@ -92,7 +112,7 @@ function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idF
       validateIdentifier(col);
       columns.push(col);
       placeholders.push(`$${paramIndex}`);
-      params.push(val);
+      params.push(toPgValue(col, val, dateColumns));
       paramIndex++;
     }
   }
@@ -126,9 +146,10 @@ function buildInsertSql(schema, table, attributes, geometry, geometryColumn, idF
  * @param {string} geometryColumn - Name of the geometry column
  * @param {string} idField - Name of the ID column
  * @param {number} [srid=4326] - SRID for geometry
+ * @param {Set<string>} [dateColumns] - Lowercase date/timestamp column names (epoch-ms values are converted)
  * @returns {{ sql: string, params: any[] }}
  */
-function buildUpdateSql(schema, table, attributes, geometry, geometryColumn, idField, srid = 4326) {
+function buildUpdateSql(schema, table, attributes, geometry, geometryColumn, idField, srid = 4326, dateColumns = new Set()) {
   validateIdentifier(schema);
   validateIdentifier(table);
   validateIdentifier(geometryColumn);
@@ -149,7 +170,7 @@ function buildUpdateSql(schema, table, attributes, geometry, geometryColumn, idF
     if (col === idField) continue;
     validateIdentifier(col);
     setClauses.push(`${col} = $${paramIndex}`);
-    params.push(val);
+    params.push(toPgValue(col, val, dateColumns));
     paramIndex++;
   }
 
@@ -200,6 +221,7 @@ function buildDeleteSql(schema, table, idField, objectIds) {
 }
 
 module.exports = {
+  toPgValue,
   buildInsertSql,
   buildUpdateSql,
   buildDeleteSql,

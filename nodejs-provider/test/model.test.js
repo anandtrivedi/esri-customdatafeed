@@ -49,7 +49,14 @@ const workspaceResolverStub = {
 // Set to an object for a single result, or an array for a queue of results
 let lakebaseQueryResult = { rows: [] };
 let lakebaseQueryLog = [];
+// editData's date-column lookup (information_schema) gets its own answer so it doesn't shift the queued results above.
+let lakebaseDateColumnRows = [];
+let lakebaseDateColumnLookups = 0;
 const queryFn = async (sql, params) => {
+  if (/information_schema\.columns/.test(sql)) {
+    lakebaseDateColumnLookups++;
+    return { rows: lakebaseDateColumnRows, rowCount: lakebaseDateColumnRows.length };
+  }
   lakebaseQueryLog.push({ sql, params });
   let raw;
   if (Array.isArray(lakebaseQueryResult)) {
@@ -102,6 +109,9 @@ describe("model", () => {
   beforeEach(() => {
     lakebaseQueryResult = { rows: [] };
     lakebaseQueryLog = [];
+    lakebaseDateColumnRows = [];
+    lakebaseDateColumnLookups = 0;
+    Model._dateColumnsCache.clear();
     lakehouseQueryRows = [];
     lakehouseExecuteError = null;
     lakehouseReleaseLog = [];
@@ -384,6 +394,14 @@ describe("model", () => {
       expect(idField.editable).to.be.false; // ID never editable
       expect(nameField.editable).to.be.true;
       expect(heightField.editable).to.be.true;
+    });
+
+    it("marks only the id field as required (nullable: false), v1.2.4", () => {
+      const rows = [{ OBJECTID: 1, name: "Test", seen: new Date(0), geometry: "{}" }];
+      const fields = model.extractFields(rows, "geometry", "OBJECTID", true);
+      expect(fields.find((f) => f.name === "OBJECTID").nullable).to.be.false;
+      expect(fields.find((f) => f.name === "name").nullable).to.be.true;
+      expect(fields.find((f) => f.name === "seen").nullable).to.be.true;
     });
 
     it("should include alias matching field name", () => {
@@ -1199,6 +1217,63 @@ describe("model", () => {
   });
 
   describe("editData", () => {
+    // ArcGIS Pro sends every date field as epoch ms; Postgres rejects a bare number for timestamptz
+    // ("time zone displacement out of range"), seen live with Pro 3.8 on contacts_of_interest.
+    describe("date columns (v1.2.4)", () => {
+      const req = () => ({
+        params: { lakebaseHost: "lb.example.com", lakebaseDatabase: "db", lakebaseTable: "contacts",
+          lakebaseSchema: "ais", geometryColumn: "geom", idField: "objectid" },
+        ip: "127.0.0.1",
+      });
+
+      it("converts epoch-ms dates to ISO timestamps on add and update", async () => {
+        lakebaseDateColumnRows = [{ column_name: "reported_at" }];
+        lakebaseQueryResult = [{ rows: [{ objectid: "7" }] }, { rows: [], rowCount: 1 }];
+        const r = await new Model().editData(req(), {
+          adds: [{ attributes: { contact_name: "X", REPORTED_AT: 1720051200000 }, geometry: { x: 0, y: 0 } }],
+          updates: [{ attributes: { objectid: 7, reported_at: "1720137600000", remarks: "1720137600000" } }],
+        });
+        expect(r.addResults[0].success).to.be.true;
+        expect(r.updateResults[0].success).to.be.true;
+        expect(lakebaseQueryLog[0].params).to.include("2024-07-04T00:00:00.000Z");
+        expect(lakebaseQueryLog[0].params).to.include("X");
+        expect(lakebaseQueryLog[1].params).to.include("2024-07-05T00:00:00.000Z");
+        expect(lakebaseQueryLog[1].params).to.include("1720137600000"); // not a date column: left alone
+      });
+
+      it("leaves null, ISO strings and non-date columns unchanged", async () => {
+        lakebaseDateColumnRows = [{ column_name: "reported_at" }];
+        lakebaseQueryResult = { rows: [{ objectid: "8" }] };
+        await new Model().editData(req(), {
+          adds: [{ attributes: { reported_at: null, mmsi: 538007123 }, geometry: { x: 0, y: 0 } }],
+        });
+        expect(lakebaseQueryLog[0].params.slice(0, 2)).to.deep.equal([null, 538007123]);
+        lakebaseQueryLog = [];
+        await new Model().editData(req(), {
+          adds: [{ attributes: { reported_at: "2024-07-04T12:00:00Z" }, geometry: { x: 0, y: 0 } }],
+        });
+        expect(lakebaseQueryLog[0].params[0]).to.equal("2024-07-04T12:00:00Z");
+      });
+
+      it("looks the columns up once per table, then uses the cache", async () => {
+        lakebaseDateColumnRows = [{ column_name: "reported_at" }];
+        lakebaseQueryResult = { rows: [{ objectid: "9" }] };
+        await new Model().editData(req(), { adds: [{ attributes: { reported_at: 0 }, geometry: { x: 0, y: 0 } }] });
+        await new Model().editData(req(), { adds: [{ attributes: { reported_at: 0 }, geometry: { x: 0, y: 0 } }] });
+        expect(lakebaseDateColumnLookups).to.equal(1);
+        expect(lakebaseQueryLog[1].params[0]).to.equal("1970-01-01T00:00:00.000Z");
+      });
+
+      it("a failed column lookup doesn't fail the edit (dates are passed as sent)", async () => {
+        lakebaseQueryResult = { rows: [{ objectid: "10" }] };
+        // A rows value that throws when read stands in for a lookup error (e.g. no access to information_schema).
+        lakebaseDateColumnRows = { map: () => { throw new Error("permission denied"); }, length: 0 };
+        const r = await new Model().editData(req(), { adds: [{ attributes: { reported_at: 5 }, geometry: { x: 0, y: 0 } }] });
+        expect(r.addResults[0].success).to.be.true;
+        expect(lakebaseQueryLog[0].params[0]).to.equal(5);
+      });
+    });
+
     it("should process adds and return objectIds", async () => {
       lakebaseQueryResult = { rows: [{ id: 100 }] };
 

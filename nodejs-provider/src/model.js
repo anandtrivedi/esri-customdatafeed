@@ -267,6 +267,32 @@ const extentCache = new Map();    // key -> { extent: object|null, at: ms, ttl: 
 const extentInFlight = new Map(); // key -> Promise<{ extent, unknown }> — in-flight compute, de-dupes concurrent callers
 const warnedNoTimeColumn = new Set(); // tables already warned about having no timeColumn (once per process)
 const warnedWorldExtent = new Set(); // tables already warned about advertising the world-extent fallback
+// Lakebase date/timestamp columns per table, so edits can turn Esri epoch-ms dates into timestamps (see editSql.js).
+const DATE_COLUMNS_TTL_MS = 10 * 60 * 1000;
+const dateColumnsCache = new Map(); // `${host}|${database}|${schema}.${table}` -> { cols: Set<string>, at: ms }
+
+/**
+ * Lowercase names of a Lakebase table's date and timestamp columns, cached for 10 minutes. A failed lookup (for example
+ * no access to information_schema) logs a warning and returns an empty set, so edits behave as before.
+ */
+async function lakebaseDateColumns(pool, lakebaseConfig, schema, table, logger) {
+  const key = `${lakebaseConfig.host}|${lakebaseConfig.database}|${schema}.${table}`.toLowerCase();
+  const hit = dateColumnsCache.get(key);
+  if (hit && Date.now() - hit.at < DATE_COLUMNS_TTL_MS) return hit.cols;
+  try {
+    const r = await pool.query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+          AND data_type IN ('date', 'timestamp without time zone', 'timestamp with time zone')`,
+      [schema.toLowerCase(), table.toLowerCase()]);
+    const cols = new Set((r.rows || []).map((row) => String(row.column_name).toLowerCase()));
+    dateColumnsCache.set(key, { cols, at: Date.now() });
+    return cols;
+  } catch (error) {
+    logger?.warn?.(`Could not read date columns of ${schema}.${table} (dates in edits are passed as sent): ${error.message}`);
+    return new Set();
+  }
+}
 // Request parameters that say nothing about which features to return: output format, auth, JSONP, cache-busters, and
 // the layer-info-only returnUpdates (refresh extent/time) and returnAdvancedSymbols. The runtime gives getData the same
 // params for layer info and /query, so a /query carrying only these is answered as metadata (as bare ?f=json always was).
@@ -1059,7 +1085,10 @@ class Model {
           name: key,
           type: this.inferFieldType(firstRow[key]),
           alias: key,
-          editable: isEditable && key !== idField
+          editable: isEditable && key !== idField,
+          // Unset, the runtime reports every field as required (nullable: false), and ArcGIS Pro then fills an empty
+          // date with 1899-12-30 and an empty number with 0 on insert. Only the id is required.
+          nullable: key !== idField
         });
       }
     }
@@ -1307,6 +1336,7 @@ class Model {
       };
 
       const pool = await getLakebasePool(lakebaseConfig);
+      const dateColumns = await lakebaseDateColumns(pool, lakebaseConfig, schema, table, this.logger);
 
       const adds = data.adds || [];
       const updates = data.updates || [];
@@ -1337,7 +1367,7 @@ class Model {
           try {
             const attributes = lowerKeys(feature.attributes || feature.properties);
             const geometry = feature.geometry || null;
-            const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+            const { sql, params } = buildInsertSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid, dateColumns);
             const result = await query(sql, params);
             const newId = result.rows[0] && result.rows[0][rawIdField];
             if (newId === undefined || newId === null) throw new Error(`INSERT returned no ${rawIdField}`);
@@ -1369,7 +1399,7 @@ class Model {
               updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: unsafeIdMessage(rawIdField, oid) } });
               continue;
             }
-            const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid);
+            const { sql, params } = buildUpdateSql(schema, table, attributes, geometry, rawGeometryColumn, rawIdField, srid, dateColumns);
             const result = await query(sql, params);
             if (result.rowCount === 0) {
               updateResults.push({ objectId: oid, success: false, error: { code: 1019, description: `Feature with ${rawIdField}=${oid} not found` } });
@@ -1521,4 +1551,5 @@ class Model {
 
 module.exports = Model;
 module.exports._extentCache = extentCache; // tests reset it between cases
+module.exports._dateColumnsCache = dateColumnsCache; // tests reset it between cases
 module.exports._config = config; // tests check the env parsing

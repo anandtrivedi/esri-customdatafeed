@@ -4,9 +4,33 @@ const {
   buildUpdateSql,
   buildDeleteSql,
   toGeoJSON,
+  toPgValue,
 } = require("../src/modules/editSql");
 
 describe("editSql", () => {
+  describe("toPgValue (Esri epoch-ms dates, v1.2.4)", () => {
+    const dates = new Set(["reported_at"]);
+    it("turns epoch ms (number or numeric string) into an ISO timestamp for date columns", () => {
+      expect(toPgValue("reported_at", 1720051200000, dates)).to.equal("2024-07-04T00:00:00.000Z");
+      expect(toPgValue("REPORTED_AT", " 1720051200000 ", dates)).to.equal("2024-07-04T00:00:00.000Z");
+      expect(toPgValue("reported_at", -2209161600000, dates)).to.equal("1899-12-30T00:00:00.000Z");
+    });
+    it("leaves null, ISO strings, other columns and junk unchanged", () => {
+      expect(toPgValue("reported_at", null, dates)).to.equal(null);
+      expect(toPgValue("reported_at", "2024-07-04T12:00:00Z", dates)).to.equal("2024-07-04T12:00:00Z");
+      expect(toPgValue("mmsi", 538007123, dates)).to.equal(538007123);
+      expect(toPgValue("reported_at", 1e20, dates)).to.equal(1e20); // out of Date range
+      expect(toPgValue("reported_at", 5, undefined)).to.equal(5);
+    });
+    it("is applied by buildInsertSql and buildUpdateSql", () => {
+      const ins = buildInsertSql("ais", "t", { reported_at: 0, name: "x" }, null, "geom", "objectid", 4326, dates);
+      expect(ins.params).to.deep.equal(["1970-01-01T00:00:00.000Z", "x"]);
+      const up = buildUpdateSql("ais", "t", { objectid: 3, reported_at: 0 }, null, "geom", "objectid", 4326, dates);
+      expect(up.params).to.deep.equal(["1970-01-01T00:00:00.000Z", 3]);
+      expect(buildInsertSql("ais", "t", { reported_at: 0 }, null, "geom", "objectid").params).to.deep.equal([0]); // no set: unchanged
+    });
+  });
+
   describe("toGeoJSON", () => {
     it("should pass through GeoJSON Point", () => {
       const geom = { type: "Point", coordinates: [-77.0, 38.9] };
